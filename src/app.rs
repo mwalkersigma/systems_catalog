@@ -1,10 +1,29 @@
+mod actions;
+mod ui;
+
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{anyhow, Result};
-use eframe::egui::{self, Align, Layout, RichText};
+use eframe::egui::{Color32, Pos2, Rect, Vec2};
 
 use crate::db::Repository;
 use crate::models::{SystemLink, SystemRecord, TechItem};
+
+const MAP_NODE_SIZE: Vec2 = Vec2::new(170.0, 64.0);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineTerminator {
+    None,
+    Arrow,
+    FilledArrow,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct LineStyle {
+    pub width: f32,
+    pub color: Color32,
+    pub terminator: LineTerminator,
+}
 
 /// Primary UI application state.
 ///
@@ -13,6 +32,7 @@ use crate::models::{SystemLink, SystemRecord, TechItem};
 pub struct SystemsCatalogApp {
     repo: Repository,
     systems: Vec<SystemRecord>,
+    all_links: Vec<SystemLink>,
     tech_catalog: Vec<TechItem>,
     selected_system_id: Option<i64>,
     selected_links: Vec<SystemLink>,
@@ -23,12 +43,31 @@ pub struct SystemsCatalogApp {
     new_system_name: String,
     new_system_description: String,
     new_system_parent_id: Option<i64>,
+    selected_system_parent_id: Option<i64>,
 
     new_link_target_id: Option<i64>,
     new_link_label: String,
+    selected_link_id_for_edit: Option<i64>,
+    edited_link_label: String,
 
     new_tech_name: String,
     selected_tech_id_for_assignment: Option<i64>,
+    selected_catalog_tech_id_for_edit: Option<i64>,
+    edited_tech_name: String,
+
+    map_positions: HashMap<i64, Pos2>,
+    map_link_drag_from: Option<i64>,
+    map_link_click_source: Option<i64>,
+    map_zoom: f32,
+    map_pan: Vec2,
+
+    show_add_system_modal: bool,
+    show_add_tech_modal: bool,
+    show_line_style_modal: bool,
+
+    parent_line_style: LineStyle,
+    interaction_line_style: LineStyle,
+    dimmed_line_opacity_percent: f32,
 
     status_message: String,
 }
@@ -38,6 +77,7 @@ impl SystemsCatalogApp {
         let mut app = Self {
             repo,
             systems: Vec::new(),
+            all_links: Vec::new(),
             tech_catalog: Vec::new(),
             selected_system_id: None,
             selected_links: Vec::new(),
@@ -47,10 +87,34 @@ impl SystemsCatalogApp {
             new_system_name: String::new(),
             new_system_description: String::new(),
             new_system_parent_id: None,
+            selected_system_parent_id: None,
             new_link_target_id: None,
             new_link_label: String::new(),
+            selected_link_id_for_edit: None,
+            edited_link_label: String::new(),
             new_tech_name: String::new(),
             selected_tech_id_for_assignment: None,
+            selected_catalog_tech_id_for_edit: None,
+            edited_tech_name: String::new(),
+            map_positions: HashMap::new(),
+            map_link_drag_from: None,
+            map_link_click_source: None,
+            map_zoom: 1.0,
+            map_pan: Vec2::ZERO,
+            show_add_system_modal: false,
+            show_add_tech_modal: false,
+            show_line_style_modal: false,
+            parent_line_style: LineStyle {
+                width: 1.0,
+                color: Color32::from_gray(90),
+                terminator: LineTerminator::Arrow,
+            },
+            interaction_line_style: LineStyle {
+                width: 1.5,
+                color: Color32::from_gray(140),
+                terminator: LineTerminator::FilledArrow,
+            },
+            dimmed_line_opacity_percent: 18.0,
             status_message: "Ready".to_owned(),
         };
 
@@ -60,7 +124,18 @@ impl SystemsCatalogApp {
 
     fn refresh_systems(&mut self) -> Result<()> {
         self.systems = self.repo.list_systems()?;
+        self.all_links = self.repo.list_links()?;
         self.tech_catalog = self.repo.list_tech_catalog()?;
+
+        self.map_positions
+            .retain(|system_id, _| self.systems.iter().any(|system| system.id == *system_id));
+
+        for system in &self.systems {
+            if let (Some(map_x), Some(map_y)) = (system.map_x, system.map_y) {
+                self.map_positions
+                    .insert(system.id, Pos2::new(map_x, map_y));
+            }
+        }
 
         if let Some(selected) = self.selected_system_id {
             let still_exists = self.systems.iter().any(|system| system.id == selected);
@@ -70,6 +145,9 @@ impl SystemsCatalogApp {
                 self.selected_system_tech.clear();
                 self.selected_cumulative_child_tech.clear();
                 self.note_text.clear();
+                self.selected_system_parent_id = None;
+                self.selected_link_id_for_edit = None;
+                self.edited_link_label.clear();
             }
         }
 
@@ -83,11 +161,52 @@ impl SystemsCatalogApp {
     fn load_selected_data(&mut self, system_id: i64) -> Result<()> {
         self.selected_links = self.repo.list_links_for_system(system_id)?;
         self.selected_system_tech = self.repo.list_tech_for_system(system_id)?;
+
+        if let Some(selected_link_id) = self.selected_link_id_for_edit {
+            let still_exists = self
+                .selected_links
+                .iter()
+                .any(|link| link.id == selected_link_id);
+            if !still_exists {
+                self.selected_link_id_for_edit = None;
+                self.edited_link_label.clear();
+            }
+        }
+
+        if self.selected_link_id_for_edit.is_none() {
+            if let Some(first_link) = self.selected_links.first() {
+                self.selected_link_id_for_edit = Some(first_link.id);
+                self.edited_link_label = first_link.label.clone();
+            }
+        }
+
+        if let Some(selected_catalog_tech_id) = self.selected_catalog_tech_id_for_edit {
+            let still_exists = self
+                .tech_catalog
+                .iter()
+                .any(|tech| tech.id == selected_catalog_tech_id);
+            if !still_exists {
+                self.selected_catalog_tech_id_for_edit = None;
+                self.edited_tech_name.clear();
+            }
+        }
+
+        if self.selected_catalog_tech_id_for_edit.is_none() {
+            if let Some(first_tech) = self.tech_catalog.first() {
+                self.selected_catalog_tech_id_for_edit = Some(first_tech.id);
+                self.edited_tech_name = first_tech.name.clone();
+            }
+        }
+
+        self.selected_system_parent_id = self
+            .systems
+            .iter()
+            .find(|system| system.id == system_id)
+            .and_then(|system| system.parent_id);
         self.note_text = self
             .repo
             .get_note(system_id)?
             .map(|note| {
-                // Touch both fields to make it clear notes carry identity + audit timestamp.
                 let _id = note.system_id;
                 let _updated = note.updated_at;
                 note.body
@@ -98,133 +217,9 @@ impl SystemsCatalogApp {
         Ok(())
     }
 
-    fn create_tech_item(&mut self) {
-        let name = self.new_tech_name.trim();
-        if name.is_empty() {
-            self.status_message = "Technology name is required".to_owned();
-            return;
-        }
-
-        let result = self
-            .repo
-            .create_tech_item(name)
-            .and_then(|_| self.refresh_systems());
-
-        match result {
-            Ok(_) => {
-                self.new_tech_name.clear();
-                self.status_message = "Technology saved to catalog".to_owned();
-            }
-            Err(error) => {
-                self.status_message = format!("Failed to save technology: {error}");
-            }
-        }
-    }
-
-    fn add_selected_tech_to_system(&mut self) {
-        let Some(system_id) = self.selected_system_id else {
-            self.status_message = "Select a system first".to_owned();
-            return;
-        };
-
-        let Some(tech_id) = self.selected_tech_id_for_assignment else {
-            self.status_message = "Select a technology to assign".to_owned();
-            return;
-        };
-
-        let result = self
-            .repo
-            .add_tech_to_system(system_id, tech_id)
-            .and_then(|_| self.load_selected_data(system_id));
-
-        match result {
-            Ok(_) => {
-                self.selected_tech_id_for_assignment = None;
-                self.status_message = "Technology assigned to system".to_owned();
-            }
-            Err(error) => {
-                self.status_message = format!("Failed to assign technology: {error}");
-            }
-        }
-    }
-
     fn selected_system(&self) -> Option<&SystemRecord> {
         self.selected_system_id
             .and_then(|id| self.systems.iter().find(|system| system.id == id))
-    }
-
-    fn create_system(&mut self) {
-        let name = self.new_system_name.trim();
-        if name.is_empty() {
-            self.status_message = "System name is required".to_owned();
-            return;
-        }
-
-        let description = self.new_system_description.trim();
-
-        let result = self
-            .repo
-            .create_system(name, description, self.new_system_parent_id)
-            .and_then(|_| self.refresh_systems());
-
-        match result {
-            Ok(_) => {
-                self.new_system_name.clear();
-                self.new_system_description.clear();
-                self.new_system_parent_id = None;
-                self.status_message = "System created".to_owned();
-            }
-            Err(error) => {
-                self.status_message = format!("Failed to create system: {error}");
-            }
-        }
-    }
-
-    fn save_note(&mut self) {
-        let Some(system_id) = self.selected_system_id else {
-            self.status_message = "Select a system first".to_owned();
-            return;
-        };
-
-        match self.repo.upsert_note(system_id, self.note_text.trim()) {
-            Ok(_) => self.status_message = "Notes saved".to_owned(),
-            Err(error) => self.status_message = format!("Failed to save notes: {error}"),
-        }
-    }
-
-    fn create_link(&mut self) {
-        let Some(source_id) = self.selected_system_id else {
-            self.status_message = "Select a system to create an interaction".to_owned();
-            return;
-        };
-
-        let Some(target_id) = self.new_link_target_id else {
-            self.status_message = "Select a target system".to_owned();
-            return;
-        };
-
-        if source_id == target_id {
-            self.status_message = "A system cannot link to itself".to_owned();
-            return;
-        }
-
-        let label = self.new_link_label.trim();
-
-        let result = self
-            .repo
-            .create_link(source_id, target_id, label)
-            .and_then(|_| self.load_selected_data(source_id));
-
-        match result {
-            Ok(_) => {
-                self.new_link_label.clear();
-                self.new_link_target_id = None;
-                self.status_message = "Interaction saved".to_owned();
-            }
-            Err(error) => {
-                self.status_message = format!("Failed to create interaction: {error}");
-            }
-        }
     }
 
     fn system_name_by_id(&self, id: i64) -> String {
@@ -233,6 +228,14 @@ impl SystemsCatalogApp {
             .find(|system| system.id == id)
             .map(|system| system.name.clone())
             .unwrap_or_else(|| format!("Unknown ({id})"))
+    }
+
+    fn tech_name_by_id(&self, id: i64) -> String {
+        self.tech_catalog
+            .iter()
+            .find(|tech| tech.id == id)
+            .map(|tech| tech.name.clone())
+            .unwrap_or_else(|| format!("Unknown tech ({id})"))
     }
 
     fn hierarchy_rows(&self) -> Vec<(usize, i64, String)> {
@@ -274,6 +277,15 @@ impl SystemsCatalogApp {
         }
     }
 
+    fn ensure_valid_selected_parent_selection(&mut self) {
+        if let Some(parent_id) = self.selected_system_parent_id {
+            let exists = self.systems.iter().any(|system| system.id == parent_id);
+            if !exists {
+                self.selected_system_parent_id = None;
+            }
+        }
+    }
+
     fn ensure_valid_link_target_selection(&mut self) {
         if let Some(target_id) = self.new_link_target_id {
             let exists = self.systems.iter().any(|system| system.id == target_id);
@@ -292,12 +304,24 @@ impl SystemsCatalogApp {
         }
     }
 
-    fn tech_name_by_id(&self, id: i64) -> String {
-        self.tech_catalog
-            .iter()
-            .find(|tech| tech.id == id)
-            .map(|tech| tech.name.clone())
-            .unwrap_or_else(|| format!("Unknown tech ({id})"))
+    fn ensure_valid_selected_link(&mut self) {
+        if let Some(link_id) = self.selected_link_id_for_edit {
+            let exists = self.selected_links.iter().any(|link| link.id == link_id);
+            if !exists {
+                self.selected_link_id_for_edit = None;
+                self.edited_link_label.clear();
+            }
+        }
+    }
+
+    fn ensure_valid_selected_catalog_tech(&mut self) {
+        if let Some(tech_id) = self.selected_catalog_tech_id_for_edit {
+            let exists = self.tech_catalog.iter().any(|tech| tech.id == tech_id);
+            if !exists {
+                self.selected_catalog_tech_id_for_edit = None;
+                self.edited_tech_name.clear();
+            }
+        }
     }
 
     fn cumulative_child_tech_names(&self, parent_system_id: i64) -> Vec<String> {
@@ -340,10 +364,99 @@ impl SystemsCatalogApp {
         }
     }
 
+    fn would_create_parent_cycle(&self, system_id: i64, candidate_parent_id: i64) -> bool {
+        if system_id == candidate_parent_id {
+            return true;
+        }
+
+        let mut current_parent = self
+            .systems
+            .iter()
+            .find(|system| system.id == candidate_parent_id)
+            .and_then(|system| system.parent_id);
+
+        while let Some(parent_id) = current_parent {
+            if parent_id == system_id {
+                return true;
+            }
+
+            current_parent = self
+                .systems
+                .iter()
+                .find(|system| system.id == parent_id)
+                .and_then(|system| system.parent_id);
+        }
+
+        false
+    }
+
+    fn ensure_map_positions(&mut self) {
+        let mut index = 0usize;
+        let columns = 4usize;
+
+        for system in &self.systems {
+            if self.map_positions.contains_key(&system.id) {
+                continue;
+            }
+
+            let col = index % columns;
+            let row = index / columns;
+            let x = 24.0 + (col as f32 * (MAP_NODE_SIZE.x + 24.0));
+            let y = 24.0 + (row as f32 * (MAP_NODE_SIZE.y + 20.0));
+
+            self.map_positions.insert(system.id, Pos2::new(x, y));
+            index += 1;
+        }
+    }
+
+    fn clamp_node_position(&self, map_rect: Rect, position: Pos2, node_size: Vec2) -> Pos2 {
+        let max_x = (map_rect.width() / self.map_zoom) - node_size.x - 8.0;
+        let max_y = (map_rect.height() / self.map_zoom) - node_size.y - 8.0;
+
+        Pos2::new(
+            position.x.clamp(8.0, max_x.max(8.0)),
+            position.y.clamp(8.0, max_y.max(8.0)),
+        )
+    }
+
+    fn persist_map_position(&mut self, system_id: i64, position: Pos2) {
+        if let Err(error) =
+            self.repo
+                .update_system_position(system_id, position.x as f64, position.y as f64)
+        {
+            self.status_message = format!("Failed to persist map position: {error}");
+        }
+    }
+
+    fn reset_map_layout(&mut self) {
+        let result = self.repo.clear_system_positions().and_then(|_| {
+            self.map_positions.clear();
+            self.ensure_map_positions();
+
+            for (system_id, position) in self.map_positions.clone() {
+                self.repo.update_system_position(
+                    system_id,
+                    position.x as f64,
+                    position.y as f64,
+                )?;
+            }
+
+            Ok(())
+        });
+
+        match result {
+            Ok(_) => self.status_message = "Map layout reset".to_owned(),
+            Err(error) => self.status_message = format!("Failed to reset map layout: {error}"),
+        }
+    }
+
     fn validate_before_render(&mut self) -> Result<()> {
         self.ensure_valid_parent_selection();
+        self.ensure_valid_selected_parent_selection();
         self.ensure_valid_link_target_selection();
         self.ensure_valid_tech_selection();
+        self.ensure_valid_selected_link();
+        self.ensure_valid_selected_catalog_tech();
 
         if self.systems.is_empty() && self.selected_system_id.is_some() {
             return Err(anyhow!(
@@ -352,215 +465,5 @@ impl SystemsCatalogApp {
         }
 
         Ok(())
-    }
-}
-
-impl eframe::App for SystemsCatalogApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        if let Err(error) = self.validate_before_render() {
-            self.status_message = format!("State warning: {error}");
-        }
-
-        egui::TopBottomPanel::top("header_panel").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.heading("Systems Catalog");
-                ui.label("Track systems, dependencies, and notes");
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.label(RichText::new(&self.status_message).italics());
-                });
-            });
-        });
-
-        egui::SidePanel::left("systems_panel")
-            .default_width(320.0)
-            .show(ctx, |ui| {
-                ui.heading("Systems");
-
-                if ui.button("Refresh").clicked() {
-                    if let Err(error) = self.refresh_systems() {
-                        self.status_message = format!("Refresh failed: {error}");
-                    }
-                }
-
-                ui.separator();
-                ui.label("Add system");
-                ui.text_edit_singleline(&mut self.new_system_name);
-                ui.add(egui::TextEdit::multiline(&mut self.new_system_description).desired_rows(3));
-
-                let selected_parent_label = self
-                    .new_system_parent_id
-                    .map(|id| self.system_name_by_id(id))
-                    .unwrap_or_else(|| "No parent (root system)".to_owned());
-
-                egui::ComboBox::from_label("Parent")
-                    .selected_text(selected_parent_label)
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(
-                            &mut self.new_system_parent_id,
-                            None,
-                            "No parent (root system)",
-                        );
-                        for system in &self.systems {
-                            ui.selectable_value(
-                                &mut self.new_system_parent_id,
-                                Some(system.id),
-                                system.name.as_str(),
-                            );
-                        }
-                    });
-
-                if ui.button("Create system").clicked() {
-                    self.create_system();
-                }
-
-                ui.separator();
-                ui.label("Tech catalog");
-                ui.text_edit_singleline(&mut self.new_tech_name);
-                if ui.button("Save technology").clicked() {
-                    self.create_tech_item();
-                }
-
-                ui.separator();
-                ui.label("Hierarchy");
-
-                let rows = self.hierarchy_rows();
-                if rows.is_empty() {
-                    ui.label("No systems yet. Create your first system above.");
-                } else {
-                    egui::ScrollArea::vertical().show(ui, |ui| {
-                        for (depth, system_id, name) in rows {
-                            let indent = "  ".repeat(depth);
-                            let row_text = format!("{indent}• {name}");
-                            let selected = self.selected_system_id == Some(system_id);
-
-                            if ui.selectable_label(selected, row_text).clicked() {
-                                self.selected_system_id = Some(system_id);
-                                if let Err(error) = self.load_selected_data(system_id) {
-                                    self.status_message =
-                                        format!("Failed to load selection: {error}");
-                                }
-                            }
-                        }
-                    });
-                }
-            });
-
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("Details");
-
-            let Some(system) = self.selected_system().cloned() else {
-                ui.label("Select a system from the left panel.");
-                return;
-            };
-
-            ui.label(RichText::new(system.name.clone()).strong());
-            if let Some(parent_id) = system.parent_id {
-                ui.label(format!("Parent: {}", self.system_name_by_id(parent_id)));
-            } else {
-                ui.label("Parent: none (root)");
-            }
-
-            ui.separator();
-            ui.label("Description");
-            ui.label(system.description.clone());
-
-            ui.separator();
-            ui.label("Interactions");
-
-            let selected_target_label = self
-                .new_link_target_id
-                .map(|id| self.system_name_by_id(id))
-                .unwrap_or_else(|| "Select target system".to_owned());
-
-            egui::ComboBox::from_label("Target")
-                .selected_text(selected_target_label)
-                .show_ui(ui, |ui| {
-                    for candidate in self
-                        .systems
-                        .iter()
-                        .filter(|candidate| candidate.id != system.id)
-                    {
-                        ui.selectable_value(
-                            &mut self.new_link_target_id,
-                            Some(candidate.id),
-                            candidate.name.as_str(),
-                        );
-                    }
-                });
-
-            ui.text_edit_singleline(&mut self.new_link_label);
-            if ui.button("Add interaction").clicked() {
-                self.create_link();
-            }
-
-            if self.selected_links.is_empty() {
-                ui.label("No interactions recorded.");
-            } else {
-                egui::ScrollArea::vertical()
-                    .max_height(150.0)
-                    .show(ui, |ui| {
-                        for link in &self.selected_links {
-                            let source = self.system_name_by_id(link.source_system_id);
-                            let target = self.system_name_by_id(link.target_system_id);
-                            let label = if link.label.trim().is_empty() {
-                                "(no label)".to_owned()
-                            } else {
-                                link.label.clone()
-                            };
-
-                            ui.label(format!("#{:03} {source} → {target} : {label}", link.id));
-                        }
-                    });
-            }
-
-            ui.separator();
-            ui.label("System tech stack");
-
-            let selected_tech_label = self
-                .selected_tech_id_for_assignment
-                .map(|id| self.tech_name_by_id(id))
-                .unwrap_or_else(|| "Select technology".to_owned());
-
-            egui::ComboBox::from_label("Technology")
-                .selected_text(selected_tech_label)
-                .show_ui(ui, |ui| {
-                    for tech in &self.tech_catalog {
-                        ui.selectable_value(
-                            &mut self.selected_tech_id_for_assignment,
-                            Some(tech.id),
-                            tech.name.as_str(),
-                        );
-                    }
-                });
-
-            if ui.button("Assign technology to system").clicked() {
-                self.add_selected_tech_to_system();
-            }
-
-            if self.selected_system_tech.is_empty() {
-                ui.label("No technologies assigned to this system.");
-            } else {
-                for tech in &self.selected_system_tech {
-                    ui.label(format!("• {}", tech.name));
-                }
-            }
-
-            ui.separator();
-            ui.label("Cumulative child tech stack (deduped)");
-            if self.selected_cumulative_child_tech.is_empty() {
-                ui.label("No child-system technologies found.");
-            } else {
-                for tech_name in &self.selected_cumulative_child_tech {
-                    ui.label(format!("• {tech_name}"));
-                }
-            }
-
-            ui.separator();
-            ui.label("Notes");
-            ui.add(egui::TextEdit::multiline(&mut self.note_text).desired_rows(12));
-            if ui.button("Save notes").clicked() {
-                self.save_note();
-            }
-        });
     }
 }

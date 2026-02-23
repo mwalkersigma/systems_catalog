@@ -14,7 +14,9 @@ The code is split into small modules with clear responsibilities:
 
 - `src/models.rs` — data shapes (`SystemRecord`, `SystemLink`, `SystemNote`)
 - `src/db.rs` — repository/data access layer and schema initialization
-- `src/app.rs` — GUI state + rendering logic
+- `src/app.rs` — shared app state, synchronization logic, and helpers
+- `src/app/actions.rs` — user actions (create system, assign tech, save notes, create links)
+- `src/app/ui.rs` — rendering for list/details and visual map-link mode
 - `src/main.rs` — startup/bootstrap
 
 ### TypeScript mental model
@@ -33,6 +35,8 @@ The code is split into small modules with clear responsibilities:
 - Maintain a reusable tech catalog (create once, reuse across systems)
 - Assign tech stack items to each system
 - Show cumulative deduplicated tech used by all child/descendant systems
+- Visual map-link mode (mind-map style): drag system nodes, Shift+drag between nodes to create links
+- Two-way sync: map and list view reflect the same underlying systems and links
 - Write and save notes for each system
 
 ## Data model

@@ -32,6 +32,8 @@ impl Repository {
                 name TEXT NOT NULL UNIQUE,
                 description TEXT NOT NULL DEFAULT '',
                 parent_id INTEGER NULL,
+                map_x REAL NULL,
+                map_y REAL NULL,
                 FOREIGN KEY(parent_id) REFERENCES systems(id) ON DELETE SET NULL
             );
 
@@ -67,13 +69,39 @@ impl Repository {
             "#,
         )?;
 
+        self.ensure_systems_position_columns()?;
+
         Ok(())
+    }
+
+    fn ensure_systems_position_columns(&self) -> Result<()> {
+        if !self.table_has_column("systems", "map_x")? {
+            self.conn
+                .execute("ALTER TABLE systems ADD COLUMN map_x REAL NULL", [])?;
+        }
+
+        if !self.table_has_column("systems", "map_y")? {
+            self.conn
+                .execute("ALTER TABLE systems ADD COLUMN map_y REAL NULL", [])?;
+        }
+
+        Ok(())
+    }
+
+    fn table_has_column(&self, table_name: &str, column_name: &str) -> Result<bool> {
+        let query = format!("PRAGMA table_info({table_name})");
+        let mut stmt = self.conn.prepare(&query)?;
+        let columns = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        Ok(columns.iter().any(|column| column == column_name))
     }
 
     pub fn list_systems(&self) -> Result<Vec<SystemRecord>> {
         let mut stmt = self.conn.prepare(
             r#"
-            SELECT id, name, description, parent_id
+            SELECT id, name, description, parent_id, map_x, map_y
             FROM systems
             ORDER BY LOWER(name);
             "#,
@@ -86,6 +114,8 @@ impl Repository {
                     name: row.get(1)?,
                     description: row.get(2)?,
                     parent_id: row.get(3)?,
+                    map_x: row.get(4)?,
+                    map_y: row.get(5)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -105,6 +135,56 @@ impl Repository {
             VALUES (?1, ?2, ?3)
             "#,
             params![name, description, parent_id],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn update_system_parent(&self, system_id: i64, parent_id: Option<i64>) -> Result<()> {
+        self.conn.execute(
+            r#"
+            UPDATE systems
+            SET parent_id = ?2
+            WHERE id = ?1
+            "#,
+            params![system_id, parent_id],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn delete_system(&self, system_id: i64) -> Result<()> {
+        self.conn.execute(
+            r#"
+            DELETE FROM systems
+            WHERE id = ?1
+            "#,
+            params![system_id],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn update_system_position(&self, system_id: i64, map_x: f64, map_y: f64) -> Result<()> {
+        self.conn.execute(
+            r#"
+            UPDATE systems
+            SET map_x = ?2, map_y = ?3
+            WHERE id = ?1
+            "#,
+            params![system_id, map_x, map_y],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn clear_system_positions(&self) -> Result<()> {
+        self.conn.execute(
+            r#"
+            UPDATE systems
+            SET map_x = NULL, map_y = NULL
+            "#,
+            [],
         )?;
 
         Ok(())
@@ -148,6 +228,54 @@ impl Repository {
             params![source_system_id, target_system_id, label],
         )?;
         Ok(())
+    }
+
+    pub fn update_link_label(&self, link_id: i64, label: &str) -> Result<()> {
+        self.conn.execute(
+            r#"
+            UPDATE links
+            SET label = ?2
+            WHERE id = ?1
+            "#,
+            params![link_id, label],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn delete_link(&self, link_id: i64) -> Result<()> {
+        self.conn.execute(
+            r#"
+            DELETE FROM links
+            WHERE id = ?1
+            "#,
+            params![link_id],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn list_links(&self) -> Result<Vec<SystemLink>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT id, source_system_id, target_system_id, label
+            FROM links
+            ORDER BY id DESC
+            "#,
+        )?;
+
+        let links = stmt
+            .query_map([], |row| {
+                Ok(SystemLink {
+                    id: row.get(0)?,
+                    source_system_id: row.get(1)?,
+                    target_system_id: row.get(2)?,
+                    label: row.get(3)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        Ok(links)
     }
 
     pub fn get_note(&self, system_id: i64) -> Result<Option<SystemNote>> {
@@ -221,11 +349,48 @@ impl Repository {
         Ok(())
     }
 
+    pub fn update_tech_item(&self, tech_id: i64, name: &str) -> Result<()> {
+        self.conn.execute(
+            r#"
+            UPDATE tech_catalog
+            SET name = ?2
+            WHERE id = ?1
+            "#,
+            params![tech_id, name],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn delete_tech_item(&self, tech_id: i64) -> Result<()> {
+        self.conn.execute(
+            r#"
+            DELETE FROM tech_catalog
+            WHERE id = ?1
+            "#,
+            params![tech_id],
+        )?;
+
+        Ok(())
+    }
+
     pub fn add_tech_to_system(&self, system_id: i64, tech_id: i64) -> Result<()> {
         self.conn.execute(
             r#"
             INSERT INTO system_tech (system_id, tech_id)
             VALUES (?1, ?2)
+            "#,
+            params![system_id, tech_id],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn remove_tech_from_system(&self, system_id: i64, tech_id: i64) -> Result<()> {
+        self.conn.execute(
+            r#"
+            DELETE FROM system_tech
+            WHERE system_id = ?1 AND tech_id = ?2
             "#,
             params![system_id, tech_id],
         )?;
