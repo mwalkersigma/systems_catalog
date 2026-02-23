@@ -7,6 +7,75 @@ use eframe::egui::{
 use crate::app::{LineStyle, LineTerminator, SystemsCatalogApp, MAP_NODE_SIZE};
 
 impl SystemsCatalogApp {
+    fn disclosure_icon(is_collapsed: bool) -> &'static str {
+        if is_collapsed {
+            "+"
+        } else {
+            "-"
+        }
+    }
+
+    fn map_node_size_for(&self, label: &str) -> Vec2 {
+        let estimated_width = (label.chars().count() as f32 * 8.0) + 46.0;
+        Vec2::new(
+            estimated_width.clamp(MAP_NODE_SIZE.x, 360.0),
+            MAP_NODE_SIZE.y,
+        )
+    }
+
+    fn brighten_color(&self, color: Color32, percent: f32) -> Color32 {
+        if percent <= 100.0 {
+            return color;
+        }
+
+        let factor = ((percent - 100.0) / 100.0).clamp(0.0, 1.0);
+        let brighten = |channel: u8| -> u8 {
+            let value = channel as f32 + ((255.0 - channel as f32) * factor);
+            value.round().clamp(0.0, 255.0) as u8
+        };
+
+        Color32::from_rgba_unmultiplied(
+            brighten(color.r()),
+            brighten(color.g()),
+            brighten(color.b()),
+            color.a(),
+        )
+    }
+
+    fn system_line_override_color(&self, system_id: i64) -> Option<Color32> {
+        self.systems
+            .iter()
+            .find(|system| system.id == system_id)
+            .and_then(|system| {
+                system
+                    .line_color_override
+                    .as_deref()
+                    .and_then(Self::color_from_setting_value)
+            })
+    }
+
+    fn parent_line_style_for(&self, parent_system_id: i64) -> LineStyle {
+        let mut style = self.parent_line_style;
+        if let Some(override_color) = self.system_line_override_color(parent_system_id) {
+            style.color = override_color;
+        }
+        style
+    }
+
+    fn interaction_line_style_for(
+        &self,
+        source_system_id: i64,
+        target_system_id: i64,
+    ) -> LineStyle {
+        let mut style = self.interaction_line_style;
+        if let Some(override_color) = self.system_line_override_color(source_system_id) {
+            style.color = override_color;
+        } else if let Some(override_color) = self.system_line_override_color(target_system_id) {
+            style.color = override_color;
+        }
+        style
+    }
+
     fn rect_edge_point(rect: Rect, direction_from_center: Vec2) -> Pos2 {
         let center = rect.center();
         let half_width = (rect.width() * 0.5 - 2.0).max(1.0);
@@ -51,21 +120,22 @@ impl SystemsCatalogApp {
         Self::rect_edge_point(from_rect, direction)
     }
 
-    fn line_color(&self, style: LineStyle, dimmed: bool) -> Color32 {
-        if !dimmed {
-            return style.color;
+    fn line_color(&self, style: LineStyle, dimmed: bool, boosted: bool) -> Color32 {
+        let mut color = style.color;
+
+        if boosted {
+            color = self.brighten_color(color, self.selected_line_brightness_percent);
         }
 
-        let dimmed_alpha = ((style.color.a() as f32) * (self.dimmed_line_opacity_percent / 100.0))
+        if !dimmed {
+            return color;
+        }
+
+        let dimmed_alpha = ((color.a() as f32) * (self.dimmed_line_opacity_percent / 100.0))
             .round()
             .clamp(0.0, 255.0) as u8;
 
-        Color32::from_rgba_unmultiplied(
-            style.color.r(),
-            style.color.g(),
-            style.color.b(),
-            dimmed_alpha,
-        )
+        Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), dimmed_alpha)
     }
 
     fn draw_directed_connection(
@@ -75,6 +145,7 @@ impl SystemsCatalogApp {
         to: Pos2,
         style: LineStyle,
         dimmed: bool,
+        boosted: bool,
     ) {
         let direction = to - from;
         let distance = direction.length();
@@ -82,7 +153,7 @@ impl SystemsCatalogApp {
             return;
         }
 
-        let color = self.line_color(style, dimmed);
+        let color = self.line_color(style, dimmed, boosted);
         let stroke = Stroke::new(style.width * self.map_zoom.clamp(0.8, 1.8), color);
         let unit = direction / distance;
         let normal = Vec2::new(-unit.y, unit.x);
@@ -237,43 +308,85 @@ impl SystemsCatalogApp {
             .resizable(true)
             .open(&mut open)
             .show(ctx, |ui| {
+                let mut changed = false;
+
                 ui.label("Parent connections");
-                ui.add(
-                    egui::Slider::new(&mut self.parent_line_style.width, 0.5..=6.0).text("Width"),
-                );
+                changed |= ui
+                    .checkbox(&mut self.show_parent_lines, "Show parent lines")
+                    .changed();
+                changed |= ui
+                    .add(
+                        egui::Slider::new(&mut self.parent_line_style.width, 0.5..=6.0)
+                            .text("Width"),
+                    )
+                    .changed();
                 ui.horizontal(|ui| {
                     ui.label("Color");
-                    ui.color_edit_button_srgba(&mut self.parent_line_style.color);
+                    changed |= ui
+                        .color_edit_button_srgba(&mut self.parent_line_style.color)
+                        .changed();
                 });
+
+                let old_parent_terminator = self.parent_line_style.terminator;
                 Self::render_terminator_combo(
                     ui,
                     "parent_terminator",
                     "Terminator",
                     &mut self.parent_line_style.terminator,
                 );
+                if old_parent_terminator != self.parent_line_style.terminator {
+                    changed = true;
+                }
 
                 ui.separator();
                 ui.label("Interaction connections");
-                ui.add(
-                    egui::Slider::new(&mut self.interaction_line_style.width, 0.5..=6.0)
-                        .text("Width"),
-                );
+                changed |= ui
+                    .checkbox(&mut self.show_interaction_lines, "Show interaction lines")
+                    .changed();
+                changed |= ui
+                    .add(
+                        egui::Slider::new(&mut self.interaction_line_style.width, 0.5..=6.0)
+                            .text("Width"),
+                    )
+                    .changed();
                 ui.horizontal(|ui| {
                     ui.label("Color");
-                    ui.color_edit_button_srgba(&mut self.interaction_line_style.color);
+                    changed |= ui
+                        .color_edit_button_srgba(&mut self.interaction_line_style.color)
+                        .changed();
                 });
+
+                let old_interaction_terminator = self.interaction_line_style.terminator;
                 Self::render_terminator_combo(
                     ui,
                     "interaction_terminator",
                     "Terminator",
                     &mut self.interaction_line_style.terminator,
                 );
+                if old_interaction_terminator != self.interaction_line_style.terminator {
+                    changed = true;
+                }
 
                 ui.separator();
-                ui.add(
-                    egui::Slider::new(&mut self.dimmed_line_opacity_percent, 0.0..=100.0)
-                        .text("Dimmed opacity %"),
-                );
+                changed |= ui
+                    .add(
+                        egui::Slider::new(&mut self.dimmed_line_opacity_percent, 0.0..=100.0)
+                            .text("Dimmed opacity %"),
+                    )
+                    .changed();
+                changed |= ui
+                    .add(
+                        egui::Slider::new(
+                            &mut self.selected_line_brightness_percent,
+                            100.0..=220.0,
+                        )
+                        .text("Selected line brightness %"),
+                    )
+                    .changed();
+
+                if changed {
+                    self.settings_dirty = true;
+                }
 
                 if ui.button("Close").clicked() {
                     self.show_line_style_modal = false;
@@ -300,23 +413,36 @@ impl SystemsCatalogApp {
                 }
             }
             ui.label(RichText::new("Hierarchy").weak());
+
+            if ui.small_button("Show all").clicked() {
+                self.clear_subset_visibility();
+            }
         });
 
         ui.separator();
 
-        let rows = self.hierarchy_rows();
+        let rows = self.visible_hierarchy_rows();
         if rows.is_empty() {
             ui.label("No systems yet.");
         } else {
             egui::ScrollArea::vertical().show(ui, |ui| {
-                for (depth, system_id, name) in rows {
+                for (depth, system_id, name, has_children, is_collapsed) in rows {
                     let indent = "  ".repeat(depth);
                     let row_text = format!("{indent}• {name}");
                     let selected = self.selected_system_id == Some(system_id);
 
-                    if ui.selectable_label(selected, row_text).clicked() {
-                        self.select_system(system_id);
-                    }
+                    ui.horizontal(|ui| {
+                        if has_children {
+                            let icon = Self::disclosure_icon(is_collapsed);
+                            if ui.small_button(icon).clicked() {
+                                self.on_disclosure_click(system_id);
+                            }
+                        }
+
+                        if ui.selectable_label(selected, row_text).clicked() {
+                            self.select_system(system_id);
+                        }
+                    });
                 }
             });
         }
@@ -414,6 +540,36 @@ impl SystemsCatalogApp {
             if ui.button("Delete system").clicked() {
                 self.delete_selected_system();
                 return;
+            }
+        });
+
+        ui.separator();
+        ui.label("Per-system line color override");
+        ui.horizontal(|ui| {
+            let mut use_override = self.selected_system_line_color_override.is_some();
+            if ui.checkbox(&mut use_override, "Enable override").changed() {
+                if use_override {
+                    self.selected_system_line_color_override =
+                        Some(self.interaction_line_style.color);
+                } else {
+                    self.selected_system_line_color_override = None;
+                }
+            }
+
+            if let Some(mut color) = self.selected_system_line_color_override {
+                if ui.color_edit_button_srgba(&mut color).changed() {
+                    self.selected_system_line_color_override = Some(color);
+                }
+            }
+        });
+
+        ui.horizontal(|ui| {
+            if ui.button("Save line override").clicked() {
+                self.update_selected_system_line_color_override();
+            }
+            if ui.button("Clear override").clicked() {
+                self.selected_system_line_color_override = None;
+                self.update_selected_system_line_color_override();
             }
         });
 
@@ -529,7 +685,7 @@ impl SystemsCatalogApp {
             ui.label("No technologies assigned to this system.");
         } else {
             let selected_system_tech = self.selected_system_tech.clone();
-            ui.horizontal_wrapped(|ui| {
+            ui.vertical(|ui| {
                 for tech in selected_system_tech {
                     ui.group(|ui| {
                         ui.horizontal(|ui| {
@@ -548,7 +704,7 @@ impl SystemsCatalogApp {
         if self.selected_cumulative_child_tech.is_empty() {
             ui.label("No child-system technologies found.");
         } else {
-            ui.horizontal_wrapped(|ui| {
+            ui.vertical(|ui| {
                 for tech_name in &self.selected_cumulative_child_tech {
                     ui.label(format!("• {tech_name}"));
                 }
@@ -572,14 +728,17 @@ impl SystemsCatalogApp {
 
             if ui.small_button("-").clicked() {
                 self.map_zoom = (self.map_zoom - 0.1).max(0.5);
+                self.settings_dirty = true;
             }
 
             if ui.small_button("+").clicked() {
                 self.map_zoom = (self.map_zoom + 0.1).min(2.5);
+                self.settings_dirty = true;
             }
 
             if ui.small_button("Reset zoom").clicked() {
                 self.map_zoom = 1.0;
+                self.settings_dirty = true;
             }
 
             if ui.small_button("Reset layout").clicked() {
@@ -588,6 +747,11 @@ impl SystemsCatalogApp {
 
             if ui.small_button("Reset pan").clicked() {
                 self.map_pan = Vec2::ZERO;
+                self.settings_dirty = true;
+            }
+
+            if ui.small_button("Show all").clicked() {
+                self.clear_subset_visibility();
             }
 
             ui.label(format!("{:.0}%", self.map_zoom * 100.0));
@@ -605,12 +769,14 @@ impl SystemsCatalogApp {
         if pan_mode_active {
             let pointer_delta = ui.input(|input| input.pointer.delta());
             self.map_pan += pointer_delta;
+            self.settings_dirty = true;
         }
 
         let wheel_delta_y = ui.input(|input| input.smooth_scroll_delta.y);
         if wheel_delta_y.abs() > f32::EPSILON {
             let zoom_step = (wheel_delta_y / 400.0).clamp(-0.15, 0.15);
             self.map_zoom = (self.map_zoom + zoom_step).clamp(0.5, 2.5);
+            self.settings_dirty = true;
         }
 
         painter.rect_filled(map_rect, 6.0, Color32::from_gray(24));
@@ -619,8 +785,6 @@ impl SystemsCatalogApp {
         self.ensure_map_positions();
 
         let zoom = self.map_zoom;
-        let node_size = MAP_NODE_SIZE;
-        let node_size_screen = node_size * zoom;
         let pan = self.map_pan;
         let to_screen = |local: Pos2| -> Pos2 {
             Pos2::new(
@@ -629,79 +793,100 @@ impl SystemsCatalogApp {
             )
         };
 
+        let visible_ids = self.visible_system_ids();
+        let visible_systems = self
+            .systems
+            .iter()
+            .filter(|system| visible_ids.contains(&system.id))
+            .cloned()
+            .collect::<Vec<_>>();
+
         let mut node_rects: HashMap<i64, Rect> = HashMap::new();
-        for system in &self.systems {
+        for system in &visible_systems {
             if let Some(local_position) = self.map_positions.get(&system.id) {
+                let node_size_screen = self.map_node_size_for(system.name.as_str()) * zoom;
                 let rect = Rect::from_min_size(to_screen(*local_position), node_size_screen);
                 node_rects.insert(system.id, rect);
             }
         }
 
-        if map_response.clicked() && !space_down {
-            let clicked_on_node = ui
-                .input(|input| input.pointer.interact_pos())
-                .map(|pointer_pos| node_rects.values().any(|rect| rect.contains(pointer_pos)))
-                .unwrap_or(false);
+        let selected_id = self.selected_system_id;
 
-            if !clicked_on_node {
-                self.selected_system_id = None;
-                self.selected_links.clear();
-                self.selected_system_tech.clear();
-                self.selected_cumulative_child_tech.clear();
-                self.note_text.clear();
-                self.selected_system_parent_id = None;
-                self.selected_link_id_for_edit = None;
-                self.edited_link_label.clear();
-                self.map_link_click_source = None;
-                self.status_message = "Selection cleared".to_owned();
+        if self.show_parent_lines {
+            for system in &visible_systems {
+                let Some(parent_id) = system.parent_id else {
+                    continue;
+                };
+
+                let Some(parent_rect) = node_rects.get(&parent_id) else {
+                    continue;
+                };
+                let Some(child_rect) = node_rects.get(&system.id) else {
+                    continue;
+                };
+
+                let dimmed = selected_id
+                    .map(|id| id != parent_id && id != system.id)
+                    .unwrap_or(false);
+                let boosted = selected_id
+                    .map(|id| id == parent_id || id == system.id)
+                    .unwrap_or(false);
+
+                let parent_style = self.parent_line_style_for(parent_id);
+
+                let (from, to) = self.card_to_card_endpoints(*parent_rect, *child_rect);
+
+                self.draw_directed_connection(
+                    &painter,
+                    from,
+                    to,
+                    parent_style,
+                    dimmed,
+                    selected_id.is_some() && boosted,
+                );
             }
         }
 
-        let selected_id = self.selected_system_id;
+        if self.show_interaction_lines {
+            for link in &self.all_links {
+                let Some(source_rect) = node_rects.get(&link.source_system_id) else {
+                    continue;
+                };
+                let Some(target_rect) = node_rects.get(&link.target_system_id) else {
+                    continue;
+                };
 
-        for system in &self.systems {
-            let Some(parent_id) = system.parent_id else {
-                continue;
-            };
+                let dimmed = selected_id
+                    .map(|id| id != link.source_system_id && id != link.target_system_id)
+                    .unwrap_or(false);
+                let boosted = selected_id
+                    .map(|id| id == link.source_system_id || id == link.target_system_id)
+                    .unwrap_or(false);
 
-            let Some(parent_rect) = node_rects.get(&parent_id) else {
-                continue;
-            };
-            let Some(child_rect) = node_rects.get(&system.id) else {
-                continue;
-            };
+                let interaction_style =
+                    self.interaction_line_style_for(link.source_system_id, link.target_system_id);
 
-            let dimmed = selected_id
-                .map(|id| id != parent_id && id != system.id)
-                .unwrap_or(false);
+                let (from, to) = self.card_to_card_endpoints(*source_rect, *target_rect);
 
-            let (from, to) = self.card_to_card_endpoints(*parent_rect, *child_rect);
-
-            self.draw_directed_connection(&painter, from, to, self.parent_line_style, dimmed);
+                self.draw_directed_connection(
+                    &painter,
+                    from,
+                    to,
+                    interaction_style,
+                    dimmed,
+                    selected_id.is_some() && boosted,
+                );
+            }
         }
 
-        for link in &self.all_links {
-            let Some(source_rect) = node_rects.get(&link.source_system_id) else {
-                continue;
-            };
-            let Some(target_rect) = node_rects.get(&link.target_system_id) else {
-                continue;
-            };
-
-            let dimmed = selected_id
-                .map(|id| id != link.source_system_id && id != link.target_system_id)
-                .unwrap_or(false);
-
-            let (from, to) = self.card_to_card_endpoints(*source_rect, *target_rect);
-
-            self.draw_directed_connection(&painter, from, to, self.interaction_line_style, dimmed);
-        }
-
-        let systems_snapshot = self.systems.clone();
+        let systems_snapshot = visible_systems.clone();
         for system in systems_snapshot {
             let Some(current_local_position) = self.map_positions.get(&system.id).copied() else {
                 continue;
             };
+
+            let node_size = self.map_node_size_for(system.name.as_str());
+            let node_size_screen = node_size * zoom;
 
             let node_rect =
                 Rect::from_min_size(to_screen(current_local_position), node_size_screen);
@@ -776,6 +961,43 @@ impl SystemsCatalogApp {
                 Color32::from_gray(230),
             );
 
+            let has_children = self
+                .systems
+                .iter()
+                .any(|candidate| candidate.parent_id == Some(system.id));
+            if has_children {
+                let disclosure_radius = (9.0 * self.map_zoom).clamp(7.0, 15.0);
+                let disclosure_center = Pos2::new(
+                    node_rect.left() + (disclosure_radius + 2.0),
+                    node_rect.top() + (disclosure_radius + 2.0),
+                );
+                let disclosure_rect =
+                    Rect::from_center_size(disclosure_center, Vec2::splat(disclosure_radius * 2.0));
+                let disclosure_response = ui.interact(
+                    disclosure_rect,
+                    ui.id().with(("map_disclosure", system.id)),
+                    Sense::click(),
+                );
+
+                let collapsed = self.collapsed_system_ids.contains(&system.id);
+                painter.circle_filled(
+                    disclosure_center,
+                    disclosure_radius,
+                    Color32::from_gray(105),
+                );
+                painter.text(
+                    disclosure_center,
+                    egui::Align2::CENTER_CENTER,
+                    Self::disclosure_icon(collapsed),
+                    FontId::proportional((14.0 * self.map_zoom).clamp(10.0, 18.0)),
+                    Color32::from_gray(20),
+                );
+
+                if disclosure_response.clicked() {
+                    self.on_disclosure_click(system.id);
+                }
+            }
+
             if self.selected_system_id == Some(system.id) {
                 let plus_radius = (10.0 * self.map_zoom).clamp(8.0, 16.0);
                 let plus_center = Pos2::new(
@@ -825,6 +1047,7 @@ impl SystemsCatalogApp {
                         pointer_pos,
                         self.interaction_line_style,
                         false,
+                        false,
                     );
                 }
             }
@@ -846,6 +1069,18 @@ impl SystemsCatalogApp {
                 }
             }
         }
+
+        if map_response.clicked() && !space_down {
+            let clicked_on_node = ui
+                .input(|input| input.pointer.interact_pos())
+                .map(|pointer_pos| node_rects.values().any(|rect| rect.contains(pointer_pos)))
+                .unwrap_or(false);
+
+            if !clicked_on_node {
+                self.clear_selection();
+                self.status_message = "Selection cleared".to_owned();
+            }
+        }
     }
 }
 
@@ -858,6 +1093,7 @@ impl eframe::App for SystemsCatalogApp {
         egui::TopBottomPanel::top("header_panel").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 if ui.button("Add System").clicked() {
+                    self.new_system_parent_id = self.selected_system_id;
                     self.show_add_system_modal = true;
                 }
                 if ui.button("Add Technology").clicked() {
@@ -899,5 +1135,6 @@ impl eframe::App for SystemsCatalogApp {
         self.render_add_system_modal(ctx);
         self.render_add_tech_modal(ctx);
         self.render_line_style_modal(ctx);
+        self.save_ui_settings_if_dirty();
     }
 }

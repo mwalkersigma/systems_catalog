@@ -34,6 +34,7 @@ impl Repository {
                 parent_id INTEGER NULL,
                 map_x REAL NULL,
                 map_y REAL NULL,
+                line_color_override TEXT NULL,
                 FOREIGN KEY(parent_id) REFERENCES systems(id) ON DELETE SET NULL
             );
 
@@ -66,10 +67,16 @@ impl Repository {
                 FOREIGN KEY(system_id) REFERENCES systems(id) ON DELETE CASCADE,
                 FOREIGN KEY(tech_id) REFERENCES tech_catalog(id) ON DELETE CASCADE
             );
+
+            CREATE TABLE IF NOT EXISTS app_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
             "#,
         )?;
 
         self.ensure_systems_position_columns()?;
+        self.ensure_system_line_color_override_column()?;
 
         Ok(())
     }
@@ -88,6 +95,17 @@ impl Repository {
         Ok(())
     }
 
+    fn ensure_system_line_color_override_column(&self) -> Result<()> {
+        if !self.table_has_column("systems", "line_color_override")? {
+            self.conn.execute(
+                "ALTER TABLE systems ADD COLUMN line_color_override TEXT NULL",
+                [],
+            )?;
+        }
+
+        Ok(())
+    }
+
     fn table_has_column(&self, table_name: &str, column_name: &str) -> Result<bool> {
         let query = format!("PRAGMA table_info({table_name})");
         let mut stmt = self.conn.prepare(&query)?;
@@ -101,7 +119,7 @@ impl Repository {
     pub fn list_systems(&self) -> Result<Vec<SystemRecord>> {
         let mut stmt = self.conn.prepare(
             r#"
-            SELECT id, name, description, parent_id, map_x, map_y
+            SELECT id, name, description, parent_id, map_x, map_y, line_color_override
             FROM systems
             ORDER BY LOWER(name);
             "#,
@@ -116,6 +134,7 @@ impl Repository {
                     parent_id: row.get(3)?,
                     map_x: row.get(4)?,
                     map_y: row.get(5)?,
+                    line_color_override: row.get(6)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -185,6 +204,23 @@ impl Repository {
             SET map_x = NULL, map_y = NULL
             "#,
             [],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn update_system_line_color_override(
+        &self,
+        system_id: i64,
+        line_color_override: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            r#"
+            UPDATE systems
+            SET line_color_override = ?2
+            WHERE id = ?1
+            "#,
+            params![system_id, line_color_override],
         )?;
 
         Ok(())
@@ -419,5 +455,35 @@ impl Repository {
             .collect::<rusqlite::Result<Vec<_>>>()?;
 
         Ok(technologies)
+    }
+
+    pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {
+        self.conn.execute(
+            r#"
+            INSERT INTO app_settings (key, value)
+            VALUES (?1, ?2)
+            ON CONFLICT(key)
+            DO UPDATE SET value = excluded.value
+            "#,
+            params![key, value],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn get_setting(&self, key: &str) -> Result<Option<String>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT value
+            FROM app_settings
+            WHERE key = ?1
+            "#,
+        )?;
+
+        let value = stmt
+            .query_row(params![key], |row| row.get::<_, String>(0))
+            .optional()?;
+
+        Ok(value)
     }
 }

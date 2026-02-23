@@ -9,6 +9,7 @@ pub struct SystemRecord {
     pub parent_id: Option<i64>,
     pub map_x: Option<f32>,
     pub map_y: Option<f32>,
+    pub line_color_override: Option<String>,
 }
 
 /// Directed interaction from one system to another.

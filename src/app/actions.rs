@@ -1,6 +1,30 @@
 use crate::app::SystemsCatalogApp;
 
 impl SystemsCatalogApp {
+    pub(super) fn update_selected_system_line_color_override(&mut self) {
+        let Some(system_id) = self.selected_system_id else {
+            self.status_message = "Select a system first".to_owned();
+            return;
+        };
+
+        let override_value = self
+            .selected_system_line_color_override
+            .map(Self::color_to_setting_value);
+
+        let result = self
+            .repo
+            .update_system_line_color_override(system_id, override_value.as_deref())
+            .and_then(|_| self.refresh_systems())
+            .and_then(|_| self.load_selected_data(system_id));
+
+        match result {
+            Ok(_) => self.status_message = "System line color override updated".to_owned(),
+            Err(error) => {
+                self.status_message = format!("Failed to update line color override: {error}")
+            }
+        }
+    }
+
     pub(super) fn update_selected_link(&mut self) {
         let Some(link_id) = self.selected_link_id_for_edit else {
             self.status_message = "Select an interaction first".to_owned();
