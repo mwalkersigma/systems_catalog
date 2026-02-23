@@ -1,0 +1,9 @@
+[package]
+name = "systems_catalog"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0"
+eframe = { version = "0.27.2", default-features = false, features = ["default_fonts", "glow"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
