@@ -80,6 +80,7 @@ pub struct SystemsCatalogApp {
     new_tech_color: Option<Color32>,
     new_tech_display_priority: i64,
     system_tech_ids_by_system: HashMap<i64, Vec<i64>>,
+    fast_add_selected_catalog_tech_on_map: bool,
 
     map_positions: HashMap<i64, Pos2>,
     map_link_drag_from: Option<i64>,
@@ -92,6 +93,7 @@ pub struct SystemsCatalogApp {
     snap_to_grid: bool,
     map_zoom: f32,
     map_pan: Vec2,
+    map_last_view_center_local: Option<Pos2>,
     collapsed_system_ids: HashSet<i64>,
 
     show_add_system_modal: bool,
@@ -163,6 +165,7 @@ impl SystemsCatalogApp {
             new_tech_color: None,
             new_tech_display_priority: 0,
             system_tech_ids_by_system: HashMap::new(),
+            fast_add_selected_catalog_tech_on_map: false,
             map_positions: HashMap::new(),
             map_link_drag_from: None,
             map_link_click_source: None,
@@ -174,6 +177,7 @@ impl SystemsCatalogApp {
             snap_to_grid: false,
             map_zoom: 1.0,
             map_pan: Vec2::ZERO,
+            map_last_view_center_local: None,
             collapsed_system_ids: HashSet::new(),
             show_add_system_modal: false,
             focus_add_system_name_on_open: false,
@@ -755,6 +759,10 @@ impl SystemsCatalogApp {
                 .collect();
         }
 
+        if let Some(value) = self.repo.get_setting("fast_add_selected_catalog_tech_on_map")? {
+            self.fast_add_selected_catalog_tech_on_map = value == "true";
+        }
+
         Ok(())
     }
 
@@ -849,6 +857,15 @@ impl SystemsCatalogApp {
                     &self.recent_catalog_paths.join("\n"),
                 )?;
             }
+
+            self.repo.set_setting(
+                "fast_add_selected_catalog_tech_on_map",
+                if self.fast_add_selected_catalog_tech_on_map {
+                    "true"
+                } else {
+                    "false"
+                },
+            )?;
 
             Ok(())
         })();
@@ -1092,6 +1109,48 @@ impl SystemsCatalogApp {
         }
 
         None
+    }
+
+    fn find_next_free_root_spawn_position(&self) -> Pos2 {
+        let fallback = Pos2::new(24.0, 24.0);
+        let center = self.map_last_view_center_local.unwrap_or(fallback);
+        let anchor = Pos2::new(
+            center.x - (MAP_NODE_SIZE.x * 0.5),
+            center.y - (MAP_NODE_SIZE.y * 0.5),
+        );
+
+        let step_x = MAP_NODE_SIZE.x + 24.0;
+        let step_y = MAP_NODE_SIZE.y + 20.0;
+
+        for radius in 0..=120_i32 {
+            for row in -radius..=radius {
+                for col in -radius..=radius {
+                    if radius > 0
+                        && row.abs() != radius
+                        && col.abs() != radius
+                    {
+                        continue;
+                    }
+
+                    let candidate = Pos2::new(
+                        anchor.x + (col as f32 * step_x),
+                        anchor.y + (row as f32 * step_y),
+                    );
+                    let clamped = self.clamp_node_position(Rect::NOTHING, candidate, MAP_NODE_SIZE);
+
+                    let overlaps = self.map_positions.values().any(|existing| {
+                        (existing.x - clamped.x).abs() < (MAP_NODE_SIZE.x * 0.75)
+                            && (existing.y - clamped.y).abs() < (MAP_NODE_SIZE.y * 0.75)
+                    });
+
+                    if !overlaps {
+                        return clamped;
+                    }
+                }
+            }
+        }
+
+        self.clamp_node_position(Rect::NOTHING, anchor, MAP_NODE_SIZE)
     }
 
     fn clamp_node_position(&self, map_rect: Rect, position: Pos2, node_size: Vec2) -> Pos2 {

@@ -470,7 +470,13 @@ impl SystemsCatalogApp {
 
                 self.refresh_systems()?;
 
-                if let Some(spawn_position) = self.find_next_free_child_spawn_position(parent_id) {
+                let spawn_position = if parent_id.is_some() {
+                    self.find_next_free_child_spawn_position(parent_id)
+                } else {
+                    Some(self.find_next_free_root_spawn_position())
+                };
+
+                if let Some(spawn_position) = spawn_position {
                     self.map_positions.insert(new_id, spawn_position);
                     self.persist_map_position(new_id, spawn_position);
                 }
@@ -495,6 +501,46 @@ impl SystemsCatalogApp {
         }
     }
 
+    pub(super) fn fast_add_selected_catalog_tech_to_system(&mut self, system_id: i64) {
+        let Some(tech_id) = self.selected_catalog_tech_id_for_edit else {
+            self.status_message = "Select a technology in Tech Catalog first".to_owned();
+            return;
+        };
+
+        let already_assigned = self
+            .system_tech_ids_by_system
+            .get(&system_id)
+            .map(|tech_ids| tech_ids.contains(&tech_id))
+            .unwrap_or(false);
+
+        if already_assigned {
+            return;
+        }
+
+        let tech_name = self.tech_name_by_id(tech_id);
+        let system_name = self.system_name_by_id(system_id);
+
+        let result = self
+            .repo
+            .add_tech_to_system(system_id, tech_id)
+            .and_then(|_| self.refresh_systems())
+            .and_then(|_| {
+                if self.selected_system_id == Some(system_id) {
+                    self.load_selected_data(system_id)?;
+                }
+                Ok(())
+            });
+
+        match result {
+            Ok(_) => {
+                self.status_message =
+                    format!("Added technology '{tech_name}' to '{system_name}'");
+            }
+            Err(error) => {
+                self.status_message = format!("Failed to fast-assign technology: {error}");
+            }
+        }
+    }
     pub(super) fn create_link(&mut self) {
         let Some(source_id) = self.selected_system_id else {
             self.status_message = "Select a system to create an interaction".to_owned();

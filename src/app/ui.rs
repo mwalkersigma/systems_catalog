@@ -1019,6 +1019,15 @@ impl SystemsCatalogApp {
             SidebarTab::TechCatalog => {
                 ui.heading("Tech Catalog");
                 ui.label("Technologies");
+                if ui
+                    .checkbox(
+                        &mut self.fast_add_selected_catalog_tech_on_map,
+                        "Fast add selected tech on map click",
+                    )
+                    .changed()
+                {
+                    self.settings_dirty = true;
+                }
                 let mut clicked_tech_id: Option<i64> = None;
                 let editor_reserved_height = 220.0;
                 let list_height = (ui.available_height() - editor_reserved_height).max(300.0);
@@ -1542,6 +1551,12 @@ impl SystemsCatalogApp {
 
         let zoom = self.map_zoom;
         let pan = self.map_pan;
+
+        self.map_last_view_center_local = Some(Pos2::new(
+            ((map_rect.center().x - map_rect.left() - pan.x) / zoom).clamp(0.0, MAP_WORLD_SIZE.x),
+            ((map_rect.center().y - map_rect.top() - pan.y) / zoom).clamp(0.0, MAP_WORLD_SIZE.y),
+        ));
+
         let to_screen = |local: Pos2| -> Pos2 {
             Pos2::new(
                 map_rect.left() + pan.x + (local.x * zoom),
@@ -1773,6 +1788,11 @@ impl SystemsCatalogApp {
                         self.create_link_between(source_id, system.id, "");
                         self.map_link_click_source = None;
                     }
+                } else if self.fast_add_selected_catalog_tech_on_map {
+                    self.select_system(system.id);
+                    self.selected_map_system_ids.clear();
+                    self.selected_map_system_ids.insert(system.id);
+                    self.fast_add_selected_catalog_tech_to_system(system.id);
                 } else {
                     self.select_system(system.id);
                     self.selected_map_system_ids.clear();
