@@ -11,6 +11,7 @@ use crate::models::{SystemLink, SystemNote, SystemRecord, TechItem};
 
 const MAP_NODE_SIZE: Vec2 = Vec2::new(170.0, 64.0);
 const MAP_WORLD_SIZE: Vec2 = Vec2::new(12000.0, 12000.0);
+const MAP_GRID_SPACING: f32 = 48.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LineTerminator {
@@ -30,6 +31,12 @@ pub struct LineStyle {
 pub enum SidebarTab {
     Systems,
     TechCatalog,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChildSpawnMode {
+    RightOfPrevious,
+    BelowPrevious,
 }
 
 /// Primary UI application state.
@@ -53,6 +60,7 @@ pub struct SystemsCatalogApp {
     new_system_name: String,
     new_system_description: String,
     new_system_parent_id: Option<i64>,
+    new_child_spawn_mode: ChildSpawnMode,
     new_system_tech_id_for_assignment: Option<i64>,
     new_system_assigned_tech_ids: HashSet<i64>,
     selected_system_parent_id: Option<i64>,
@@ -140,6 +148,7 @@ impl SystemsCatalogApp {
             new_system_name: String::new(),
             new_system_description: String::new(),
             new_system_parent_id: None,
+            new_child_spawn_mode: ChildSpawnMode::RightOfPrevious,
             new_system_tech_id_for_assignment: None,
             new_system_assigned_tech_ids: HashSet::new(),
             selected_system_parent_id: None,
@@ -633,6 +642,21 @@ impl SystemsCatalogApp {
         }
     }
 
+    fn child_spawn_mode_to_setting_value(mode: ChildSpawnMode) -> &'static str {
+        match mode {
+            ChildSpawnMode::RightOfPrevious => "right_of_previous",
+            ChildSpawnMode::BelowPrevious => "below_previous",
+        }
+    }
+
+    fn child_spawn_mode_from_setting_value(value: &str) -> Option<ChildSpawnMode> {
+        match value {
+            "right_of_previous" => Some(ChildSpawnMode::RightOfPrevious),
+            "below_previous" => Some(ChildSpawnMode::BelowPrevious),
+            _ => None,
+        }
+    }
+
     fn terminator_from_setting_value(value: &str) -> Option<LineTerminator> {
         match value {
             "none" => Some(LineTerminator::None),
@@ -763,6 +787,12 @@ impl SystemsCatalogApp {
             self.fast_add_selected_catalog_tech_on_map = value == "true";
         }
 
+        if let Some(value) = self.repo.get_setting("new_child_spawn_mode")? {
+            if let Some(parsed) = Self::child_spawn_mode_from_setting_value(&value) {
+                self.new_child_spawn_mode = parsed;
+            }
+        }
+
         Ok(())
     }
 
@@ -865,6 +895,11 @@ impl SystemsCatalogApp {
                 } else {
                     "false"
                 },
+            )?;
+
+            self.repo.set_setting(
+                "new_child_spawn_mode",
+                Self::child_spawn_mode_to_setting_value(self.new_child_spawn_mode),
             )?;
 
             Ok(())
@@ -1066,6 +1101,25 @@ impl SystemsCatalogApp {
         false
     }
 
+    fn system_and_ancestor_ids(&self, system_id: i64) -> HashSet<i64> {
+        let mut result = HashSet::new();
+        let mut current = Some(system_id);
+
+        while let Some(id) = current {
+            if !result.insert(id) {
+                break;
+            }
+
+            current = self
+                .systems
+                .iter()
+                .find(|system| system.id == id)
+                .and_then(|system| system.parent_id);
+        }
+
+        result
+    }
+
     fn ensure_map_positions(&mut self) {
         let mut index = 0usize;
         let columns = 4usize;
@@ -1090,25 +1144,54 @@ impl SystemsCatalogApp {
 
         let step_x = MAP_NODE_SIZE.x + 24.0;
         let step_y = MAP_NODE_SIZE.y + 20.0;
-        for row_offset in 1..=200 {
-            for col_offset in 0..=200 {
-                let candidate = Pos2::new(
-                    parent_position.x + (step_x * col_offset as f32),
-                    parent_position.y + (step_y * row_offset as f32),
-                );
 
-                let overlaps = self.map_positions.values().any(|existing| {
-                    (existing.x - candidate.x).abs() < (MAP_NODE_SIZE.x * 0.75)
-                        && (existing.y - candidate.y).abs() < (MAP_NODE_SIZE.y * 0.75)
-                });
+        let previous_child_position = parent_id.and_then(|id| {
+            self.systems
+                .iter()
+                .filter(|system| system.parent_id == Some(id))
+                .filter_map(|system| self.map_positions.get(&system.id).copied())
+                .max_by(|left, right| {
+                    if (left.y - right.y).abs() <= f32::EPSILON {
+                        left.x
+                            .partial_cmp(&right.x)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    } else {
+                        left.y
+                            .partial_cmp(&right.y)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    }
+                })
+        });
 
-                if !overlaps {
-                    return Some(candidate);
+        let base = previous_child_position.unwrap_or(parent_position);
+        let preferred = match self.new_child_spawn_mode {
+            ChildSpawnMode::RightOfPrevious => Pos2::new(base.x + step_x, base.y),
+            ChildSpawnMode::BelowPrevious => Pos2::new(base.x, base.y + step_y),
+        };
+
+        for primary_offset in 0..=220 {
+            for secondary_offset in 0..=220 {
+                let (dx, dy) = match self.new_child_spawn_mode {
+                    ChildSpawnMode::RightOfPrevious => (
+                        primary_offset as f32 * step_x,
+                        secondary_offset as f32 * step_y,
+                    ),
+                    ChildSpawnMode::BelowPrevious => (
+                        secondary_offset as f32 * step_x,
+                        primary_offset as f32 * step_y,
+                    ),
+                };
+
+                let candidate = Pos2::new(preferred.x + dx, preferred.y + dy);
+                let snapped = self.snap_spawn_position_to_grid(candidate, MAP_NODE_SIZE);
+
+                if !self.spawn_position_overlaps(snapped) {
+                    return Some(snapped);
                 }
             }
         }
 
-        None
+        Some(self.snap_spawn_position_to_grid(preferred, MAP_NODE_SIZE))
     }
 
     fn find_next_free_root_spawn_position(&self) -> Pos2 {
@@ -1136,21 +1219,31 @@ impl SystemsCatalogApp {
                         anchor.x + (col as f32 * step_x),
                         anchor.y + (row as f32 * step_y),
                     );
-                    let clamped = self.clamp_node_position(Rect::NOTHING, candidate, MAP_NODE_SIZE);
+                    let snapped = self.snap_spawn_position_to_grid(candidate, MAP_NODE_SIZE);
 
-                    let overlaps = self.map_positions.values().any(|existing| {
-                        (existing.x - clamped.x).abs() < (MAP_NODE_SIZE.x * 0.75)
-                            && (existing.y - clamped.y).abs() < (MAP_NODE_SIZE.y * 0.75)
-                    });
-
-                    if !overlaps {
-                        return clamped;
+                    if !self.spawn_position_overlaps(snapped) {
+                        return snapped;
                     }
                 }
             }
         }
 
-        self.clamp_node_position(Rect::NOTHING, anchor, MAP_NODE_SIZE)
+        self.snap_spawn_position_to_grid(anchor, MAP_NODE_SIZE)
+    }
+
+    fn snap_spawn_position_to_grid(&self, position: Pos2, node_size: Vec2) -> Pos2 {
+        let snapped = Pos2::new(
+            (position.x / MAP_GRID_SPACING).round() * MAP_GRID_SPACING,
+            (position.y / MAP_GRID_SPACING).round() * MAP_GRID_SPACING,
+        );
+        self.clamp_node_position(Rect::NOTHING, snapped, node_size)
+    }
+
+    fn spawn_position_overlaps(&self, position: Pos2) -> bool {
+        self.map_positions.values().any(|existing| {
+            (existing.x - position.x).abs() < (MAP_NODE_SIZE.x * 0.75)
+                && (existing.y - position.y).abs() < (MAP_NODE_SIZE.y * 0.75)
+        })
     }
 
     fn clamp_node_position(&self, map_rect: Rect, position: Pos2, node_size: Vec2) -> Pos2 {

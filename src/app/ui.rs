@@ -7,7 +7,8 @@ use eframe::egui::{
 use rfd::FileDialog;
 
 use crate::app::{
-    LineStyle, LineTerminator, SidebarTab, SystemsCatalogApp, MAP_NODE_SIZE, MAP_WORLD_SIZE,
+    ChildSpawnMode, LineStyle, LineTerminator, SidebarTab, SystemsCatalogApp, MAP_NODE_SIZE,
+    MAP_WORLD_SIZE,
 };
 
 const MAP_GRID_SPACING: f32 = 48.0;
@@ -552,6 +553,35 @@ impl SystemsCatalogApp {
                             );
                         }
                     });
+
+                ui.horizontal(|ui| {
+                    ui.label("Child placement");
+                    egui::ComboBox::from_id_source("new_child_spawn_mode")
+                        .selected_text(match self.new_child_spawn_mode {
+                            ChildSpawnMode::RightOfPrevious => "Right of previous",
+                            ChildSpawnMode::BelowPrevious => "Below previous",
+                        })
+                        .show_ui(ui, |ui| {
+                            let right_changed = ui
+                                .selectable_value(
+                                    &mut self.new_child_spawn_mode,
+                                    ChildSpawnMode::RightOfPrevious,
+                                    "Right of previous",
+                                )
+                                .changed();
+                            let below_changed = ui
+                                .selectable_value(
+                                    &mut self.new_child_spawn_mode,
+                                    ChildSpawnMode::BelowPrevious,
+                                    "Below previous",
+                                )
+                                .changed();
+
+                            if right_changed || below_changed {
+                                self.settings_dirty = true;
+                            }
+                        });
+                });
 
                 ui.separator();
                 ui.label("Assign technologies (optional)");
@@ -1783,11 +1813,15 @@ impl SystemsCatalogApp {
             );
 
             if response.clicked() {
+                let ctrl_held = ui.input(|input| input.modifiers.ctrl);
                 if let Some(source_id) = self.map_link_click_source {
                     if source_id != system.id {
                         self.create_link_between(source_id, system.id, "");
                         self.map_link_click_source = None;
                     }
+                } else if ctrl_held {
+                    self.select_system(system.id);
+                    self.selected_map_system_ids = self.system_and_ancestor_ids(system.id);
                 } else if self.fast_add_selected_catalog_tech_on_map {
                     self.select_system(system.id);
                     self.selected_map_system_ids.clear();
@@ -2113,6 +2147,8 @@ impl eframe::App for SystemsCatalogApp {
             ctx.input_mut(|input| input.consume_key(egui::Modifiers::ALT, egui::Key::N));
         let undo_map_change =
             ctx.input_mut(|input| input.consume_key(egui::Modifiers::CTRL, egui::Key::Z));
+        let delete_selected =
+            ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Delete));
 
         if open_add_system {
             self.open_add_system_modal_with_prefill(self.selected_system_id);
@@ -2125,6 +2161,10 @@ impl eframe::App for SystemsCatalogApp {
 
         if undo_map_change {
             self.undo_map_positions();
+        }
+
+        if delete_selected {
+            self.delete_selected_system();
         }
 
         if let Err(error) = self.validate_before_render() {
