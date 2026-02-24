@@ -28,7 +28,7 @@ pub struct SystemLink {
 /// TypeScript analogy: a one-to-one relation (`system_id`) that stores freeform text.
 #[derive(Debug, Clone)]
 pub struct SystemNote {
-    pub system_id: i64,
+    pub id: i64,
     pub body: String,
     pub updated_at: String,
 }
@@ -40,4 +40,6 @@ pub struct SystemNote {
 pub struct TechItem {
     pub id: i64,
     pub name: String,
+    pub description: Option<String>,
+    pub documentation_link: Option<String>,
 }

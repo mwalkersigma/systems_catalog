@@ -1,6 +1,144 @@
 use crate::app::SystemsCatalogApp;
 
 impl SystemsCatalogApp {
+    pub(super) fn select_note_for_edit(&mut self, note_id: i64) {
+        self.selected_note_id_for_edit = Some(note_id);
+        self.note_text = self
+            .selected_notes
+            .iter()
+            .find(|note| note.id == note_id)
+            .map(|note| note.body.clone())
+            .unwrap_or_default();
+    }
+
+    pub(super) fn create_note_for_selected_system(&mut self) {
+        let Some(system_id) = self.selected_system_id else {
+            self.status_message = "Select a system first".to_owned();
+            return;
+        };
+
+        match self.repo.create_note(system_id, "") {
+            Ok(_) => {
+                if let Err(error) = self.load_selected_data(system_id) {
+                    self.status_message = format!("Failed to load notes: {error}");
+                    return;
+                }
+
+                if let Some(first_note) = self.selected_notes.first() {
+                    self.select_note_for_edit(first_note.id);
+                }
+
+                self.status_message = "Note created".to_owned();
+            }
+            Err(error) => self.status_message = format!("Failed to create note: {error}"),
+        }
+    }
+
+    pub(super) fn save_note(&mut self) {
+        let Some(system_id) = self.selected_system_id else {
+            self.status_message = "Select a system first".to_owned();
+            return;
+        };
+
+        let result = if let Some(note_id) = self.selected_note_id_for_edit {
+            self.repo.update_note(note_id, self.note_text.trim())
+        } else {
+            self.repo.create_note(system_id, self.note_text.trim())
+        }
+        .and_then(|_| self.load_selected_data(system_id));
+
+        match result {
+            Ok(_) => self.status_message = "Note saved".to_owned(),
+            Err(error) => self.status_message = format!("Failed to save note: {error}"),
+        }
+    }
+
+    pub(super) fn delete_selected_note(&mut self) {
+        let Some(note_id) = self.selected_note_id_for_edit else {
+            self.status_message = "Select a note first".to_owned();
+            return;
+        };
+
+        let Some(system_id) = self.selected_system_id else {
+            self.status_message = "Select a system first".to_owned();
+            return;
+        };
+
+        let result = self
+            .repo
+            .delete_note(note_id)
+            .and_then(|_| self.load_selected_data(system_id));
+
+        match result {
+            Ok(_) => self.status_message = "Note deleted".to_owned(),
+            Err(error) => self.status_message = format!("Failed to delete note: {error}"),
+        }
+    }
+
+    pub(super) fn export_catalog(&mut self) {
+        let path = self.save_catalog_path.trim().to_owned();
+        if path.is_empty() {
+            self.status_message = "Save path is required".to_owned();
+            return;
+        }
+
+        match self.repo.export_catalog_to_path(path.as_str()) {
+            Ok(_) => {
+                self.push_recent_catalog_path(path.as_str());
+                self.load_catalog_path = path.clone();
+                self.show_save_catalog_modal = false;
+                self.status_message = format!("Catalog saved to {}", path);
+            }
+            Err(error) => self.status_message = format!("Failed to save catalog: {error}"),
+        }
+    }
+
+    pub(super) fn import_catalog(&mut self) {
+        let path = self.load_catalog_path.trim().to_owned();
+        if path.is_empty() {
+            self.status_message = "Load path is required".to_owned();
+            return;
+        }
+
+        let result = self
+            .repo
+            .import_catalog_from_path(path.as_str())
+            .and_then(|_| self.refresh_systems())
+            .and_then(|_| self.load_ui_settings());
+
+        match result {
+            Ok(_) => {
+                self.push_recent_catalog_path(path.as_str());
+                self.save_catalog_path = path.clone();
+                self.show_load_catalog_modal = false;
+                self.clear_selection();
+                self.status_message = format!("Catalog loaded from {}", path);
+            }
+            Err(error) => self.status_message = format!("Failed to load catalog: {error}"),
+        }
+    }
+
+    pub(super) fn new_catalog(&mut self) {
+        let result = self
+            .repo
+            .clear_catalog_data()
+            .and_then(|_| self.refresh_systems());
+
+        match result {
+            Ok(_) => {
+                self.clear_selection();
+                self.map_positions.clear();
+                self.show_add_system_modal = false;
+                self.show_add_tech_modal = false;
+                self.show_save_catalog_modal = false;
+                self.show_load_catalog_modal = false;
+                self.show_new_catalog_confirm_modal = false;
+                self.status_message = "Created new empty catalog".to_owned();
+            }
+            Err(error) => self.status_message = format!("Failed to create new catalog: {error}"),
+        }
+    }
+
     pub(super) fn update_selected_system_line_color_override(&mut self) {
         let Some(system_id) = self.selected_system_id else {
             self.status_message = "Select a system first".to_owned();
@@ -84,14 +222,20 @@ impl SystemsCatalogApp {
             return;
         }
 
-        let result = self.repo.update_tech_item(tech_id, name).and_then(|_| {
-            self.refresh_systems().and_then(|_| {
-                if let Some(system_id) = self.selected_system_id {
-                    self.load_selected_data(system_id)?;
-                }
-                Ok(())
-            })
-        });
+        let description = Self::text_to_option(&self.edited_tech_description);
+        let documentation_link = Self::text_to_option(&self.edited_tech_documentation_link);
+
+        let result = self
+            .repo
+            .update_tech_item(tech_id, name, description, documentation_link)
+            .and_then(|_| {
+                self.refresh_systems().and_then(|_| {
+                    if let Some(system_id) = self.selected_system_id {
+                        self.load_selected_data(system_id)?;
+                    }
+                    Ok(())
+                })
+            });
 
         match result {
             Ok(_) => self.status_message = "Technology updated".to_owned(),
@@ -193,14 +337,19 @@ impl SystemsCatalogApp {
             return;
         }
 
+        let description = Self::text_to_option(&self.new_tech_description);
+        let documentation_link = Self::text_to_option(&self.new_tech_documentation_link);
+
         let result = self
             .repo
-            .create_tech_item(name)
+            .create_tech_item(name, description, documentation_link)
             .and_then(|_| self.refresh_systems());
 
         match result {
             Ok(_) => {
                 self.new_tech_name.clear();
+                self.new_tech_description.clear();
+                self.new_tech_documentation_link.clear();
                 self.status_message = "Technology saved to catalog".to_owned();
             }
             Err(error) => {
@@ -243,35 +392,35 @@ impl SystemsCatalogApp {
             return;
         }
 
+        let parent_id = self.new_system_parent_id;
         let description = self.new_system_description.trim();
 
         let result = self
             .repo
-            .create_system(name, description, self.new_system_parent_id)
-            .and_then(|_| self.refresh_systems());
+            .create_system(name, description, parent_id)
+            .and_then(|new_id| {
+                self.refresh_systems()?;
+
+                if let Some(spawn_position) = self.find_next_free_child_spawn_position(parent_id) {
+                    self.map_positions.insert(new_id, spawn_position);
+                    self.persist_map_position(new_id, spawn_position);
+                }
+
+                Ok(())
+            });
 
         match result {
             Ok(_) => {
                 self.new_system_name.clear();
                 self.new_system_description.clear();
                 self.new_system_parent_id = None;
+                self.show_add_system_modal = false;
+                self.show_add_tech_modal = false;
                 self.status_message = "System created".to_owned();
             }
             Err(error) => {
                 self.status_message = format!("Failed to create system: {error}");
             }
-        }
-    }
-
-    pub(super) fn save_note(&mut self) {
-        let Some(system_id) = self.selected_system_id else {
-            self.status_message = "Select a system first".to_owned();
-            return;
-        };
-
-        match self.repo.upsert_note(system_id, self.note_text.trim()) {
-            Ok(_) => self.status_message = "Notes saved".to_owned(),
-            Err(error) => self.status_message = format!("Failed to save notes: {error}"),
         }
     }
 

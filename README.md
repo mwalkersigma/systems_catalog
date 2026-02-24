@@ -33,11 +33,14 @@ The code is split into small modules with clear responsibilities:
 - Select a system and view details
 - Create directed interactions (links) between systems
 - Maintain a reusable tech catalog (create once, reuse across systems)
+- Add optional technology description and documentation link
 - Assign tech stack items to each system
 - Show cumulative deduplicated tech used by all child/descendant systems
 - Visual map-link mode (mind-map style): drag system nodes, Shift+drag between nodes to create links
 - Two-way sync: map and list view reflect the same underlying systems and links
-- Write and save notes for each system
+- Create and manage multiple notes per system
+- Save catalog snapshots to a database file and load them back
+- Restore previous window size/position on startup
 
 ## Data model
 
@@ -55,12 +58,15 @@ SQLite tables:
   - `label`
   - unique pair (`source_system_id`, `target_system_id`)
 - `notes`
-  - `system_id` (PK + FK)
+  - `id` (PK)
+  - `system_id` (FK)
   - `body`
   - `updated_at`
 - `tech_catalog`
   - `id` (PK)
   - `name` (unique)
+  - `description` (nullable)
+  - `documentation_link` (nullable)
 - `system_tech`
   - `system_id` (FK)
   - `tech_id` (FK)
@@ -73,6 +79,30 @@ cargo run
 ```
 
 This creates/uses `systems_catalog.db` in the project root.
+
+## Compile / Build
+
+Debug build:
+
+```bash
+cargo build
+```
+
+Release build:
+
+```bash
+cargo build --release
+```
+
+Release binary output:
+
+- Windows: `target/release/systems_catalog.exe`
+- macOS/Linux: `target/release/systems_catalog`
+
+Windows note:
+
+- The release executable is built as a GUI app (no extra console window).
+- An application icon is embedded into the `.exe`.
 
 ## Quality checks
 

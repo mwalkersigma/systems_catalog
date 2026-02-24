@@ -7,9 +7,10 @@ use anyhow::{anyhow, Result};
 use eframe::egui::{Color32, Pos2, Rect, Vec2};
 
 use crate::db::Repository;
-use crate::models::{SystemLink, SystemRecord, TechItem};
+use crate::models::{SystemLink, SystemNote, SystemRecord, TechItem};
 
 const MAP_NODE_SIZE: Vec2 = Vec2::new(170.0, 64.0);
+const MAP_WORLD_SIZE: Vec2 = Vec2::new(12000.0, 12000.0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LineTerminator {
@@ -25,6 +26,12 @@ pub struct LineStyle {
     pub terminator: LineTerminator,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SidebarTab {
+    Systems,
+    TechCatalog,
+}
+
 /// Primary UI application state.
 ///
 /// TypeScript analogy: this struct is similar to a React component's local state + service
@@ -38,6 +45,8 @@ pub struct SystemsCatalogApp {
     selected_links: Vec<SystemLink>,
     selected_system_tech: Vec<TechItem>,
     selected_cumulative_child_tech: Vec<String>,
+    selected_notes: Vec<SystemNote>,
+    selected_note_id_for_edit: Option<i64>,
     selected_system_line_color_override: Option<Color32>,
     note_text: String,
 
@@ -52,20 +61,42 @@ pub struct SystemsCatalogApp {
     edited_link_label: String,
 
     new_tech_name: String,
+    new_tech_description: String,
+    new_tech_documentation_link: String,
     selected_tech_id_for_assignment: Option<i64>,
     selected_catalog_tech_id_for_edit: Option<i64>,
+    systems_using_selected_catalog_tech: HashSet<i64>,
     edited_tech_name: String,
+    edited_tech_description: String,
+    edited_tech_documentation_link: String,
 
     map_positions: HashMap<i64, Pos2>,
     map_link_drag_from: Option<i64>,
     map_link_click_source: Option<i64>,
+    selected_map_system_ids: HashSet<i64>,
+    map_selection_start_screen: Option<Pos2>,
+    map_selection_end_screen: Option<Pos2>,
+    map_drag_started_on_node: bool,
+    map_undo_stack: Vec<HashMap<i64, Pos2>>,
+    snap_to_grid: bool,
     map_zoom: f32,
     map_pan: Vec2,
+    window_size: Vec2,
+    window_position: Option<Pos2>,
     collapsed_system_ids: HashSet<i64>,
 
     show_add_system_modal: bool,
+    focus_add_system_name_on_open: bool,
+    focus_add_tech_name_on_open: bool,
     show_add_tech_modal: bool,
     show_line_style_modal: bool,
+    show_save_catalog_modal: bool,
+    show_load_catalog_modal: bool,
+    show_new_catalog_confirm_modal: bool,
+    save_catalog_path: String,
+    load_catalog_path: String,
+    recent_catalog_paths: Vec<String>,
+    active_sidebar_tab: SidebarTab,
 
     parent_line_style: LineStyle,
     interaction_line_style: LineStyle,
@@ -89,6 +120,8 @@ impl SystemsCatalogApp {
             selected_links: Vec::new(),
             selected_system_tech: Vec::new(),
             selected_cumulative_child_tech: Vec::new(),
+            selected_notes: Vec::new(),
+            selected_note_id_for_edit: None,
             selected_system_line_color_override: None,
             note_text: String::new(),
             new_system_name: String::new(),
@@ -100,18 +133,40 @@ impl SystemsCatalogApp {
             selected_link_id_for_edit: None,
             edited_link_label: String::new(),
             new_tech_name: String::new(),
+            new_tech_description: String::new(),
+            new_tech_documentation_link: String::new(),
             selected_tech_id_for_assignment: None,
             selected_catalog_tech_id_for_edit: None,
+            systems_using_selected_catalog_tech: HashSet::new(),
             edited_tech_name: String::new(),
+            edited_tech_description: String::new(),
+            edited_tech_documentation_link: String::new(),
             map_positions: HashMap::new(),
             map_link_drag_from: None,
             map_link_click_source: None,
+            selected_map_system_ids: HashSet::new(),
+            map_selection_start_screen: None,
+            map_selection_end_screen: None,
+            map_drag_started_on_node: false,
+            map_undo_stack: Vec::new(),
+            snap_to_grid: false,
             map_zoom: 1.0,
             map_pan: Vec2::ZERO,
+            window_size: Vec2::new(1280.0, 820.0),
+            window_position: None,
             collapsed_system_ids: HashSet::new(),
             show_add_system_modal: false,
+            focus_add_system_name_on_open: false,
+            focus_add_tech_name_on_open: false,
             show_add_tech_modal: false,
             show_line_style_modal: false,
+            show_save_catalog_modal: false,
+            show_load_catalog_modal: false,
+            show_new_catalog_confirm_modal: false,
+            save_catalog_path: "systems_catalog_export.db".to_owned(),
+            load_catalog_path: "systems_catalog_export.db".to_owned(),
+            recent_catalog_paths: Vec::new(),
+            active_sidebar_tab: SidebarTab::Systems,
             parent_line_style: LineStyle {
                 width: 1.0,
                 color: Color32::from_gray(90),
@@ -139,6 +194,7 @@ impl SystemsCatalogApp {
         self.systems = self.repo.list_systems()?;
         self.all_links = self.repo.list_links()?;
         self.tech_catalog = self.repo.list_tech_catalog()?;
+        self.refresh_selected_tech_highlight();
 
         self.map_positions
             .retain(|system_id, _| self.systems.iter().any(|system| system.id == *system_id));
@@ -177,6 +233,7 @@ impl SystemsCatalogApp {
     fn load_selected_data(&mut self, system_id: i64) -> Result<()> {
         self.selected_links = self.repo.list_links_for_system(system_id)?;
         self.selected_system_tech = self.repo.list_tech_for_system(system_id)?;
+        self.selected_notes = self.repo.list_notes_for_system(system_id)?;
 
         if let Some(selected_link_id) = self.selected_link_id_for_edit {
             let still_exists = self
@@ -207,10 +264,17 @@ impl SystemsCatalogApp {
             }
         }
 
-        if self.selected_catalog_tech_id_for_edit.is_none() {
-            if let Some(first_tech) = self.tech_catalog.first() {
-                self.selected_catalog_tech_id_for_edit = Some(first_tech.id);
-                self.edited_tech_name = first_tech.name.clone();
+        if let Some(selected_catalog_tech_id) = self.selected_catalog_tech_id_for_edit {
+            if let Some(selected_tech) = self
+                .tech_catalog
+                .iter()
+                .find(|tech| tech.id == selected_catalog_tech_id)
+            {
+                self.edited_tech_name = selected_tech.name.clone();
+                self.edited_tech_description =
+                    selected_tech.description.clone().unwrap_or_default();
+                self.edited_tech_documentation_link =
+                    selected_tech.documentation_link.clone().unwrap_or_default();
             }
         }
 
@@ -219,13 +283,27 @@ impl SystemsCatalogApp {
             .iter()
             .find(|system| system.id == system_id)
             .and_then(|system| system.parent_id);
+        if let Some(selected_note_id) = self.selected_note_id_for_edit {
+            if !self
+                .selected_notes
+                .iter()
+                .any(|note| note.id == selected_note_id)
+            {
+                self.selected_note_id_for_edit = None;
+            }
+        }
+
+        if self.selected_note_id_for_edit.is_none() {
+            self.selected_note_id_for_edit = self.selected_notes.first().map(|note| note.id);
+        }
+
         self.note_text = self
-            .repo
-            .get_note(system_id)?
-            .map(|note| {
-                let _id = note.system_id;
-                let _updated = note.updated_at;
-                note.body
+            .selected_note_id_for_edit
+            .and_then(|note_id| {
+                self.selected_notes
+                    .iter()
+                    .find(|note| note.id == note_id)
+                    .map(|note| note.body.clone())
             })
             .unwrap_or_default();
 
@@ -240,6 +318,7 @@ impl SystemsCatalogApp {
                     .as_deref()
                     .and_then(Self::color_from_setting_value)
             });
+        self.refresh_selected_tech_highlight();
         Ok(())
     }
 
@@ -340,9 +419,12 @@ impl SystemsCatalogApp {
 
     fn clear_selection(&mut self) {
         self.selected_system_id = None;
+        self.selected_map_system_ids.clear();
         self.selected_links.clear();
         self.selected_system_tech.clear();
         self.selected_cumulative_child_tech.clear();
+        self.selected_notes.clear();
+        self.selected_note_id_for_edit = None;
         self.selected_system_line_color_override = None;
         self.note_text.clear();
         self.selected_system_parent_id = None;
@@ -406,6 +488,31 @@ impl SystemsCatalogApp {
             }
         }
 
+        if let Some(value) = self.repo.get_setting("window_width")? {
+            if let Ok(parsed) = value.parse::<f32>() {
+                self.window_size.x = parsed.max(640.0);
+            }
+        }
+
+        if let Some(value) = self.repo.get_setting("window_height")? {
+            if let Ok(parsed) = value.parse::<f32>() {
+                self.window_size.y = parsed.max(480.0);
+            }
+        }
+
+        let window_x = self
+            .repo
+            .get_setting("window_x")?
+            .and_then(|value| value.parse::<f32>().ok());
+        let window_y = self
+            .repo
+            .get_setting("window_y")?
+            .and_then(|value| value.parse::<f32>().ok());
+
+        if let (Some(x), Some(y)) = (window_x, window_y) {
+            self.window_position = Some(Pos2::new(x, y));
+        }
+
         if let Some(value) = self.repo.get_setting("parent_line_width")? {
             if let Ok(parsed) = value.parse::<f32>() {
                 self.parent_line_style.width = parsed.clamp(0.5, 6.0);
@@ -462,6 +569,19 @@ impl SystemsCatalogApp {
             }
         }
 
+        if let Some(value) = self.repo.get_setting("snap_to_grid")? {
+            self.snap_to_grid = value == "true";
+        }
+
+        if let Some(value) = self.repo.get_setting("recent_catalog_paths")? {
+            self.recent_catalog_paths = value
+                .split('\n')
+                .map(|path| path.trim())
+                .filter(|path| !path.is_empty())
+                .map(|path| path.to_owned())
+                .collect();
+        }
+
         Ok(())
     }
 
@@ -477,6 +597,15 @@ impl SystemsCatalogApp {
                 .set_setting("map_pan_x", &self.map_pan.x.to_string())?;
             self.repo
                 .set_setting("map_pan_y", &self.map_pan.y.to_string())?;
+
+            self.repo
+                .set_setting("window_width", &self.window_size.x.to_string())?;
+            self.repo
+                .set_setting("window_height", &self.window_size.y.to_string())?;
+            if let Some(position) = self.window_position {
+                self.repo.set_setting("window_x", &position.x.to_string())?;
+                self.repo.set_setting("window_y", &position.y.to_string())?;
+            }
 
             self.repo.set_setting(
                 "parent_line_width",
@@ -530,6 +659,18 @@ impl SystemsCatalogApp {
                 "selected_line_brightness_percent",
                 &self.selected_line_brightness_percent.to_string(),
             )?;
+
+            self.repo.set_setting(
+                "snap_to_grid",
+                if self.snap_to_grid { "true" } else { "false" },
+            )?;
+
+            if !self.recent_catalog_paths.is_empty() {
+                self.repo.set_setting(
+                    "recent_catalog_paths",
+                    &self.recent_catalog_paths.join("\n"),
+                )?;
+            }
 
             Ok(())
         })();
@@ -590,14 +731,59 @@ impl SystemsCatalogApp {
         }
     }
 
+    fn ensure_valid_selected_note(&mut self) {
+        if let Some(note_id) = self.selected_note_id_for_edit {
+            let exists = self.selected_notes.iter().any(|note| note.id == note_id);
+            if !exists {
+                self.selected_note_id_for_edit = None;
+                self.note_text.clear();
+            }
+        }
+    }
+
     fn ensure_valid_selected_catalog_tech(&mut self) {
         if let Some(tech_id) = self.selected_catalog_tech_id_for_edit {
             let exists = self.tech_catalog.iter().any(|tech| tech.id == tech_id);
             if !exists {
                 self.selected_catalog_tech_id_for_edit = None;
+                self.systems_using_selected_catalog_tech.clear();
                 self.edited_tech_name.clear();
+                self.edited_tech_description.clear();
+                self.edited_tech_documentation_link.clear();
             }
         }
+    }
+
+    fn refresh_selected_tech_highlight(&mut self) {
+        self.systems_using_selected_catalog_tech.clear();
+
+        if let Some(tech_id) = self.selected_catalog_tech_id_for_edit {
+            if let Ok(system_ids) = self.repo.list_system_ids_for_tech(tech_id) {
+                self.systems_using_selected_catalog_tech = system_ids.into_iter().collect();
+            }
+        }
+    }
+
+    fn text_to_option(value: &str) -> Option<&str> {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    }
+
+    fn push_recent_catalog_path(&mut self, path: &str) {
+        let trimmed = path.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+
+        self.recent_catalog_paths
+            .retain(|existing| existing != trimmed);
+        self.recent_catalog_paths.insert(0, trimmed.to_owned());
+        self.recent_catalog_paths.truncate(8);
+        self.settings_dirty = true;
     }
 
     fn cumulative_child_tech_names(&self, parent_system_id: i64) -> Vec<String> {
@@ -685,9 +871,36 @@ impl SystemsCatalogApp {
         }
     }
 
+    fn find_next_free_child_spawn_position(&self, parent_id: Option<i64>) -> Option<Pos2> {
+        let parent_position = parent_id.and_then(|id| self.map_positions.get(&id).copied())?;
+
+        let step_x = MAP_NODE_SIZE.x + 24.0;
+        let step_y = MAP_NODE_SIZE.y + 20.0;
+        for row_offset in 1..=200 {
+            for col_offset in 0..=200 {
+                let candidate = Pos2::new(
+                    parent_position.x + (step_x * col_offset as f32),
+                    parent_position.y + (step_y * row_offset as f32),
+                );
+
+                let overlaps = self.map_positions.values().any(|existing| {
+                    (existing.x - candidate.x).abs() < (MAP_NODE_SIZE.x * 0.75)
+                        && (existing.y - candidate.y).abs() < (MAP_NODE_SIZE.y * 0.75)
+                });
+
+                if !overlaps {
+                    return Some(candidate);
+                }
+            }
+        }
+
+        None
+    }
+
     fn clamp_node_position(&self, map_rect: Rect, position: Pos2, node_size: Vec2) -> Pos2 {
-        let max_x = (map_rect.width() / self.map_zoom) - node_size.x - 8.0;
-        let max_y = (map_rect.height() / self.map_zoom) - node_size.y - 8.0;
+        let _ = map_rect;
+        let max_x = MAP_WORLD_SIZE.x - node_size.x - 8.0;
+        let max_y = MAP_WORLD_SIZE.y - node_size.y - 8.0;
 
         Pos2::new(
             position.x.clamp(8.0, max_x.max(8.0)),
@@ -705,6 +918,7 @@ impl SystemsCatalogApp {
     }
 
     fn reset_map_layout(&mut self) {
+        self.push_map_undo_snapshot();
         let result = self.repo.clear_system_positions().and_then(|_| {
             self.map_positions.clear();
             self.ensure_map_positions();
@@ -726,12 +940,43 @@ impl SystemsCatalogApp {
         }
     }
 
+    fn push_map_undo_snapshot(&mut self) {
+        if self
+            .map_undo_stack
+            .last()
+            .map(|snapshot| snapshot == &self.map_positions)
+            .unwrap_or(false)
+        {
+            return;
+        }
+
+        self.map_undo_stack.push(self.map_positions.clone());
+        if self.map_undo_stack.len() > 100 {
+            self.map_undo_stack.remove(0);
+        }
+    }
+
+    fn undo_map_positions(&mut self) {
+        let Some(previous_positions) = self.map_undo_stack.pop() else {
+            self.status_message = "Nothing to undo".to_owned();
+            return;
+        };
+
+        self.map_positions = previous_positions;
+        for (system_id, position) in self.map_positions.clone() {
+            self.persist_map_position(system_id, position);
+        }
+
+        self.status_message = "Undid last map change".to_owned();
+    }
+
     fn validate_before_render(&mut self) -> Result<()> {
         self.ensure_valid_parent_selection();
         self.ensure_valid_selected_parent_selection();
         self.ensure_valid_link_target_selection();
         self.ensure_valid_tech_selection();
         self.ensure_valid_selected_link();
+        self.ensure_valid_selected_note();
         self.ensure_valid_selected_catalog_tech();
 
         let visible_ids = self.visible_system_ids();
