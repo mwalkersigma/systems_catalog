@@ -11,6 +11,16 @@ use crate::app::{
 };
 
 const MAP_GRID_SPACING: f32 = 48.0;
+const MAP_CARD_MIN_WIDTH: f32 = MAP_NODE_SIZE.x;
+const MAP_CARD_MIN_HEIGHT: f32 = MAP_NODE_SIZE.y;
+const MAP_CARD_MAX_WIDTH: f32 = 360.0;
+const MAP_CARD_MAX_HEIGHT: f32 = 680.0;
+const MAP_CARD_CHAR_WIDTH_ESTIMATE: f32 = 8.0;
+const MAP_CARD_HORIZONTAL_PADDING: f32 = 46.0;
+const MAP_CARD_LINE_HEIGHT: f32 = 20.0;
+const MAP_CARD_VERTICAL_PADDING: f32 = 30.0;
+const MAP_TEXT_SCALE_THRESHOLD_ZOOM: f32 = 0.5;
+const MAP_TEXT_MIN_LOW_ZOOM_MULTIPLIER: f32 = 0.7;
 
 impl SystemsCatalogApp {
     fn disclosure_icon(is_collapsed: bool) -> &'static str {
@@ -22,11 +32,109 @@ impl SystemsCatalogApp {
     }
 
     fn map_node_size_for(&self, label: &str) -> Vec2 {
-        let estimated_width = (label.chars().count() as f32 * 8.0) + 46.0;
-        Vec2::new(
-            estimated_width.clamp(MAP_NODE_SIZE.x, 360.0),
-            MAP_NODE_SIZE.y,
-        )
+        let char_count = label.chars().count() as f32;
+        let minimum_required_width =
+            (char_count * MAP_CARD_CHAR_WIDTH_ESTIMATE) + MAP_CARD_HORIZONTAL_PADDING;
+        let mut width = minimum_required_width.clamp(MAP_CARD_MIN_WIDTH, MAP_CARD_MAX_WIDTH);
+
+        if self.snap_to_grid {
+            let snapped_width = (width / MAP_GRID_SPACING).round() * MAP_GRID_SPACING;
+            let minimum_snapped_width = (width / MAP_GRID_SPACING).ceil() * MAP_GRID_SPACING;
+            width = if snapped_width >= width {
+                snapped_width
+            } else {
+                minimum_snapped_width
+            }
+            .clamp(MAP_CARD_MIN_WIDTH, MAP_CARD_MAX_WIDTH);
+        }
+
+        let estimated_line_count = self.estimate_wrapped_line_count(label, width) as f32;
+        let estimated_text_height = estimated_line_count * MAP_CARD_LINE_HEIGHT;
+        let height = (estimated_text_height + MAP_CARD_VERTICAL_PADDING)
+            .clamp(MAP_CARD_MIN_HEIGHT, MAP_CARD_MAX_HEIGHT);
+
+        Vec2::new(width, height)
+    }
+
+    fn max_chars_per_line_for_width(&self, width: f32) -> usize {
+        let usable_width = (width - MAP_CARD_HORIZONTAL_PADDING).max(MAP_CARD_CHAR_WIDTH_ESTIMATE);
+        (usable_width / MAP_CARD_CHAR_WIDTH_ESTIMATE).floor().max(1.0) as usize
+    }
+
+    fn wrap_label_for_width(&self, label: &str, width: f32) -> String {
+        let max_chars_per_line = self.max_chars_per_line_for_width(width);
+        if label.chars().count() <= max_chars_per_line {
+            return label.to_owned();
+        }
+
+        let mut lines: Vec<String> = Vec::new();
+        let mut current_line = String::new();
+
+        for word in label.split_whitespace() {
+            let word_len = word.chars().count();
+
+            if current_line.is_empty() {
+                if word_len <= max_chars_per_line {
+                    current_line.push_str(word);
+                } else {
+                    let mut chunk = String::new();
+                    for character in word.chars() {
+                        chunk.push(character);
+                        if chunk.chars().count() >= max_chars_per_line {
+                            lines.push(chunk);
+                            chunk = String::new();
+                        }
+                    }
+                    current_line = chunk;
+                }
+                continue;
+            }
+
+            let current_len = current_line.chars().count();
+            if current_len + 1 + word_len <= max_chars_per_line {
+                current_line.push(' ');
+                current_line.push_str(word);
+            } else {
+                lines.push(current_line);
+                if word_len <= max_chars_per_line {
+                    current_line = word.to_owned();
+                } else {
+                    let mut chunk = String::new();
+                    for character in word.chars() {
+                        chunk.push(character);
+                        if chunk.chars().count() >= max_chars_per_line {
+                            lines.push(chunk);
+                            chunk = String::new();
+                        }
+                    }
+                    current_line = chunk;
+                }
+            }
+        }
+
+        if !current_line.is_empty() {
+            lines.push(current_line);
+        }
+
+        if lines.is_empty() {
+            label.to_owned()
+        } else {
+            lines.join("\n")
+        }
+    }
+
+    fn estimate_wrapped_line_count(&self, label: &str, width: f32) -> usize {
+        self.wrap_label_for_width(label, width).lines().count().max(1)
+    }
+
+    fn map_text_scale_multiplier(&self) -> f32 {
+        if self.map_zoom >= MAP_TEXT_SCALE_THRESHOLD_ZOOM {
+            return 1.0;
+        }
+
+        let ratio = (self.map_zoom / MAP_TEXT_SCALE_THRESHOLD_ZOOM).clamp(0.0, 1.0);
+        MAP_TEXT_MIN_LOW_ZOOM_MULTIPLIER
+            + ((1.0 - MAP_TEXT_MIN_LOW_ZOOM_MULTIPLIER) * ratio)
     }
 
     fn grid_spot_is_open(
@@ -196,7 +304,7 @@ impl SystemsCatalogApp {
     }
 
     fn line_color(&self, style: LineStyle, dimmed: bool, boosted: bool) -> Color32 {
-        let mut color = style.color;
+        let mut color = Color32::from_rgb(style.color.r(), style.color.g(), style.color.b());
 
         if boosted {
             color = self.brighten_color(color, self.selected_line_brightness_percent);
@@ -289,6 +397,118 @@ impl SystemsCatalogApp {
         ui.label(label);
     }
 
+    fn lerp_color(&self, from: Color32, to: Color32, t: f32) -> Color32 {
+        let clamped = t.clamp(0.0, 1.0);
+        let lerp = |a: u8, b: u8| -> u8 {
+            (a as f32 + ((b as f32 - a as f32) * clamped))
+                .round()
+                .clamp(0.0, 255.0) as u8
+        };
+
+        Color32::from_rgba_unmultiplied(
+            lerp(from.r(), to.r()),
+            lerp(from.g(), to.g()),
+            lerp(from.b(), to.b()),
+            lerp(from.a(), to.a()),
+        )
+    }
+
+    fn gradient_color_at(&self, colors: &[Color32], t: f32) -> Color32 {
+        if colors.is_empty() {
+            return Color32::WHITE;
+        }
+
+        if colors.len() == 1 {
+            return colors[0];
+        }
+
+        let clamped = t.clamp(0.0, 1.0);
+        let max_index = colors.len() - 1;
+        let scaled = clamped * max_index as f32;
+        let start_index = scaled.floor() as usize;
+        let end_index = (start_index + 1).min(max_index);
+        let local_t = scaled - start_index as f32;
+
+        self.lerp_color(colors[start_index], colors[end_index], local_t)
+    }
+
+    fn tech_border_colors_for_system(&self, system_id: i64) -> Vec<Color32> {
+        let mut technologies = self
+            .system_tech_ids_by_system
+            .get(&system_id)
+            .into_iter()
+            .flat_map(|ids| ids.iter().copied())
+            .filter_map(|tech_id| self.tech_catalog.iter().find(|tech| tech.id == tech_id))
+            .collect::<Vec<_>>();
+
+        technologies.sort_by(|left, right| {
+            right
+                .display_priority
+                .cmp(&left.display_priority)
+                .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+        });
+
+        technologies
+            .into_iter()
+            .filter_map(|tech| {
+                tech.color
+                    .as_deref()
+                    .and_then(Self::color_from_setting_value)
+            })
+            .take(self.tech_border_max_colors)
+            .collect()
+    }
+
+    fn draw_gradient_card_border(
+        &self,
+        painter: &egui::Painter,
+        rect: Rect,
+        border_width: f32,
+        colors: &[Color32],
+    ) {
+        if colors.is_empty() {
+            return;
+        }
+
+        if colors.len() == 1 {
+            painter.rect_stroke(rect, 6.0, Stroke::new(border_width, colors[0]));
+            return;
+        }
+
+        let samples = 96;
+        let min = rect.min;
+        let max = rect.max;
+        let edge_points = |t: f32| -> Pos2 {
+            let quarter = 0.25;
+            let half = 0.5;
+            let three_quarters = 0.75;
+
+            if t <= quarter {
+                let local = t / quarter;
+                Pos2::new(min.x + (rect.width() * local), min.y)
+            } else if t <= half {
+                let local = (t - quarter) / quarter;
+                Pos2::new(max.x, min.y + (rect.height() * local))
+            } else if t <= three_quarters {
+                let local = (t - half) / quarter;
+                Pos2::new(max.x - (rect.width() * local), max.y)
+            } else {
+                let local = (t - three_quarters) / quarter;
+                Pos2::new(min.x, max.y - (rect.height() * local))
+            }
+        };
+
+        for index in 0..samples {
+            let start_t = index as f32 / samples as f32;
+            let end_t = (index + 1) as f32 / samples as f32;
+            let color = self.gradient_color_at(colors, start_t);
+            painter.line_segment(
+                [edge_points(start_t), edge_points(end_t)],
+                Stroke::new(border_width, color),
+            );
+        }
+    }
+
     fn render_add_system_modal(&mut self, ctx: &egui::Context) {
         if !self.show_add_system_modal {
             return;
@@ -333,6 +553,55 @@ impl SystemsCatalogApp {
                         }
                     });
 
+                ui.separator();
+                ui.label("Assign technologies (optional)");
+
+                let selected_tech_label = self
+                    .new_system_tech_id_for_assignment
+                    .map(|id| self.tech_name_by_id(id))
+                    .unwrap_or_else(|| "Select technology".to_owned());
+
+                let previous_new_system_tech = self.new_system_tech_id_for_assignment;
+                egui::ComboBox::from_label("Technology")
+                    .selected_text(selected_tech_label)
+                    .show_ui(ui, |ui| {
+                        for tech in &self.tech_catalog {
+                            ui.selectable_value(
+                                &mut self.new_system_tech_id_for_assignment,
+                                Some(tech.id),
+                                tech.name.as_str(),
+                            );
+                        }
+                    });
+
+                if self.new_system_tech_id_for_assignment != previous_new_system_tech {
+                    if let Some(tech_id) = self.new_system_tech_id_for_assignment {
+                        self.new_system_assigned_tech_ids.insert(tech_id);
+                        self.new_system_tech_id_for_assignment = None;
+                    }
+                }
+
+                if self.new_system_assigned_tech_ids.is_empty() {
+                    ui.label("No technologies selected.");
+                } else {
+                    let mut assigned_tech_snapshot = self
+                        .new_system_assigned_tech_ids
+                        .iter()
+                        .copied()
+                        .collect::<Vec<_>>();
+                    assigned_tech_snapshot.sort_unstable();
+
+                    for tech_id in assigned_tech_snapshot {
+                        let tech_name = self.tech_name_by_id(tech_id);
+                        ui.horizontal(|ui| {
+                            ui.label(tech_name);
+                            if ui.small_button("Remove").clicked() {
+                                self.new_system_assigned_tech_ids.remove(&tech_id);
+                            }
+                        });
+                    }
+                }
+
                 ui.horizontal(|ui| {
                     if ui.button("Create").clicked() {
                         self.create_system();
@@ -376,6 +645,28 @@ impl SystemsCatalogApp {
 
                 ui.label("Documentation link (optional)");
                 ui.text_edit_singleline(&mut self.new_tech_documentation_link);
+
+                ui.horizontal(|ui| {
+                    ui.label("Color (optional)");
+                    let mut use_color = self.new_tech_color.is_some();
+                    if ui.checkbox(&mut use_color, "Enable").changed() {
+                        self.new_tech_color = if use_color {
+                            Some(Color32::from_rgb(120, 180, 255))
+                        } else {
+                            None
+                        };
+                    }
+                    if let Some(mut color) = self.new_tech_color {
+                        if ui.color_edit_button_srgba(&mut color).changed() {
+                            self.new_tech_color = Some(color);
+                        }
+                    }
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("Display priority");
+                    ui.add(egui::DragValue::new(&mut self.new_tech_display_priority));
+                });
 
                 ui.horizontal(|ui| {
                     if ui.button("Save").clicked() {
@@ -480,6 +771,20 @@ impl SystemsCatalogApp {
                             100.0..=220.0,
                         )
                         .text("Selected line brightness %"),
+                    )
+                    .changed();
+
+                ui.separator();
+                changed |= ui
+                    .checkbox(
+                        &mut self.show_tech_border_colors,
+                        "Color card borders by technology",
+                    )
+                    .changed();
+                changed |= ui
+                    .add(
+                        egui::Slider::new(&mut self.tech_border_max_colors, 1..=5)
+                            .text("Top tech colors"),
                     )
                     .changed();
 
@@ -740,6 +1045,8 @@ impl SystemsCatalogApp {
                         self.edited_tech_name.clear();
                         self.edited_tech_description.clear();
                         self.edited_tech_documentation_link.clear();
+                        self.edited_tech_color = None;
+                        self.edited_tech_display_priority = 0;
                     } else {
                         self.selected_catalog_tech_id_for_edit = Some(tech_id);
                         self.refresh_selected_tech_highlight();
@@ -750,6 +1057,9 @@ impl SystemsCatalogApp {
                                 tech.description.clone().unwrap_or_default();
                             self.edited_tech_documentation_link =
                                 tech.documentation_link.clone().unwrap_or_default();
+                            self.edited_tech_color =
+                                tech.color.as_deref().and_then(Self::color_from_setting_value);
+                            self.edited_tech_display_priority = tech.display_priority;
                         }
                     }
                 }
@@ -768,6 +1078,28 @@ impl SystemsCatalogApp {
                 ui.text_edit_singleline(&mut self.edited_tech_documentation_link);
 
                 ui.horizontal(|ui| {
+                    ui.label("Color (optional)");
+                    let mut use_color = self.edited_tech_color.is_some();
+                    if ui.checkbox(&mut use_color, "Enable").changed() {
+                        self.edited_tech_color = if use_color {
+                            Some(Color32::from_rgb(120, 180, 255))
+                        } else {
+                            None
+                        };
+                    }
+                    if let Some(mut color) = self.edited_tech_color {
+                        if ui.color_edit_button_srgba(&mut color).changed() {
+                            self.edited_tech_color = Some(color);
+                        }
+                    }
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("Display priority");
+                    ui.add(egui::DragValue::new(&mut self.edited_tech_display_priority));
+                });
+
+                ui.horizontal(|ui| {
                     if ui.button("Update").clicked() {
                         self.update_selected_catalog_tech();
                     }
@@ -780,7 +1112,7 @@ impl SystemsCatalogApp {
     }
 
     fn render_details(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Selected System Details");
+        ui.heading("System Details");
 
         let Some(system) = self.selected_system().cloned() else {
             ui.label("Select a system from the list or map.");
@@ -793,6 +1125,33 @@ impl SystemsCatalogApp {
         } else {
             ui.label("Parent: none (root)");
         }
+
+        ui.separator();
+        ui.label("Name");
+        ui.text_edit_singleline(&mut self.edited_system_name);
+
+        ui.label("Description");
+        ui.add(
+            egui::TextEdit::multiline(&mut self.edited_system_description).desired_rows(3),
+        );
+
+        ui.separator();
+        ui.label("Naming path");
+        ui.checkbox(
+            &mut self.selected_system_naming_root,
+            "Treat this system as naming root",
+        );
+        ui.horizontal(|ui| {
+            ui.label("Delimiter");
+            ui.text_edit_singleline(&mut self.selected_system_naming_delimiter);
+        });
+        ui.label(format!("Current path: {}", self.naming_path_for_system(system.id)));
+
+        ui.horizontal(|ui| {
+            if ui.button("Save details").clicked() {
+                self.update_selected_system_details();
+            }
+        });
 
         ui.separator();
         ui.label("Parent assignment");
@@ -812,6 +1171,7 @@ impl SystemsCatalogApp {
             .map(|candidate| (candidate.id, candidate.name.clone()))
             .collect::<Vec<_>>();
 
+        let previous_parent_id = self.selected_system_parent_id;
         egui::ComboBox::from_label("Set parent")
             .selected_text(selected_parent_label)
             .show_ui(ui, |ui| {
@@ -830,11 +1190,11 @@ impl SystemsCatalogApp {
                 }
             });
 
-        ui.horizontal(|ui| {
-            if ui.button("Save parent").clicked() {
-                self.update_selected_system_parent();
-            }
+        if self.selected_system_parent_id != previous_parent_id {
+            self.update_selected_system_parent();
+        }
 
+        ui.horizontal(|ui| {
             if ui.button("Delete system").clicked() {
                 self.delete_selected_system();
                 return;
@@ -870,10 +1230,6 @@ impl SystemsCatalogApp {
                 self.update_selected_system_line_color_override();
             }
         });
-
-        ui.separator();
-        ui.label("Description");
-        ui.label(system.description.clone());
 
         ui.separator();
         ui.label("Interactions");
@@ -963,6 +1319,7 @@ impl SystemsCatalogApp {
             .map(|id| self.tech_name_by_id(id))
             .unwrap_or_else(|| "Select technology".to_owned());
 
+        let previous_tech_id = self.selected_tech_id_for_assignment;
         egui::ComboBox::from_label("Technology")
             .selected_text(selected_tech_label)
             .show_ui(ui, |ui| {
@@ -975,7 +1332,9 @@ impl SystemsCatalogApp {
                 }
             });
 
-        if ui.button("Assign technology to system").clicked() {
+        if self.selected_tech_id_for_assignment != previous_tech_id
+            && self.selected_tech_id_for_assignment.is_some()
+        {
             self.add_selected_tech_to_system();
         }
 
@@ -1073,26 +1432,46 @@ impl SystemsCatalogApp {
         });
     }
 
+    fn apply_map_zoom_anchored_to_view_center(&mut self, map_rect: Rect, target_zoom: f32) {
+        let old_zoom = self.map_zoom;
+        let new_zoom = target_zoom.clamp(0.25, 1.5);
+        if (new_zoom - old_zoom).abs() <= f32::EPSILON {
+            return;
+        }
+
+        let center = map_rect.center();
+        let local_at_center = Pos2::new(
+            (center.x - map_rect.left() - self.map_pan.x) / old_zoom,
+            (center.y - map_rect.top() - self.map_pan.y) / old_zoom,
+        );
+
+        self.map_zoom = new_zoom;
+        self.map_pan = Vec2::new(
+            center.x - map_rect.left() - (local_at_center.x * new_zoom),
+            center.y - map_rect.top() - (local_at_center.y * new_zoom),
+        );
+        self.settings_dirty = true;
+    }
+
     fn render_map_canvas(&mut self, ui: &mut egui::Ui) {
         ui.heading("Mind Map");
         ui.label("Hold Space and drag to pan. Scroll to zoom. Shift+drag from a node to create an interaction. Drag on empty map space to box-select systems.");
+
+        let mut requested_zoom: Option<f32> = None;
 
         ui.horizontal(|ui| {
             ui.label("Zoom");
 
             if ui.small_button("-").clicked() {
-                self.map_zoom = (self.map_zoom - 0.1).max(0.5);
-                self.settings_dirty = true;
+                requested_zoom = Some((self.map_zoom - 0.1).max(0.25));
             }
 
             if ui.small_button("+").clicked() {
-                self.map_zoom = (self.map_zoom + 0.1).min(2.5);
-                self.settings_dirty = true;
+                requested_zoom = Some((self.map_zoom + 0.1).min(1.5));
             }
 
             if ui.small_button("Reset zoom").clicked() {
-                self.map_zoom = 1.0;
-                self.settings_dirty = true;
+                requested_zoom = Some(1.0);
             }
 
             if ui.small_button("Reset layout").clicked() {
@@ -1142,11 +1521,18 @@ impl SystemsCatalogApp {
         }
 
         let wheel_delta_y = ui.input(|input| input.smooth_scroll_delta.y);
-        let zoom_active = map_response.hovered() || map_response.has_focus();
+        let pointer_over_map = ui
+            .input(|input| input.pointer.hover_pos())
+            .map(|pos| map_rect.contains(pos))
+            .unwrap_or(false);
+        let zoom_active = pointer_over_map || map_response.has_focus();
         if zoom_active && wheel_delta_y.abs() > f32::EPSILON {
             let zoom_step = (wheel_delta_y / 400.0).clamp(-0.15, 0.15);
-            self.map_zoom = (self.map_zoom + zoom_step).clamp(0.5, 2.5);
-            self.settings_dirty = true;
+            requested_zoom = Some((self.map_zoom + zoom_step).clamp(0.25, 1.5));
+        }
+
+        if let Some(target_zoom) = requested_zoom {
+            self.apply_map_zoom_anchored_to_view_center(map_rect, target_zoom);
         }
 
         painter.rect_filled(map_rect, 6.0, Color32::from_gray(24));
@@ -1217,6 +1603,7 @@ impl SystemsCatalogApp {
 
         let mut node_rects: HashMap<i64, Rect> = HashMap::new();
         for system in &visible_systems {
+            // This is where rendering the system cards happens.
             if let Some(local_position) = self.map_positions.get(&system.id) {
                 let node_size_screen = self.map_node_size_for(system.name.as_str()) * zoom;
                 let rect = Rect::from_min_size(to_screen(*local_position), node_size_screen);
@@ -1316,31 +1703,31 @@ impl SystemsCatalogApp {
         }
 
         if self.show_interaction_lines {
-            for link in &self.all_links {
-                let Some(source_rect) = node_rects.get(&link.source_system_id) else {
+            for (source_system_id, target_system_id) in self.deduped_visible_interaction_edges() {
+                let Some(source_rect) = node_rects.get(&source_system_id) else {
                     continue;
                 };
-                let Some(target_rect) = node_rects.get(&link.target_system_id) else {
+                let Some(target_rect) = node_rects.get(&target_system_id) else {
                     continue;
                 };
 
                 let dimmed = selected_id
-                    .map(|id| id != link.source_system_id && id != link.target_system_id)
+                    .map(|id| id != source_system_id && id != target_system_id)
                     .unwrap_or(false);
                 let dimmed_for_tech = selected_id.is_some()
                     && tech_filter_active
                     && (!self
                         .systems_using_selected_catalog_tech
-                        .contains(&link.source_system_id)
+                        .contains(&source_system_id)
                         || !self
                             .systems_using_selected_catalog_tech
-                            .contains(&link.target_system_id));
+                            .contains(&target_system_id));
                 let boosted = selected_id
-                    .map(|id| id == link.source_system_id || id == link.target_system_id)
+                    .map(|id| id == source_system_id || id == target_system_id)
                     .unwrap_or(false);
 
                 let interaction_style =
-                    self.interaction_line_style_for(link.source_system_id, link.target_system_id);
+                    self.interaction_line_style_for(source_system_id, target_system_id);
 
                 let (from, to) = self.card_to_card_endpoints(*source_rect, *target_rect);
 
@@ -1461,7 +1848,8 @@ impl SystemsCatalogApp {
 
                 if self.snap_to_grid {
                     for persist_id in &persist_ids {
-                        if let Some(current_position) = self.map_positions.get(persist_id).copied() {
+                        if let Some(current_position) = self.map_positions.get(persist_id).copied()
+                        {
                             let persist_node_size = self
                                 .systems
                                 .iter()
@@ -1516,15 +1904,38 @@ impl SystemsCatalogApp {
                 1.0
             };
 
+            let tech_border_colors = if self.show_tech_border_colors {
+                self.tech_border_colors_for_system(system.id)
+            } else {
+                Vec::new()
+            };
+
             painter.rect_filled(node_rect, 6.0, fill);
-            painter.rect_stroke(node_rect, 6.0, Stroke::new(border_width, border_color));
-            painter.text(
-                node_rect.center(),
-                egui::Align2::CENTER_CENTER,
-                system.name,
-                FontId::proportional((15.0 * self.map_zoom).clamp(12.0, 22.0)),
-                Color32::from_gray(230),
+            if tech_border_colors.is_empty() {
+                painter.rect_stroke(node_rect, 6.0, Stroke::new(border_width, border_color));
+            } else {
+                self.draw_gradient_card_border(&painter, node_rect, border_width, &tech_border_colors);
+            }
+            let text_color = Color32::from_gray(230);
+            let text_scale_multiplier = self.map_text_scale_multiplier();
+            let font_size = ((15.0 * self.map_zoom).clamp(8.0, 22.0) * text_scale_multiplier)
+                .clamp(6.0, 22.0);
+            let font_id = FontId::proportional(font_size);
+            let text_wrap_width =
+                (node_rect.width() - (MAP_CARD_HORIZONTAL_PADDING * self.map_zoom)).max(24.0);
+            let wrapped_text = painter.layout(
+                system.name.to_owned(),
+                font_id,
+                text_color,
+                text_wrap_width,
             );
+            let text_pos = Pos2::new(
+                node_rect.center().x - (wrapped_text.size().x * 0.5),
+                node_rect.center().y - (wrapped_text.size().y * 0.5),
+            );
+            painter
+                .with_clip_rect(node_rect.shrink(1.0))
+                .galley(text_pos, wrapped_text, text_color);
 
             let has_children = self
                 .systems
@@ -1611,7 +2022,8 @@ impl SystemsCatalogApp {
                     .map(|candidate| self.map_node_size_for(candidate.name.as_str()))
                     .unwrap_or(MAP_NODE_SIZE);
 
-                let preview_rect = Rect::from_min_size(to_screen(*preview_position), preview_node_size * zoom);
+                let preview_rect =
+                    Rect::from_min_size(to_screen(*preview_position), preview_node_size * zoom);
 
                 painter.rect_filled(
                     preview_rect,
@@ -1683,9 +2095,7 @@ impl eframe::App for SystemsCatalogApp {
             ctx.input_mut(|input| input.consume_key(egui::Modifiers::CTRL, egui::Key::Z));
 
         if open_add_system {
-            self.new_system_parent_id = self.selected_system_id;
-            self.show_add_system_modal = true;
-            self.focus_add_system_name_on_open = true;
+            self.open_add_system_modal_with_prefill(self.selected_system_id);
         }
 
         if open_add_tech {
@@ -1701,35 +2111,10 @@ impl eframe::App for SystemsCatalogApp {
             self.status_message = format!("State warning: {error}");
         }
 
-        if let Some(window_rect) = ctx.input(|input| input.viewport().outer_rect) {
-            let size = window_rect.size();
-            if (size.x - self.window_size.x).abs() > 0.5
-                || (size.y - self.window_size.y).abs() > 0.5
-            {
-                self.window_size = size;
-                self.settings_dirty = true;
-            }
-
-            let position = window_rect.min;
-            let position_changed = self
-                .window_position
-                .map(|existing| {
-                    (existing.x - position.x).abs() > 0.5 || (existing.y - position.y).abs() > 0.5
-                })
-                .unwrap_or(true);
-
-            if position_changed {
-                self.window_position = Some(position);
-                self.settings_dirty = true;
-            }
-        }
-
         egui::TopBottomPanel::top("header_panel").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 if ui.button("Add System").clicked() {
-                    self.new_system_parent_id = self.selected_system_id;
-                    self.show_add_system_modal = true;
-                    self.focus_add_system_name_on_open = true;
+                    self.open_add_system_modal_with_prefill(self.selected_system_id);
                 }
                 if ui.button("Add Technology").clicked() {
                     self.show_add_tech_modal = true;

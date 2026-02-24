@@ -53,7 +53,13 @@ pub struct SystemsCatalogApp {
     new_system_name: String,
     new_system_description: String,
     new_system_parent_id: Option<i64>,
+    new_system_tech_id_for_assignment: Option<i64>,
+    new_system_assigned_tech_ids: HashSet<i64>,
     selected_system_parent_id: Option<i64>,
+    edited_system_name: String,
+    edited_system_description: String,
+    selected_system_naming_root: bool,
+    selected_system_naming_delimiter: String,
 
     new_link_target_id: Option<i64>,
     new_link_label: String,
@@ -69,6 +75,11 @@ pub struct SystemsCatalogApp {
     edited_tech_name: String,
     edited_tech_description: String,
     edited_tech_documentation_link: String,
+    edited_tech_color: Option<Color32>,
+    edited_tech_display_priority: i64,
+    new_tech_color: Option<Color32>,
+    new_tech_display_priority: i64,
+    system_tech_ids_by_system: HashMap<i64, Vec<i64>>,
 
     map_positions: HashMap<i64, Pos2>,
     map_link_drag_from: Option<i64>,
@@ -81,8 +92,6 @@ pub struct SystemsCatalogApp {
     snap_to_grid: bool,
     map_zoom: f32,
     map_pan: Vec2,
-    window_size: Vec2,
-    window_position: Option<Pos2>,
     collapsed_system_ids: HashSet<i64>,
 
     show_add_system_modal: bool,
@@ -104,6 +113,8 @@ pub struct SystemsCatalogApp {
     show_interaction_lines: bool,
     dimmed_line_opacity_percent: f32,
     selected_line_brightness_percent: f32,
+    show_tech_border_colors: bool,
+    tech_border_max_colors: usize,
     settings_dirty: bool,
 
     status_message: String,
@@ -127,7 +138,13 @@ impl SystemsCatalogApp {
             new_system_name: String::new(),
             new_system_description: String::new(),
             new_system_parent_id: None,
+            new_system_tech_id_for_assignment: None,
+            new_system_assigned_tech_ids: HashSet::new(),
             selected_system_parent_id: None,
+            edited_system_name: String::new(),
+            edited_system_description: String::new(),
+            selected_system_naming_root: false,
+            selected_system_naming_delimiter: "/".to_owned(),
             new_link_target_id: None,
             new_link_label: String::new(),
             selected_link_id_for_edit: None,
@@ -141,6 +158,11 @@ impl SystemsCatalogApp {
             edited_tech_name: String::new(),
             edited_tech_description: String::new(),
             edited_tech_documentation_link: String::new(),
+            edited_tech_color: None,
+            edited_tech_display_priority: 0,
+            new_tech_color: None,
+            new_tech_display_priority: 0,
+            system_tech_ids_by_system: HashMap::new(),
             map_positions: HashMap::new(),
             map_link_drag_from: None,
             map_link_click_source: None,
@@ -152,8 +174,6 @@ impl SystemsCatalogApp {
             snap_to_grid: false,
             map_zoom: 1.0,
             map_pan: Vec2::ZERO,
-            window_size: Vec2::new(1280.0, 820.0),
-            window_position: None,
             collapsed_system_ids: HashSet::new(),
             show_add_system_modal: false,
             focus_add_system_name_on_open: false,
@@ -181,19 +201,47 @@ impl SystemsCatalogApp {
             show_interaction_lines: true,
             dimmed_line_opacity_percent: 18.0,
             selected_line_brightness_percent: 135.0,
+            show_tech_border_colors: false,
+            tech_border_max_colors: 2,
             settings_dirty: false,
             status_message: "Ready".to_owned(),
         };
 
+        app.remove_legacy_window_settings()?;
         app.refresh_systems()?;
         app.load_ui_settings()?;
         Ok(app)
+    }
+
+    fn remove_legacy_window_settings(&mut self) -> Result<()> {
+        self.repo.delete_settings(&[
+            "window_width",
+            "window_height",
+            "window_x",
+            "window_y",
+        ])
     }
 
     fn refresh_systems(&mut self) -> Result<()> {
         self.systems = self.repo.list_systems()?;
         self.all_links = self.repo.list_links()?;
         self.tech_catalog = self.repo.list_tech_catalog()?;
+        let assignments = self.repo.list_system_tech_assignments()?;
+        self.system_tech_ids_by_system.clear();
+        for (system_id, tech_id) in assignments {
+            self.system_tech_ids_by_system
+                .entry(system_id)
+                .or_default()
+                .push(tech_id);
+        }
+        self.new_system_assigned_tech_ids
+            .retain(|tech_id| self.tech_catalog.iter().any(|tech| tech.id == *tech_id));
+        if let Some(tech_id) = self.new_system_tech_id_for_assignment {
+            let exists = self.tech_catalog.iter().any(|tech| tech.id == tech_id);
+            if !exists {
+                self.new_system_tech_id_for_assignment = None;
+            }
+        }
         self.refresh_selected_tech_highlight();
 
         self.map_positions
@@ -275,6 +323,11 @@ impl SystemsCatalogApp {
                     selected_tech.description.clone().unwrap_or_default();
                 self.edited_tech_documentation_link =
                     selected_tech.documentation_link.clone().unwrap_or_default();
+                self.edited_tech_color = selected_tech
+                    .color
+                    .as_deref()
+                    .and_then(Self::color_from_setting_value);
+                self.edited_tech_display_priority = selected_tech.display_priority;
             }
         }
 
@@ -283,6 +336,18 @@ impl SystemsCatalogApp {
             .iter()
             .find(|system| system.id == system_id)
             .and_then(|system| system.parent_id);
+
+        if let Some(system) = self.systems.iter().find(|system| system.id == system_id) {
+            self.edited_system_name = system.name.clone();
+            self.edited_system_description = system.description.clone();
+            self.selected_system_naming_root = system.naming_root;
+            self.selected_system_naming_delimiter = if system.naming_delimiter.trim().is_empty() {
+                "/".to_owned()
+            } else {
+                system.naming_delimiter.clone()
+            };
+        }
+
         if let Some(selected_note_id) = self.selected_note_id_for_edit {
             if !self
                 .selected_notes
@@ -333,6 +398,49 @@ impl SystemsCatalogApp {
             .find(|system| system.id == id)
             .map(|system| system.name.clone())
             .unwrap_or_else(|| format!("Unknown ({id})"))
+    }
+
+    fn naming_path_for_system(&self, system_id: i64) -> String {
+        let by_id = self
+            .systems
+            .iter()
+            .map(|system| (system.id, system))
+            .collect::<HashMap<_, _>>();
+
+        let mut segments = Vec::new();
+        let mut delimiter = "/".to_owned();
+        let mut visited = HashSet::new();
+        let mut current = Some(system_id);
+
+        while let Some(current_id) = current {
+            if !visited.insert(current_id) {
+                break;
+            }
+
+            let Some(system) = by_id.get(&current_id) else {
+                break;
+            };
+
+            let segment = system.name.trim();
+            if segment.is_empty() {
+                segments.push(format!("system-{current_id}"));
+            } else {
+                segments.push(segment.to_owned());
+            }
+
+            if system.naming_root {
+                let candidate_delimiter = system.naming_delimiter.trim();
+                if !candidate_delimiter.is_empty() {
+                    delimiter = candidate_delimiter.to_owned();
+                }
+                break;
+            }
+
+            current = system.parent_id;
+        }
+
+        segments.reverse();
+        segments.join(delimiter.as_str())
     }
 
     fn tech_name_by_id(&self, id: i64) -> String {
@@ -398,6 +506,82 @@ impl SystemsCatalogApp {
             .collect()
     }
 
+    fn representative_visible_system_id(
+        &self,
+        system_id: i64,
+        visible_ids: &HashSet<i64>,
+        parent_by_id: &HashMap<i64, Option<i64>>,
+    ) -> Option<i64> {
+        if visible_ids.contains(&system_id) {
+            return Some(system_id);
+        }
+
+        let mut current = parent_by_id.get(&system_id).copied().flatten();
+        let mut visited = HashSet::new();
+
+        while let Some(parent_id) = current {
+            if !visited.insert(parent_id) {
+                break;
+            }
+
+            if visible_ids.contains(&parent_id) && self.collapsed_system_ids.contains(&parent_id) {
+                return Some(parent_id);
+            }
+
+            current = parent_by_id.get(&parent_id).copied().flatten();
+        }
+
+        None
+    }
+
+    fn visible_representative_system_map(&self) -> HashMap<i64, i64> {
+        let visible_ids = self.visible_system_ids();
+        let parent_by_id = self
+            .systems
+            .iter()
+            .map(|system| (system.id, system.parent_id))
+            .collect::<HashMap<_, _>>();
+
+        let mut representative_by_system = HashMap::new();
+
+        for system in &self.systems {
+            if let Some(representative_id) =
+                self.representative_visible_system_id(system.id, &visible_ids, &parent_by_id)
+            {
+                representative_by_system.insert(system.id, representative_id);
+            }
+        }
+
+        representative_by_system
+    }
+
+    fn deduped_visible_interaction_edges(&self) -> Vec<(i64, i64)> {
+        let representative_by_system = self.visible_representative_system_map();
+        let mut edges = HashSet::new();
+
+        for link in &self.all_links {
+            let Some(source_id) = representative_by_system.get(&link.source_system_id).copied()
+            else {
+                continue;
+            };
+
+            let Some(target_id) = representative_by_system.get(&link.target_system_id).copied()
+            else {
+                continue;
+            };
+
+            if source_id == target_id {
+                continue;
+            }
+
+            edges.insert((source_id, target_id));
+        }
+
+        let mut sorted_edges = edges.into_iter().collect::<Vec<_>>();
+        sorted_edges.sort_unstable();
+        sorted_edges
+    }
+
     fn on_disclosure_click(&mut self, system_id: i64) {
         if self.collapsed_system_ids.contains(&system_id) {
             self.collapsed_system_ids.remove(&system_id);
@@ -428,6 +612,10 @@ impl SystemsCatalogApp {
         self.selected_system_line_color_override = None;
         self.note_text.clear();
         self.selected_system_parent_id = None;
+        self.edited_system_name.clear();
+        self.edited_system_description.clear();
+        self.selected_system_naming_root = false;
+        self.selected_system_naming_delimiter = "/".to_owned();
         self.selected_link_id_for_edit = None;
         self.edited_link_label.clear();
         self.map_link_click_source = None;
@@ -472,7 +660,7 @@ impl SystemsCatalogApp {
     fn load_ui_settings(&mut self) -> Result<()> {
         if let Some(value) = self.repo.get_setting("map_zoom")? {
             if let Ok(parsed) = value.parse::<f32>() {
-                self.map_zoom = parsed.clamp(0.5, 2.5);
+                self.map_zoom = parsed.clamp(0.25, 1.5);
             }
         }
 
@@ -486,31 +674,6 @@ impl SystemsCatalogApp {
             if let Ok(parsed) = value.parse::<f32>() {
                 self.map_pan.y = parsed;
             }
-        }
-
-        if let Some(value) = self.repo.get_setting("window_width")? {
-            if let Ok(parsed) = value.parse::<f32>() {
-                self.window_size.x = parsed.max(640.0);
-            }
-        }
-
-        if let Some(value) = self.repo.get_setting("window_height")? {
-            if let Ok(parsed) = value.parse::<f32>() {
-                self.window_size.y = parsed.max(480.0);
-            }
-        }
-
-        let window_x = self
-            .repo
-            .get_setting("window_x")?
-            .and_then(|value| value.parse::<f32>().ok());
-        let window_y = self
-            .repo
-            .get_setting("window_y")?
-            .and_then(|value| value.parse::<f32>().ok());
-
-        if let (Some(x), Some(y)) = (window_x, window_y) {
-            self.window_position = Some(Pos2::new(x, y));
         }
 
         if let Some(value) = self.repo.get_setting("parent_line_width")? {
@@ -573,6 +736,16 @@ impl SystemsCatalogApp {
             self.snap_to_grid = value == "true";
         }
 
+        if let Some(value) = self.repo.get_setting("show_tech_border_colors")? {
+            self.show_tech_border_colors = value == "true";
+        }
+
+        if let Some(value) = self.repo.get_setting("tech_border_max_colors")? {
+            if let Ok(parsed) = value.parse::<usize>() {
+                self.tech_border_max_colors = parsed.clamp(1, 5);
+            }
+        }
+
         if let Some(value) = self.repo.get_setting("recent_catalog_paths")? {
             self.recent_catalog_paths = value
                 .split('\n')
@@ -597,15 +770,6 @@ impl SystemsCatalogApp {
                 .set_setting("map_pan_x", &self.map_pan.x.to_string())?;
             self.repo
                 .set_setting("map_pan_y", &self.map_pan.y.to_string())?;
-
-            self.repo
-                .set_setting("window_width", &self.window_size.x.to_string())?;
-            self.repo
-                .set_setting("window_height", &self.window_size.y.to_string())?;
-            if let Some(position) = self.window_position {
-                self.repo.set_setting("window_x", &position.x.to_string())?;
-                self.repo.set_setting("window_y", &position.y.to_string())?;
-            }
 
             self.repo.set_setting(
                 "parent_line_width",
@@ -665,6 +829,20 @@ impl SystemsCatalogApp {
                 if self.snap_to_grid { "true" } else { "false" },
             )?;
 
+            self.repo.set_setting(
+                "show_tech_border_colors",
+                if self.show_tech_border_colors {
+                    "true"
+                } else {
+                    "false"
+                },
+            )?;
+
+            self.repo.set_setting(
+                "tech_border_max_colors",
+                &self.tech_border_max_colors.to_string(),
+            )?;
+
             if !self.recent_catalog_paths.is_empty() {
                 self.repo.set_setting(
                     "recent_catalog_paths",
@@ -692,6 +870,25 @@ impl SystemsCatalogApp {
                 self.new_system_parent_id = None;
             }
         }
+    }
+
+    fn open_add_system_modal_with_prefill(&mut self, parent_id: Option<i64>) {
+        self.new_system_parent_id = parent_id;
+        self.new_system_tech_id_for_assignment = None;
+        self.new_system_assigned_tech_ids.clear();
+
+        if let Some(parent_system_id) = parent_id {
+            if let Some(parent_tech_ids) = self.system_tech_ids_by_system.get(&parent_system_id) {
+                for tech_id in parent_tech_ids {
+                    if self.tech_catalog.iter().any(|tech| tech.id == *tech_id) {
+                        self.new_system_assigned_tech_ids.insert(*tech_id);
+                    }
+                }
+            }
+        }
+
+        self.show_add_system_modal = true;
+        self.focus_add_system_name_on_open = true;
     }
 
     fn ensure_valid_selected_parent_selection(&mut self) {

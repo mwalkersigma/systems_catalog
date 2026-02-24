@@ -1,6 +1,45 @@
 use crate::app::SystemsCatalogApp;
 
 impl SystemsCatalogApp {
+    pub(super) fn update_selected_system_details(&mut self) {
+        let Some(system_id) = self.selected_system_id else {
+            self.status_message = "Select a system first".to_owned();
+            return;
+        };
+
+        let edited_name = self.edited_system_name.trim();
+        if edited_name.is_empty() {
+            self.status_message = "System name is required".to_owned();
+            return;
+        }
+
+        let naming_delimiter = self.selected_system_naming_delimiter.trim();
+        let naming_delimiter = if naming_delimiter.is_empty() {
+            "/"
+        } else {
+            naming_delimiter
+        };
+
+        let result = self
+            .repo
+            .update_system_details(
+                system_id,
+                edited_name,
+                self.edited_system_description.trim(),
+                self.selected_system_naming_root,
+                naming_delimiter,
+            )
+            .and_then(|_| self.refresh_systems())
+            .and_then(|_| self.load_selected_data(system_id));
+
+        match result {
+            Ok(_) => self.status_message = "System details updated".to_owned(),
+            Err(error) => {
+                self.status_message = format!("Failed to update system details: {error}")
+            }
+        }
+    }
+
     pub(super) fn select_note_for_edit(&mut self, note_id: i64) {
         self.selected_note_id_for_edit = Some(note_id);
         self.note_text = self
@@ -224,10 +263,19 @@ impl SystemsCatalogApp {
 
         let description = Self::text_to_option(&self.edited_tech_description);
         let documentation_link = Self::text_to_option(&self.edited_tech_documentation_link);
+        let color = self.edited_tech_color.map(Self::color_to_setting_value);
+        let display_priority = self.edited_tech_display_priority;
 
         let result = self
             .repo
-            .update_tech_item(tech_id, name, description, documentation_link)
+            .update_tech_item(
+                tech_id,
+                name,
+                description,
+                documentation_link,
+                color.as_deref(),
+                display_priority,
+            )
             .and_then(|_| {
                 self.refresh_systems().and_then(|_| {
                     if let Some(system_id) = self.selected_system_id {
@@ -273,6 +321,7 @@ impl SystemsCatalogApp {
         let result = self
             .repo
             .remove_tech_from_system(system_id, tech_id)
+            .and_then(|_| self.refresh_systems())
             .and_then(|_| self.load_selected_data(system_id));
 
         match result {
@@ -339,10 +388,18 @@ impl SystemsCatalogApp {
 
         let description = Self::text_to_option(&self.new_tech_description);
         let documentation_link = Self::text_to_option(&self.new_tech_documentation_link);
+        let color = self.new_tech_color.map(Self::color_to_setting_value);
+        let display_priority = self.new_tech_display_priority;
 
         let result = self
             .repo
-            .create_tech_item(name, description, documentation_link)
+            .create_tech_item(
+                name,
+                description,
+                documentation_link,
+                color.as_deref(),
+                display_priority,
+            )
             .and_then(|_| self.refresh_systems());
 
         match result {
@@ -350,6 +407,8 @@ impl SystemsCatalogApp {
                 self.new_tech_name.clear();
                 self.new_tech_description.clear();
                 self.new_tech_documentation_link.clear();
+                self.new_tech_color = None;
+                self.new_tech_display_priority = 0;
                 self.status_message = "Technology saved to catalog".to_owned();
             }
             Err(error) => {
@@ -372,6 +431,7 @@ impl SystemsCatalogApp {
         let result = self
             .repo
             .add_tech_to_system(system_id, tech_id)
+            .and_then(|_| self.refresh_systems())
             .and_then(|_| self.load_selected_data(system_id));
 
         match result {
@@ -394,11 +454,20 @@ impl SystemsCatalogApp {
 
         let parent_id = self.new_system_parent_id;
         let description = self.new_system_description.trim();
+        let assigned_tech_ids = self
+            .new_system_assigned_tech_ids
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
 
         let result = self
             .repo
             .create_system(name, description, parent_id)
             .and_then(|new_id| {
+                for tech_id in &assigned_tech_ids {
+                    self.repo.add_tech_to_system(new_id, *tech_id)?;
+                }
+
                 self.refresh_systems()?;
 
                 if let Some(spawn_position) = self.find_next_free_child_spawn_position(parent_id) {
@@ -414,6 +483,8 @@ impl SystemsCatalogApp {
                 self.new_system_name.clear();
                 self.new_system_description.clear();
                 self.new_system_parent_id = None;
+                self.new_system_tech_id_for_assignment = None;
+                self.new_system_assigned_tech_ids.clear();
                 self.show_add_system_modal = false;
                 self.show_add_tech_modal = false;
                 self.status_message = "System created".to_owned();

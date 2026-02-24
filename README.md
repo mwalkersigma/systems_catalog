@@ -37,6 +37,7 @@ The code is split into small modules with clear responsibilities:
 - Assign tech stack items to each system
 - Show cumulative deduplicated tech used by all child/descendant systems
 - Visual map-link mode (mind-map style): drag system nodes, Shift+drag between nodes to create links
+- Collapsible parent groups in map view: collapsed cards retain de-duplicated dependency connections from hidden descendants
 - Two-way sync: map and list view reflect the same underlying systems and links
 - Create and manage multiple notes per system
 - Save catalog snapshots to a database file and load them back

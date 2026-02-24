@@ -30,11 +30,14 @@ impl Repository {
             CREATE TABLE IF NOT EXISTS systems (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL UNIQUE,
+                display_name TEXT NULL,
                 description TEXT NOT NULL DEFAULT '',
                 parent_id INTEGER NULL,
                 map_x REAL NULL,
                 map_y REAL NULL,
                 line_color_override TEXT NULL,
+                naming_root INTEGER NOT NULL DEFAULT 0,
+                naming_delimiter TEXT NOT NULL DEFAULT '/',
                 FOREIGN KEY(parent_id) REFERENCES systems(id) ON DELETE SET NULL
             );
 
@@ -60,7 +63,9 @@ impl Repository {
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL UNIQUE,
                 description TEXT NULL,
-                documentation_link TEXT NULL
+                documentation_link TEXT NULL,
+                color TEXT NULL,
+                display_priority INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS system_tech (
@@ -80,7 +85,9 @@ impl Repository {
 
         self.ensure_systems_position_columns()?;
         self.ensure_system_line_color_override_column()?;
+        self.ensure_system_naming_columns()?;
         self.ensure_tech_catalog_columns()?;
+        self.ensure_tech_catalog_visual_columns()?;
         self.ensure_notes_table_shape()?;
 
         Ok(())
@@ -111,6 +118,34 @@ impl Repository {
         Ok(())
     }
 
+    fn ensure_system_naming_columns(&self) -> Result<()> {
+        if !self.table_has_column("systems", "display_name")? {
+            self.conn
+                .execute("ALTER TABLE systems ADD COLUMN display_name TEXT NULL", [])?;
+        }
+
+        if !self.table_has_column("systems", "naming_root")? {
+            self.conn.execute(
+                "ALTER TABLE systems ADD COLUMN naming_root INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
+
+        if !self.table_has_column("systems", "naming_delimiter")? {
+            self.conn.execute(
+                "ALTER TABLE systems ADD COLUMN naming_delimiter TEXT NOT NULL DEFAULT '/'",
+                [],
+            )?;
+        }
+
+        self.conn.execute(
+            "UPDATE systems SET display_name = name WHERE display_name IS NULL OR TRIM(display_name) = ''",
+            [],
+        )?;
+
+        Ok(())
+    }
+
     fn ensure_tech_catalog_columns(&self) -> Result<()> {
         if !self.table_has_column("tech_catalog", "description")? {
             self.conn.execute(
@@ -122,6 +157,22 @@ impl Repository {
         if !self.table_has_column("tech_catalog", "documentation_link")? {
             self.conn.execute(
                 "ALTER TABLE tech_catalog ADD COLUMN documentation_link TEXT NULL",
+                [],
+            )?;
+        }
+
+        Ok(())
+    }
+
+    fn ensure_tech_catalog_visual_columns(&self) -> Result<()> {
+        if !self.table_has_column("tech_catalog", "color")? {
+            self.conn
+                .execute("ALTER TABLE tech_catalog ADD COLUMN color TEXT NULL", [])?;
+        }
+
+        if !self.table_has_column("tech_catalog", "display_priority")? {
+            self.conn.execute(
+                "ALTER TABLE tech_catalog ADD COLUMN display_priority INTEGER NOT NULL DEFAULT 0",
                 [],
             )?;
         }
@@ -170,9 +221,18 @@ impl Repository {
     pub fn list_systems(&self) -> Result<Vec<SystemRecord>> {
         let mut stmt = self.conn.prepare(
             r#"
-            SELECT id, name, description, parent_id, map_x, map_y, line_color_override
+            SELECT
+                id,
+                COALESCE(NULLIF(display_name, ''), name) AS display_name,
+                description,
+                parent_id,
+                map_x,
+                map_y,
+                line_color_override,
+                naming_root,
+                naming_delimiter
             FROM systems
-            ORDER BY LOWER(name);
+            ORDER BY LOWER(COALESCE(NULLIF(display_name, ''), name));
             "#,
         )?;
 
@@ -186,6 +246,8 @@ impl Repository {
                     map_x: row.get(4)?,
                     map_y: row.get(5)?,
                     line_color_override: row.get(6)?,
+                    naming_root: row.get::<_, i64>(7)? != 0,
+                    naming_delimiter: row.get(8)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -199,12 +261,39 @@ impl Repository {
         description: &str,
         parent_id: Option<i64>,
     ) -> Result<i64> {
+        let mut unique_internal_name = name.trim().to_owned();
+        if unique_internal_name.is_empty() {
+            unique_internal_name = "system".to_owned();
+        }
+
+        let mut dedupe_suffix: i64 = 2;
+        while self
+            .conn
+            .query_row(
+                "SELECT 1 FROM systems WHERE name = ?1 LIMIT 1",
+                params![unique_internal_name.as_str()],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some()
+        {
+            unique_internal_name = format!("{}-{}", name.trim(), dedupe_suffix);
+            dedupe_suffix += 1;
+        }
+
         self.conn.execute(
             r#"
-            INSERT INTO systems (name, description, parent_id)
-            VALUES (?1, ?2, ?3)
+            INSERT INTO systems (
+                name,
+                display_name,
+                description,
+                parent_id,
+                naming_root,
+                naming_delimiter
+            )
+            VALUES (?1, ?2, ?3, ?4, 0, '/')
             "#,
-            params![name, description, parent_id],
+            params![unique_internal_name, name, description, parent_id],
         )?;
 
         Ok(self.conn.last_insert_rowid())
@@ -218,6 +307,35 @@ impl Repository {
             WHERE id = ?1
             "#,
             params![system_id, parent_id],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn update_system_details(
+        &self,
+        system_id: i64,
+        display_name: &str,
+        description: &str,
+        naming_root: bool,
+        naming_delimiter: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            r#"
+            UPDATE systems
+            SET display_name = ?2,
+                description = ?3,
+                naming_root = ?4,
+                naming_delimiter = ?5
+            WHERE id = ?1
+            "#,
+            params![
+                system_id,
+                display_name,
+                description,
+                if naming_root { 1 } else { 0 },
+                naming_delimiter
+            ],
         )?;
 
         Ok(())
@@ -490,9 +608,9 @@ impl Repository {
     pub fn list_tech_catalog(&self) -> Result<Vec<TechItem>> {
         let mut stmt = self.conn.prepare(
             r#"
-            SELECT id, name, description, documentation_link
+            SELECT id, name, description, documentation_link, color, display_priority
             FROM tech_catalog
-            ORDER BY LOWER(name)
+            ORDER BY display_priority DESC, LOWER(name)
             "#,
         )?;
 
@@ -503,6 +621,8 @@ impl Repository {
                     name: row.get(1)?,
                     description: row.get(2)?,
                     documentation_link: row.get(3)?,
+                    color: row.get(4)?,
+                    display_priority: row.get(5)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -515,13 +635,15 @@ impl Repository {
         name: &str,
         description: Option<&str>,
         documentation_link: Option<&str>,
+        color: Option<&str>,
+        display_priority: i64,
     ) -> Result<()> {
         self.conn.execute(
             r#"
-            INSERT INTO tech_catalog (name, description, documentation_link)
-            VALUES (?1, ?2, ?3)
+            INSERT INTO tech_catalog (name, description, documentation_link, color, display_priority)
+            VALUES (?1, ?2, ?3, ?4, ?5)
             "#,
-            params![name, description, documentation_link],
+            params![name, description, documentation_link, color, display_priority],
         )?;
 
         Ok(())
@@ -533,16 +655,27 @@ impl Repository {
         name: &str,
         description: Option<&str>,
         documentation_link: Option<&str>,
+        color: Option<&str>,
+        display_priority: i64,
     ) -> Result<()> {
         self.conn.execute(
             r#"
             UPDATE tech_catalog
             SET name = ?2,
                 description = ?3,
-                documentation_link = ?4
+                documentation_link = ?4,
+                color = ?5,
+                display_priority = ?6
             WHERE id = ?1
             "#,
-            params![tech_id, name, description, documentation_link],
+            params![
+                tech_id,
+                name,
+                description,
+                documentation_link,
+                color,
+                display_priority
+            ],
         )?;
 
         Ok(())
@@ -587,11 +720,11 @@ impl Repository {
     pub fn list_tech_for_system(&self, system_id: i64) -> Result<Vec<TechItem>> {
         let mut stmt = self.conn.prepare(
             r#"
-            SELECT tc.id, tc.name, tc.description, tc.documentation_link
+            SELECT tc.id, tc.name, tc.description, tc.documentation_link, tc.color, tc.display_priority
             FROM system_tech st
             JOIN tech_catalog tc ON tc.id = st.tech_id
             WHERE st.system_id = ?1
-            ORDER BY LOWER(tc.name)
+            ORDER BY tc.display_priority DESC, LOWER(tc.name)
             "#,
         )?;
 
@@ -602,6 +735,8 @@ impl Repository {
                     name: row.get(1)?,
                     description: row.get(2)?,
                     documentation_link: row.get(3)?,
+                    color: row.get(4)?,
+                    display_priority: row.get(5)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -623,6 +758,21 @@ impl Repository {
             .collect::<rusqlite::Result<Vec<_>>>()?;
 
         Ok(system_ids)
+    }
+
+    pub fn list_system_tech_assignments(&self) -> Result<Vec<(i64, i64)>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT system_id, tech_id
+            FROM system_tech
+            "#,
+        )?;
+
+        let assignments = stmt
+            .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        Ok(assignments)
     }
 
     pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {
@@ -653,5 +803,19 @@ impl Repository {
             .optional()?;
 
         Ok(value)
+    }
+
+    pub fn delete_settings(&self, keys: &[&str]) -> Result<()> {
+        for key in keys {
+            self.conn.execute(
+                r#"
+                DELETE FROM app_settings
+                WHERE key = ?1
+                "#,
+                params![key],
+            )?;
+        }
+
+        Ok(())
     }
 }
