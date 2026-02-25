@@ -8,7 +8,7 @@ use rfd::FileDialog;
 
 use crate::app::{
     ChildSpawnMode, LineStyle, LineTerminator, SidebarTab, SystemsCatalogApp, MAP_NODE_SIZE,
-    MAP_WORLD_SIZE,
+    MAP_MAX_ZOOM, MAP_MIN_ZOOM, MAP_WORLD_SIZE,
 };
 
 const MAP_GRID_SPACING: f32 = 48.0;
@@ -22,8 +22,130 @@ const MAP_CARD_LINE_HEIGHT: f32 = 20.0;
 const MAP_CARD_VERTICAL_PADDING: f32 = 30.0;
 const MAP_TEXT_SCALE_THRESHOLD_ZOOM: f32 = 0.5;
 const MAP_TEXT_MIN_LOW_ZOOM_MULTIPLIER: f32 = 0.7;
+const INTERACTION_NOTE_POPUP_OPEN_DELAY_SECS: f64 = 0.2;
+const INTERACTION_NOTE_POPUP_CLOSE_DELAY_SECS: f64 = 0.2;
 
 impl SystemsCatalogApp {
+    fn point_to_segment_distance(point: Pos2, segment_start: Pos2, segment_end: Pos2) -> f32 {
+        let segment = segment_end - segment_start;
+        let segment_length_sq = segment.length_sq();
+        if segment_length_sq <= f32::EPSILON {
+            return point.distance(segment_start);
+        }
+
+        let to_point = point - segment_start;
+        let projection = (to_point.dot(segment) / segment_length_sq).clamp(0.0, 1.0);
+        let projected_point = segment_start + (segment * projection);
+        point.distance(projected_point)
+    }
+
+    fn update_interaction_note_popup_state(
+        &mut self,
+        hovered: Option<crate::app::InteractionPopupState>,
+        now_secs: f64,
+    ) {
+        if let Some(mut hovered_state) = hovered {
+            self.interaction_popup_close_at_secs = None;
+
+            if let Some(active) = self.interaction_popup_active.as_mut() {
+                if active.source_system_name == hovered_state.source_system_name
+                    && active.target_system_name == hovered_state.target_system_name
+                    && active.note == hovered_state.note
+                {
+                    active.anchor_screen = hovered_state.anchor_screen;
+                    self.interaction_popup_pending = None;
+                    self.interaction_popup_pending_open_at_secs = None;
+                    return;
+                }
+            }
+
+            if let Some(pending) = self.interaction_popup_pending.as_mut() {
+                let same_pending = pending.source_system_name == hovered_state.source_system_name
+                    && pending.target_system_name == hovered_state.target_system_name
+                    && pending.note == hovered_state.note;
+
+                if same_pending {
+                    pending.anchor_screen = hovered_state.anchor_screen;
+                } else {
+                    self.interaction_popup_pending = Some(hovered_state.clone());
+                    self.interaction_popup_pending_open_at_secs =
+                        Some(now_secs + INTERACTION_NOTE_POPUP_OPEN_DELAY_SECS);
+                }
+            } else {
+                self.interaction_popup_pending = Some(hovered_state.clone());
+                self.interaction_popup_pending_open_at_secs =
+                    Some(now_secs + INTERACTION_NOTE_POPUP_OPEN_DELAY_SECS);
+            }
+
+            if let Some(open_at) = self.interaction_popup_pending_open_at_secs {
+                if now_secs >= open_at {
+                    if let Some(pending) = self.interaction_popup_pending.take() {
+                        hovered_state.anchor_screen = pending.anchor_screen;
+                        self.interaction_popup_active = Some(pending);
+                        self.interaction_popup_pending_open_at_secs = None;
+                    }
+                }
+            }
+
+            return;
+        }
+
+        self.interaction_popup_pending = None;
+        self.interaction_popup_pending_open_at_secs = None;
+
+        if self.interaction_popup_active.is_some() {
+            let close_at = self
+                .interaction_popup_close_at_secs
+                .get_or_insert(now_secs + INTERACTION_NOTE_POPUP_CLOSE_DELAY_SECS);
+
+            if now_secs >= *close_at {
+                self.interaction_popup_active = None;
+                self.interaction_popup_close_at_secs = None;
+            }
+        }
+    }
+
+    fn render_interaction_note_popup(&self, painter: &egui::Painter, map_rect: Rect) {
+        let Some(popup) = &self.interaction_popup_active else {
+            return;
+        };
+
+        if popup.note.trim().is_empty() {
+            return;
+        }
+
+        let text = format!(
+            "{} -> {}\n{}",
+            popup.source_system_name, popup.target_system_name, popup.note
+        );
+
+        let text_color = Color32::from_gray(235);
+        let background = Color32::from_rgba_unmultiplied(28, 28, 30, 245);
+        let border = Color32::from_gray(130);
+        let padding = Vec2::new(10.0, 8.0);
+        let max_text_width = 320.0;
+
+        let galley = painter.layout(
+            text,
+            FontId::proportional(14.0),
+            text_color,
+            max_text_width,
+        );
+
+        let popup_size = galley.size() + (padding * 2.0);
+        let mut popup_pos = popup.anchor_screen + Vec2::new(14.0, 14.0);
+
+        let max_x = (map_rect.right() - popup_size.x - 6.0).max(map_rect.left() + 6.0);
+        let max_y = (map_rect.bottom() - popup_size.y - 6.0).max(map_rect.top() + 6.0);
+        popup_pos.x = popup_pos.x.clamp(map_rect.left() + 6.0, max_x);
+        popup_pos.y = popup_pos.y.clamp(map_rect.top() + 6.0, max_y);
+
+        let popup_rect = Rect::from_min_size(popup_pos, popup_size);
+        painter.rect_filled(popup_rect, 6.0, background);
+        painter.rect_stroke(popup_rect, 6.0, Stroke::new(1.0, border));
+        painter.galley(popup_pos + padding, galley, text_color);
+    }
+
     fn disclosure_icon(is_collapsed: bool) -> &'static str {
         if is_collapsed {
             "+"
@@ -717,6 +839,69 @@ impl SystemsCatalogApp {
         self.show_add_tech_modal = self.show_add_tech_modal && open;
     }
 
+    fn render_bulk_add_systems_modal(&mut self, ctx: &egui::Context) {
+        if !self.show_bulk_add_systems_modal {
+            return;
+        }
+
+        let mut open = self.show_bulk_add_systems_modal;
+        let mut close_requested = false;
+
+        egui::Window::new("Bulk Add Systems")
+            .collapsible(false)
+            .resizable(true)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.label("Enter comma-separated system names");
+                ui.label("Example: users, orders, invoices");
+                ui.add(
+                    egui::TextEdit::multiline(&mut self.bulk_new_system_names)
+                        .desired_rows(6)
+                        .hint_text("users, orders, invoices"),
+                );
+
+                let selected_parent_label = self
+                    .bulk_new_system_parent_id
+                    .map(|id| self.system_name_by_id(id))
+                    .unwrap_or_else(|| "No parent (root systems)".to_owned());
+
+                egui::ComboBox::from_label("Parent")
+                    .selected_text(selected_parent_label)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut self.bulk_new_system_parent_id,
+                            None,
+                            "No parent (root systems)",
+                        );
+
+                        for system in &self.systems {
+                            ui.selectable_value(
+                                &mut self.bulk_new_system_parent_id,
+                                Some(system.id),
+                                system.name.as_str(),
+                            );
+                        }
+                    });
+
+                ui.horizontal(|ui| {
+                    if ui.button("Create all").clicked() {
+                        self.create_systems_bulk_from_list();
+                        close_requested = !self.show_bulk_add_systems_modal;
+                    }
+
+                    if ui.button("Cancel").clicked() {
+                        close_requested = true;
+                    }
+                });
+            });
+
+        if close_requested {
+            open = false;
+        }
+
+        self.show_bulk_add_systems_modal = self.show_bulk_add_systems_modal && open;
+    }
+
     fn render_line_style_modal(&mut self, ctx: &egui::Context) {
         if !self.show_line_style_modal {
             return;
@@ -1334,12 +1519,15 @@ impl SystemsCatalogApp {
                         if ui.selectable_label(was_selected, label).clicked() {
                             self.selected_link_id_for_edit = Some(link.id);
                             self.edited_link_label = link.label.clone();
+                            self.edited_link_note = link.note.clone();
                         }
                     }
                 });
 
             ui.label("Interaction label");
             ui.text_edit_singleline(&mut self.edited_link_label);
+            ui.label("Interaction note");
+            ui.add(egui::TextEdit::multiline(&mut self.edited_link_note).desired_rows(3));
             ui.horizontal(|ui| {
                 if ui.button("Update interaction").clicked() {
                     self.update_selected_link();
@@ -1473,7 +1661,7 @@ impl SystemsCatalogApp {
 
     fn apply_map_zoom_anchored_to_view_center(&mut self, map_rect: Rect, target_zoom: f32) {
         let old_zoom = self.map_zoom;
-        let new_zoom = target_zoom.clamp(0.25, 1.5);
+        let new_zoom = target_zoom.clamp(MAP_MIN_ZOOM, MAP_MAX_ZOOM);
         if (new_zoom - old_zoom).abs() <= f32::EPSILON {
             return;
         }
@@ -1494,7 +1682,7 @@ impl SystemsCatalogApp {
 
     fn render_map_canvas(&mut self, ui: &mut egui::Ui) {
         ui.heading("Mind Map");
-        ui.label("Hold Space and drag to pan. Scroll to zoom. Shift+drag from a node to create an interaction. Drag on empty map space to box-select systems.");
+        ui.label("Hold Space and drag to pan. Scroll to zoom. Shift+drag from a child node onto a parent node to assign parent. Drag on empty map space to box-select systems.");
 
         let mut requested_zoom: Option<f32> = None;
 
@@ -1502,11 +1690,11 @@ impl SystemsCatalogApp {
             ui.label("Zoom");
 
             if ui.small_button("-").clicked() {
-                requested_zoom = Some((self.map_zoom - 0.1).max(0.25));
+                requested_zoom = Some((self.map_zoom - 0.1).max(MAP_MIN_ZOOM));
             }
 
             if ui.small_button("+").clicked() {
-                requested_zoom = Some((self.map_zoom + 0.1).min(1.5));
+                requested_zoom = Some((self.map_zoom + 0.1).min(MAP_MAX_ZOOM));
             }
 
             if ui.small_button("Reset zoom").clicked() {
@@ -1567,7 +1755,7 @@ impl SystemsCatalogApp {
         let zoom_active = pointer_over_map || map_response.has_focus();
         if zoom_active && wheel_delta_y.abs() > f32::EPSILON {
             let zoom_step = (wheel_delta_y / 400.0).clamp(-0.15, 0.15);
-            requested_zoom = Some((self.map_zoom + zoom_step).clamp(0.25, 1.5));
+            requested_zoom = Some((self.map_zoom + zoom_step).clamp(MAP_MIN_ZOOM, MAP_MAX_ZOOM));
         }
 
         if let Some(target_zoom) = requested_zoom {
@@ -1747,8 +1935,15 @@ impl SystemsCatalogApp {
             }
         }
 
+        let pointer_hover = ui.input(|input| input.pointer.hover_pos());
+        let mut closest_hovered_interaction: Option<(crate::app::InteractionPopupState, f32)> =
+            None;
+
         if self.show_interaction_lines {
-            for (source_system_id, target_system_id) in self.deduped_visible_interaction_edges() {
+            for interaction in self.deduped_visible_interactions() {
+                let source_system_id = interaction.source_system_id;
+                let target_system_id = interaction.target_system_id;
+
                 let Some(source_rect) = node_rects.get(&source_system_id) else {
                     continue;
                 };
@@ -1784,8 +1979,46 @@ impl SystemsCatalogApp {
                     dimmed || dimmed_for_tech,
                     selected_id.is_some() && boosted,
                 );
+
+                if !interaction.note.trim().is_empty() {
+                    if let Some(pointer) = pointer_hover.filter(|pos| map_rect.contains(*pos)) {
+                        let hover_distance = Self::point_to_segment_distance(pointer, from, to);
+                        let hover_threshold = (10.0 * self.map_zoom).clamp(8.0, 18.0);
+                        if hover_distance <= hover_threshold {
+                            let popup_state = crate::app::InteractionPopupState {
+                                source_system_name: self.system_name_by_id(source_system_id),
+                                target_system_name: self.system_name_by_id(target_system_id),
+                                note: interaction.note.clone(),
+                                anchor_screen: pointer,
+                            };
+
+                            match &closest_hovered_interaction {
+                                Some((_, best_distance)) if *best_distance <= hover_distance => {}
+                                _ => {
+                                    closest_hovered_interaction =
+                                        Some((popup_state, hover_distance));
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
+
+        let now_secs = ui.input(|input| input.time);
+        let clicked_on_interaction = ui.input(|input| input.pointer.primary_clicked());
+        if clicked_on_interaction {
+            if let Some((popup_state, _)) = closest_hovered_interaction.clone() {
+                self.interaction_popup_active = Some(popup_state);
+                self.interaction_popup_pending = None;
+                self.interaction_popup_pending_open_at_secs = None;
+                self.interaction_popup_close_at_secs = None;
+            }
+        }
+
+        let hovered_popup_state = closest_hovered_interaction.map(|(state, _)| state);
+        self.update_interaction_note_popup_state(hovered_popup_state, now_secs);
+        self.render_interaction_note_popup(&painter, map_rect);
 
         let mut snap_preview_positions: HashMap<i64, Pos2> = HashMap::new();
 
@@ -1814,12 +2047,16 @@ impl SystemsCatalogApp {
 
             if response.clicked() {
                 let ctrl_held = ui.input(|input| input.modifiers.ctrl);
+                let alt_held = ui.input(|input| input.modifiers.alt);
                 if let Some(source_id) = self.map_link_click_source {
                     if source_id != system.id {
                         self.create_link_between(source_id, system.id, "");
                         self.map_link_click_source = None;
                     }
                 } else if ctrl_held {
+                    self.select_system(system.id);
+                    self.selected_map_system_ids = self.system_and_descendant_ids(system.id);
+                } else if alt_held {
                     self.select_system(system.id);
                     self.selected_map_system_ids = self.system_and_ancestor_ids(system.id);
                 } else if self.fast_add_selected_catalog_tech_on_map {
@@ -2100,7 +2337,7 @@ impl SystemsCatalogApp {
                         &painter,
                         from,
                         pointer_pos,
-                        self.interaction_line_style,
+                        self.parent_line_style,
                         false,
                         false,
                     );
@@ -2120,7 +2357,7 @@ impl SystemsCatalogApp {
                 self.map_link_drag_from = None;
 
                 if let Some(target_id) = target {
-                    self.create_link_between(source_id, target_id, "");
+                    self.assign_parent_between(source_id, target_id);
                 }
             }
         }
@@ -2176,6 +2413,9 @@ impl eframe::App for SystemsCatalogApp {
                 if ui.button("Add System").clicked() {
                     self.open_add_system_modal_with_prefill(self.selected_system_id);
                 }
+                if ui.button("Bulk Add").clicked() {
+                    self.open_bulk_add_systems_modal_with_prefill(self.selected_system_id);
+                }
                 if ui.button("Add Technology").clicked() {
                     self.show_add_tech_modal = true;
                 }
@@ -2219,6 +2459,7 @@ impl eframe::App for SystemsCatalogApp {
         });
 
         self.render_add_system_modal(ctx);
+        self.render_bulk_add_systems_modal(ctx);
         self.render_add_tech_modal(ctx);
         self.render_save_catalog_modal(ctx);
         self.render_load_catalog_modal(ctx);

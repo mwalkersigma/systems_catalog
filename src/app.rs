@@ -9,9 +9,11 @@ use eframe::egui::{Color32, Pos2, Rect, Vec2};
 use crate::db::Repository;
 use crate::models::{SystemLink, SystemNote, SystemRecord, TechItem};
 
-const MAP_NODE_SIZE: Vec2 = Vec2::new(170.0, 64.0);
-const MAP_WORLD_SIZE: Vec2 = Vec2::new(12000.0, 12000.0);
-const MAP_GRID_SPACING: f32 = 48.0;
+pub(crate) const MAP_NODE_SIZE: Vec2 = Vec2::new(170.0, 64.0);
+pub(crate) const MAP_WORLD_SIZE: Vec2 = Vec2::new(12000.0, 12000.0);
+pub(crate) const MAP_GRID_SPACING: f32 = 48.0;
+pub(crate) const MAP_MIN_ZOOM: f32 = 0.05;
+pub(crate) const MAP_MAX_ZOOM: f32 = 1.5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LineTerminator {
@@ -39,6 +41,21 @@ pub enum ChildSpawnMode {
     BelowPrevious,
 }
 
+#[derive(Debug, Clone)]
+pub struct VisibleInteraction {
+    pub source_system_id: i64,
+    pub target_system_id: i64,
+    pub note: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct InteractionPopupState {
+    pub source_system_name: String,
+    pub target_system_name: String,
+    pub note: String,
+    pub anchor_screen: Pos2,
+}
+
 /// Primary UI application state.
 ///
 /// TypeScript analogy: this struct is similar to a React component's local state + service
@@ -60,6 +77,8 @@ pub struct SystemsCatalogApp {
     new_system_name: String,
     new_system_description: String,
     new_system_parent_id: Option<i64>,
+    bulk_new_system_names: String,
+    bulk_new_system_parent_id: Option<i64>,
     new_child_spawn_mode: ChildSpawnMode,
     new_system_tech_id_for_assignment: Option<i64>,
     new_system_assigned_tech_ids: HashSet<i64>,
@@ -73,6 +92,7 @@ pub struct SystemsCatalogApp {
     new_link_label: String,
     selected_link_id_for_edit: Option<i64>,
     edited_link_label: String,
+    edited_link_note: String,
 
     new_tech_name: String,
     new_tech_description: String,
@@ -102,9 +122,14 @@ pub struct SystemsCatalogApp {
     map_zoom: f32,
     map_pan: Vec2,
     map_last_view_center_local: Option<Pos2>,
+    interaction_popup_pending: Option<InteractionPopupState>,
+    interaction_popup_pending_open_at_secs: Option<f64>,
+    interaction_popup_active: Option<InteractionPopupState>,
+    interaction_popup_close_at_secs: Option<f64>,
     collapsed_system_ids: HashSet<i64>,
 
     show_add_system_modal: bool,
+    show_bulk_add_systems_modal: bool,
     focus_add_system_name_on_open: bool,
     focus_add_tech_name_on_open: bool,
     show_add_tech_modal: bool,
@@ -148,6 +173,8 @@ impl SystemsCatalogApp {
             new_system_name: String::new(),
             new_system_description: String::new(),
             new_system_parent_id: None,
+            bulk_new_system_names: String::new(),
+            bulk_new_system_parent_id: None,
             new_child_spawn_mode: ChildSpawnMode::RightOfPrevious,
             new_system_tech_id_for_assignment: None,
             new_system_assigned_tech_ids: HashSet::new(),
@@ -160,6 +187,7 @@ impl SystemsCatalogApp {
             new_link_label: String::new(),
             selected_link_id_for_edit: None,
             edited_link_label: String::new(),
+            edited_link_note: String::new(),
             new_tech_name: String::new(),
             new_tech_description: String::new(),
             new_tech_documentation_link: String::new(),
@@ -187,8 +215,13 @@ impl SystemsCatalogApp {
             map_zoom: 1.0,
             map_pan: Vec2::ZERO,
             map_last_view_center_local: None,
+            interaction_popup_pending: None,
+            interaction_popup_pending_open_at_secs: None,
+            interaction_popup_active: None,
+            interaction_popup_close_at_secs: None,
             collapsed_system_ids: HashSet::new(),
             show_add_system_modal: false,
+            show_bulk_add_systems_modal: false,
             focus_add_system_name_on_open: false,
             focus_add_tech_name_on_open: false,
             show_add_tech_modal: false,
@@ -304,6 +337,7 @@ impl SystemsCatalogApp {
             if !still_exists {
                 self.selected_link_id_for_edit = None;
                 self.edited_link_label.clear();
+                self.edited_link_note.clear();
             }
         }
 
@@ -311,6 +345,7 @@ impl SystemsCatalogApp {
             if let Some(first_link) = self.selected_links.first() {
                 self.selected_link_id_for_edit = Some(first_link.id);
                 self.edited_link_label = first_link.label.clone();
+                self.edited_link_note = first_link.note.clone();
             }
         }
 
@@ -568,9 +603,9 @@ impl SystemsCatalogApp {
         representative_by_system
     }
 
-    fn deduped_visible_interaction_edges(&self) -> Vec<(i64, i64)> {
+    fn deduped_visible_interactions(&self) -> Vec<VisibleInteraction> {
         let representative_by_system = self.visible_representative_system_map();
-        let mut edges = HashSet::new();
+        let mut by_edge: HashMap<(i64, i64), String> = HashMap::new();
 
         for link in &self.all_links {
             let Some(source_id) = representative_by_system.get(&link.source_system_id).copied()
@@ -587,12 +622,29 @@ impl SystemsCatalogApp {
                 continue;
             }
 
-            edges.insert((source_id, target_id));
+            by_edge
+                .entry((source_id, target_id))
+                .and_modify(|note| {
+                    if note.trim().is_empty() && !link.note.trim().is_empty() {
+                        *note = link.note.clone();
+                    }
+                })
+                .or_insert_with(|| link.note.clone());
         }
 
-        let mut sorted_edges = edges.into_iter().collect::<Vec<_>>();
-        sorted_edges.sort_unstable();
-        sorted_edges
+        let mut interactions = by_edge
+            .into_iter()
+            .map(|((source_system_id, target_system_id), note)| VisibleInteraction {
+                source_system_id,
+                target_system_id,
+                note,
+            })
+            .collect::<Vec<_>>();
+
+        interactions.sort_by_key(|interaction| {
+            (interaction.source_system_id, interaction.target_system_id)
+        });
+        interactions
     }
 
     fn on_disclosure_click(&mut self, system_id: i64) {
@@ -631,7 +683,12 @@ impl SystemsCatalogApp {
         self.selected_system_naming_delimiter = "/".to_owned();
         self.selected_link_id_for_edit = None;
         self.edited_link_label.clear();
+        self.edited_link_note.clear();
         self.map_link_click_source = None;
+        self.interaction_popup_pending = None;
+        self.interaction_popup_pending_open_at_secs = None;
+        self.interaction_popup_active = None;
+        self.interaction_popup_close_at_secs = None;
     }
 
     fn terminator_to_setting_value(terminator: LineTerminator) -> &'static str {
@@ -688,7 +745,7 @@ impl SystemsCatalogApp {
     fn load_ui_settings(&mut self) -> Result<()> {
         if let Some(value) = self.repo.get_setting("map_zoom")? {
             if let Ok(parsed) = value.parse::<f32>() {
-                self.map_zoom = parsed.clamp(0.25, 1.5);
+                self.map_zoom = parsed.clamp(MAP_MIN_ZOOM, MAP_MAX_ZOOM);
             }
         }
 
@@ -943,6 +1000,20 @@ impl SystemsCatalogApp {
         self.focus_add_system_name_on_open = true;
     }
 
+    fn open_bulk_add_systems_modal_with_prefill(&mut self, parent_id: Option<i64>) {
+        self.bulk_new_system_parent_id = parent_id;
+        self.show_bulk_add_systems_modal = true;
+    }
+
+    fn ensure_valid_bulk_parent_selection(&mut self) {
+        if let Some(parent_id) = self.bulk_new_system_parent_id {
+            let exists = self.systems.iter().any(|system| system.id == parent_id);
+            if !exists {
+                self.bulk_new_system_parent_id = None;
+            }
+        }
+    }
+
     fn ensure_valid_selected_parent_selection(&mut self) {
         if let Some(parent_id) = self.selected_system_parent_id {
             let exists = self.systems.iter().any(|system| system.id == parent_id);
@@ -976,6 +1047,7 @@ impl SystemsCatalogApp {
             if !exists {
                 self.selected_link_id_for_edit = None;
                 self.edited_link_label.clear();
+                self.edited_link_note.clear();
             }
         }
     }
@@ -1118,6 +1190,23 @@ impl SystemsCatalogApp {
         }
 
         result
+    }
+
+    fn system_and_descendant_ids(&self, system_id: i64) -> HashSet<i64> {
+        let mut children_by_parent: HashMap<Option<i64>, Vec<i64>> = HashMap::new();
+        for system in &self.systems {
+            children_by_parent
+                .entry(system.parent_id)
+                .or_default()
+                .push(system.id);
+        }
+
+        let mut descendant_ids = Vec::new();
+        self.collect_descendant_ids(system_id, &children_by_parent, &mut descendant_ids);
+
+        let mut selected = descendant_ids.into_iter().collect::<HashSet<_>>();
+        selected.insert(system_id);
+        selected
     }
 
     fn ensure_map_positions(&mut self) {
@@ -1321,6 +1410,7 @@ impl SystemsCatalogApp {
 
     fn validate_before_render(&mut self) -> Result<()> {
         self.ensure_valid_parent_selection();
+        self.ensure_valid_bulk_parent_selection();
         self.ensure_valid_selected_parent_selection();
         self.ensure_valid_link_target_selection();
         self.ensure_valid_tech_selection();

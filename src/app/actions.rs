@@ -209,6 +209,7 @@ impl SystemsCatalogApp {
         };
 
         let label = self.edited_link_label.trim();
+        let note = self.edited_link_note.trim();
         let Some(system_id) = self.selected_system_id else {
             self.status_message = "Select a system first".to_owned();
             return;
@@ -216,7 +217,7 @@ impl SystemsCatalogApp {
 
         let result = self
             .repo
-            .update_link_label(link_id, label)
+            .update_link_details(link_id, label, note)
             .and_then(|_| self.refresh_systems())
             .and_then(|_| self.load_selected_data(system_id));
 
@@ -501,6 +502,59 @@ impl SystemsCatalogApp {
         }
     }
 
+    pub(super) fn create_systems_bulk_from_list(&mut self) {
+        let names = self
+            .bulk_new_system_names
+            .split(|character| character == ',' || character == '\n' || character == '\r')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(|name| name.to_owned())
+            .collect::<Vec<_>>();
+
+        if names.is_empty() {
+            self.status_message = "Enter at least one system name".to_owned();
+            return;
+        }
+
+        let parent_id = self.bulk_new_system_parent_id;
+
+        let result = (|| -> anyhow::Result<()> {
+            let mut created_ids = Vec::new();
+            for name in &names {
+                let new_id = self.repo.create_system(name, "", parent_id)?;
+                created_ids.push(new_id);
+            }
+
+            self.refresh_systems()?;
+
+            for created_id in created_ids {
+                let spawn_position = if parent_id.is_some() {
+                    self.find_next_free_child_spawn_position(parent_id)
+                } else {
+                    Some(self.find_next_free_root_spawn_position())
+                };
+
+                if let Some(position) = spawn_position {
+                    self.map_positions.insert(created_id, position);
+                    self.persist_map_position(created_id, position);
+                }
+            }
+
+            Ok(())
+        })();
+
+        match result {
+            Ok(_) => {
+                self.bulk_new_system_names.clear();
+                self.show_bulk_add_systems_modal = false;
+                self.status_message = format!("Created {} systems", names.len());
+            }
+            Err(error) => {
+                self.status_message = format!("Failed to bulk-create systems: {error}");
+            }
+        }
+    }
+
     pub(super) fn fast_add_selected_catalog_tech_to_system(&mut self, system_id: i64) {
         let Some(tech_id) = self.selected_catalog_tech_id_for_edit else {
             self.status_message = "Select a technology in Tech Catalog first".to_owned();
@@ -577,6 +631,42 @@ impl SystemsCatalogApp {
             }
             Err(error) => {
                 self.status_message = format!("Failed to create interaction: {error}");
+            }
+        }
+    }
+
+    pub(super) fn assign_parent_between(&mut self, child_id: i64, parent_id: i64) {
+        if child_id == parent_id {
+            self.status_message = "A system cannot be its own parent".to_owned();
+            return;
+        }
+
+        if self.would_create_parent_cycle(child_id, parent_id) {
+            self.status_message = "Invalid parent: this would create a cycle".to_owned();
+            return;
+        }
+
+        let child_name = self.system_name_by_id(child_id);
+        let parent_name = self.system_name_by_id(parent_id);
+
+        let result = self
+            .repo
+            .update_system_parent(child_id, Some(parent_id))
+            .and_then(|_| self.refresh_systems())
+            .and_then(|_| {
+                if self.selected_system_id == Some(child_id) {
+                    self.load_selected_data(child_id)?;
+                }
+                Ok(())
+            });
+
+        match result {
+            Ok(_) => {
+                self.status_message =
+                    format!("Assigned parent: '{parent_name}' <- '{child_name}'");
+            }
+            Err(error) => {
+                self.status_message = format!("Failed to assign parent: {error}");
             }
         }
     }

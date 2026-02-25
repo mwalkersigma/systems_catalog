@@ -21,6 +21,7 @@ pub struct SystemLink {
     pub source_system_id: i64,
     pub target_system_id: i64,
     pub label: String,
+    pub note: String,
 }
 
 /// Notes attached to one system.
