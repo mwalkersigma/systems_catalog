@@ -8,7 +8,7 @@ use rfd::FileDialog;
 
 use crate::app::{
     ChildSpawnMode, LineStyle, LineTerminator, SidebarTab, SystemsCatalogApp, MAP_NODE_SIZE,
-    MAP_MAX_ZOOM, MAP_MIN_ZOOM, MAP_WORLD_SIZE,
+    MAP_MAX_ZOOM, MAP_MIN_ZOOM, MAP_WORLD_SIZE, InteractionKind,
 };
 
 const MAP_GRID_SPACING: f32 = 48.0;
@@ -382,6 +382,22 @@ impl SystemsCatalogApp {
         style
     }
 
+    fn interaction_line_style_for_kind(
+        &self,
+        source_system_id: i64,
+        target_system_id: i64,
+        kind: InteractionKind,
+    ) -> LineStyle {
+        let mut style = self.interaction_line_style_for(source_system_id, target_system_id);
+        style.terminator = match kind {
+            InteractionKind::Push => LineTerminator::FilledArrow,
+            InteractionKind::Pull => LineTerminator::Arrow,
+            InteractionKind::Standard => LineTerminator::Arrow,
+            InteractionKind::Bidirectional => LineTerminator::Arrow,
+        };
+        style
+    }
+
     fn rect_edge_point(rect: Rect, direction_from_center: Vec2) -> Pos2 {
         let center = rect.center();
         let half_width = (rect.width() * 0.5 - 2.0).max(1.0);
@@ -494,6 +510,25 @@ impl SystemsCatalogApp {
                 ));
             }
         }
+    }
+
+    fn draw_bidirectional_connection(
+        &self,
+        painter: &egui::Painter,
+        from: Pos2,
+        to: Pos2,
+        style: LineStyle,
+        dimmed: bool,
+        boosted: bool,
+    ) {
+        let color = self.line_color(style, dimmed, boosted);
+        let stroke = Stroke::new(style.width * self.map_zoom.clamp(0.8, 1.8), color);
+        painter.line_segment([from, to], stroke);
+
+        let mut arrow_style = style;
+        arrow_style.terminator = LineTerminator::Arrow;
+        self.draw_directed_connection(painter, from, to, arrow_style, dimmed, boosted);
+        self.draw_directed_connection(painter, to, from, arrow_style, dimmed, boosted);
     }
 
     fn terminator_label(terminator: LineTerminator) -> &'static str {
@@ -854,11 +889,15 @@ impl SystemsCatalogApp {
             .show(ctx, |ui| {
                 ui.label("Enter comma-separated system names");
                 ui.label("Example: users, orders, invoices");
-                ui.add(
+                let input_response = ui.add(
                     egui::TextEdit::multiline(&mut self.bulk_new_system_names)
                         .desired_rows(6)
                         .hint_text("users, orders, invoices"),
                 );
+                if self.focus_bulk_add_system_names_on_open {
+                    input_response.request_focus();
+                    self.focus_bulk_add_system_names_on_open = false;
+                }
 
                 let selected_parent_label = self
                     .bulk_new_system_parent_id
@@ -1013,6 +1052,39 @@ impl SystemsCatalogApp {
             });
 
         self.show_line_style_modal = open;
+    }
+
+    fn render_hotkeys_modal(&mut self, ctx: &egui::Context) {
+        if !self.show_hotkeys_modal {
+            return;
+        }
+
+        let mut open = self.show_hotkeys_modal;
+        egui::Window::new("Hotkeys")
+            .collapsible(false)
+            .resizable(true)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.label("Ctrl+N  -> Add System");
+                ui.label("Ctrl+Shift+N  -> Bulk Add Systems");
+                ui.label("Alt+N  -> Add Technology");
+                ui.label("Delete  -> Delete selected system");
+                ui.label("Ctrl+Z  -> Undo map move");
+                ui.separator();
+                ui.label("Ctrl+Click  -> Select system + descendants");
+                ui.label("Alt+Click  -> Select system + ancestors");
+                ui.separator();
+                ui.label("Shift + drag (child -> parent)  -> Assign parent");
+                ui.label("Ctrl+R + drag (A -> B)  -> Standard interaction");
+                ui.label("Ctrl+B + drag (A -> B)  -> Pull interaction");
+                ui.label("Ctrl+F + drag (A -> B)  -> Push interaction");
+                ui.label("Ctrl+D + drag (A <-> B)  -> Bidirectional interaction");
+                if ui.button("Close").clicked() {
+                    self.show_hotkeys_modal = false;
+                }
+            });
+
+        self.show_hotkeys_modal = open;
     }
 
     fn render_save_catalog_modal(&mut self, ctx: &egui::Context) {
@@ -1520,12 +1592,38 @@ impl SystemsCatalogApp {
                             self.selected_link_id_for_edit = Some(link.id);
                             self.edited_link_label = link.label.clone();
                             self.edited_link_note = link.note.clone();
+                            self.edited_link_kind =
+                                Self::interaction_kind_from_setting_value(link.kind.as_str());
                         }
                     }
                 });
 
             ui.label("Interaction label");
             ui.text_edit_singleline(&mut self.edited_link_label);
+            egui::ComboBox::from_label("Interaction type")
+                .selected_text(Self::interaction_kind_label(self.edited_link_kind))
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut self.edited_link_kind,
+                        InteractionKind::Standard,
+                        Self::interaction_kind_label(InteractionKind::Standard),
+                    );
+                    ui.selectable_value(
+                        &mut self.edited_link_kind,
+                        InteractionKind::Pull,
+                        Self::interaction_kind_label(InteractionKind::Pull),
+                    );
+                    ui.selectable_value(
+                        &mut self.edited_link_kind,
+                        InteractionKind::Push,
+                        Self::interaction_kind_label(InteractionKind::Push),
+                    );
+                    ui.selectable_value(
+                        &mut self.edited_link_kind,
+                        InteractionKind::Bidirectional,
+                        Self::interaction_kind_label(InteractionKind::Bidirectional),
+                    );
+                });
             ui.label("Interaction note");
             ui.add(egui::TextEdit::multiline(&mut self.edited_link_note).desired_rows(3));
             ui.horizontal(|ui| {
@@ -1657,6 +1755,68 @@ impl SystemsCatalogApp {
                 self.delete_selected_note();
             }
         });
+
+        ui.separator();
+        ui.label("Focused flow inspector");
+
+        let from_label = self
+            .flow_inspector_from_system_id
+            .map(|id| self.system_name_by_id(id))
+            .unwrap_or_else(|| "Select source system".to_owned());
+        let to_label = self
+            .flow_inspector_to_system_id
+            .map(|id| self.system_name_by_id(id))
+            .unwrap_or_else(|| "Select target system".to_owned());
+
+        egui::ComboBox::from_label("From")
+            .selected_text(from_label)
+            .show_ui(ui, |ui| {
+                for candidate in &self.systems {
+                    ui.selectable_value(
+                        &mut self.flow_inspector_from_system_id,
+                        Some(candidate.id),
+                        candidate.name.as_str(),
+                    );
+                }
+            });
+
+        egui::ComboBox::from_label("To")
+            .selected_text(to_label)
+            .show_ui(ui, |ui| {
+                for candidate in &self.systems {
+                    ui.selectable_value(
+                        &mut self.flow_inspector_to_system_id,
+                        Some(candidate.id),
+                        candidate.name.as_str(),
+                    );
+                }
+            });
+
+        if let (Some(from_id), Some(to_id)) =
+            (self.flow_inspector_from_system_id, self.flow_inspector_to_system_id)
+        {
+            if from_id == to_id {
+                ui.label("Select two different systems.");
+            } else if let Some(path) = self.focused_flow_shortest_path(from_id, to_id) {
+                if path.is_empty() {
+                    ui.label("Source and target are the same system.");
+                } else {
+                    ui.label("Shortest data-flow path");
+                    for (from, kind, to) in path {
+                        ui.label(format!(
+                            "{} -[{}]-> {}",
+                            self.system_name_by_id(from),
+                            Self::interaction_kind_label(kind),
+                            self.system_name_by_id(to)
+                        ));
+                    }
+                }
+            } else {
+                ui.label("No directed data-flow path found with current interactions.");
+            }
+        } else {
+            ui.label("Pick source and target to inspect data flow.");
+        }
     }
 
     fn apply_map_zoom_anchored_to_view_center(&mut self, map_rect: Rect, target_zoom: f32) {
@@ -1682,7 +1842,7 @@ impl SystemsCatalogApp {
 
     fn render_map_canvas(&mut self, ui: &mut egui::Ui) {
         ui.heading("Mind Map");
-        ui.label("Hold Space and drag to pan. Scroll to zoom. Shift+drag from a child node onto a parent node to assign parent. Drag on empty map space to box-select systems.");
+        ui.label("Hold Space and drag to pan. Scroll to zoom. Shift+drag child -> parent to assign parent. Ctrl+R/B/F + drag creates Standard/Pull/Push interaction. Drag on empty map space to box-select systems.");
 
         let mut requested_zoom: Option<f32> = None;
 
@@ -1966,19 +2126,41 @@ impl SystemsCatalogApp {
                     .map(|id| id == source_system_id || id == target_system_id)
                     .unwrap_or(false);
 
-                let interaction_style =
-                    self.interaction_line_style_for(source_system_id, target_system_id);
-
-                let (from, to) = self.card_to_card_endpoints(*source_rect, *target_rect);
-
-                self.draw_directed_connection(
-                    &painter,
-                    from,
-                    to,
-                    interaction_style,
-                    dimmed || dimmed_for_tech,
-                    selected_id.is_some() && boosted,
+                let interaction_style = self.interaction_line_style_for_kind(
+                    source_system_id,
+                    target_system_id,
+                    interaction.kind,
                 );
+
+                let (from, to) = match interaction.kind {
+                    InteractionKind::Pull => self.card_to_card_endpoints(*target_rect, *source_rect),
+                    InteractionKind::Push | InteractionKind::Standard => {
+                        self.card_to_card_endpoints(*source_rect, *target_rect)
+                    }
+                    InteractionKind::Bidirectional => {
+                        self.card_to_card_endpoints(*source_rect, *target_rect)
+                    }
+                };
+
+                if interaction.kind == InteractionKind::Bidirectional {
+                    self.draw_bidirectional_connection(
+                        &painter,
+                        from,
+                        to,
+                        interaction_style,
+                        dimmed || dimmed_for_tech,
+                        selected_id.is_some() && boosted,
+                    );
+                } else {
+                    self.draw_directed_connection(
+                        &painter,
+                        from,
+                        to,
+                        interaction_style,
+                        dimmed || dimmed_for_tech,
+                        selected_id.is_some() && boosted,
+                    );
+                }
 
                 if !interaction.note.trim().is_empty() {
                     if let Some(pointer) = pointer_hover.filter(|pos| map_rect.contains(*pos)) {
@@ -2033,6 +2215,10 @@ impl SystemsCatalogApp {
 
             let node_rect =
                 Rect::from_min_size(to_screen(current_local_position), node_size_screen);
+            let node_interact_rect = node_rect.intersect(map_rect);
+            if node_interact_rect.width() <= 0.0 || node_interact_rect.height() <= 0.0 {
+                continue;
+            }
             let interaction_sense = if space_down {
                 Sense::hover()
             } else {
@@ -2040,7 +2226,7 @@ impl SystemsCatalogApp {
             };
 
             let response = ui.interact(
-                node_rect,
+                node_interact_rect,
                 ui.id().with(("map_node", system.id)),
                 interaction_sense,
             );
@@ -2073,8 +2259,30 @@ impl SystemsCatalogApp {
 
             if response.drag_started() {
                 let shift_held = ui.input(|input| input.modifiers.shift);
+                let ctrl_held = ui.input(|input| input.modifiers.ctrl);
+                let interaction_drag_kind = ui.input(|input| {
+                    if input.key_down(egui::Key::R) {
+                        Some(InteractionKind::Standard)
+                    } else if input.key_down(egui::Key::B) {
+                        Some(InteractionKind::Pull)
+                    } else if input.key_down(egui::Key::F) {
+                        Some(InteractionKind::Push)
+                    } else if input.key_down(egui::Key::D) {
+                        Some(InteractionKind::Bidirectional)
+                    } else {
+                        None
+                    }
+                });
+
                 if shift_held {
                     self.map_link_drag_from = Some(system.id);
+                } else if ctrl_held {
+                    if let Some(kind) = interaction_drag_kind {
+                        self.map_interaction_drag_from = Some(system.id);
+                        self.map_interaction_drag_kind = kind;
+                    } else {
+                        self.push_map_undo_snapshot();
+                    }
                 } else {
                     self.push_map_undo_snapshot();
                 }
@@ -2085,6 +2293,8 @@ impl SystemsCatalogApp {
 
                 if self.map_link_drag_from == Some(system.id) || shift_held {
                     self.map_link_drag_from = Some(system.id);
+                } else if self.map_interaction_drag_from == Some(system.id) {
+                    // preview rendered outside this block; no map movement while creating interactions
                 } else {
                     let pointer_delta = ui.input(|input| input.pointer.delta());
                     let local_delta = pointer_delta / self.map_zoom;
@@ -2129,6 +2339,10 @@ impl SystemsCatalogApp {
             }
 
             if response.drag_stopped() && self.map_link_drag_from != Some(system.id) {
+                if self.map_interaction_drag_from == Some(system.id) {
+                    continue;
+                }
+
                 let persist_ids = if self.selected_map_system_ids.contains(&system.id) {
                     self.selected_map_system_ids.clone()
                 } else {
@@ -2362,6 +2576,54 @@ impl SystemsCatalogApp {
             }
         }
 
+        if let Some(source_id) = self.map_interaction_drag_from {
+            if let Some(source_rect) = node_rects.get(&source_id) {
+                if let Some(pointer_pos) = ui.input(|input| input.pointer.interact_pos()) {
+                    let (from, to) = match self.map_interaction_drag_kind {
+                        InteractionKind::Pull => {
+                            let endpoint = self.rect_to_point_endpoint(*source_rect, pointer_pos);
+                            (pointer_pos, endpoint)
+                        }
+                        InteractionKind::Push | InteractionKind::Standard => {
+                            let endpoint = self.rect_to_point_endpoint(*source_rect, pointer_pos);
+                            (endpoint, pointer_pos)
+                        }
+                        InteractionKind::Bidirectional => {
+                            let endpoint = self.rect_to_point_endpoint(*source_rect, pointer_pos);
+                            (endpoint, pointer_pos)
+                        }
+                    };
+
+                    self.draw_directed_connection(
+                        &painter,
+                        from,
+                        to,
+                        self.interaction_line_style,
+                        false,
+                        false,
+                    );
+                }
+            }
+
+            let released = ui.input(|input| input.pointer.any_released());
+            if released {
+                let pointer_pos = ui.input(|input| input.pointer.interact_pos());
+                let target = pointer_pos.and_then(|pos| {
+                    node_rects
+                        .iter()
+                        .find(|(_, rect)| rect.contains(pos))
+                        .map(|(system_id, _)| *system_id)
+                });
+
+                let interaction_kind = self.map_interaction_drag_kind;
+                self.map_interaction_drag_from = None;
+
+                if let Some(target_id) = target {
+                    self.create_link_between_kind(source_id, target_id, "", interaction_kind);
+                }
+            }
+        }
+
         if map_response.clicked() && !space_down {
             let clicked_on_node = ui
                 .input(|input| input.pointer.interact_pos())
@@ -2378,6 +2640,16 @@ impl SystemsCatalogApp {
 
 impl eframe::App for SystemsCatalogApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let open_bulk_add_system = ctx.input_mut(|input| {
+            input.consume_key(
+                egui::Modifiers {
+                    ctrl: true,
+                    shift: true,
+                    ..Default::default()
+                },
+                egui::Key::N,
+            )
+        });
         let open_add_system =
             ctx.input_mut(|input| input.consume_key(egui::Modifiers::CTRL, egui::Key::N));
         let open_add_tech =
@@ -2386,6 +2658,12 @@ impl eframe::App for SystemsCatalogApp {
             ctx.input_mut(|input| input.consume_key(egui::Modifiers::CTRL, egui::Key::Z));
         let delete_selected =
             ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Delete));
+        let open_hotkeys =
+            ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::F1));
+
+        if open_bulk_add_system {
+            self.open_bulk_add_systems_modal_with_prefill(self.selected_system_id);
+        }
 
         if open_add_system {
             self.open_add_system_modal_with_prefill(self.selected_system_id);
@@ -2404,6 +2682,10 @@ impl eframe::App for SystemsCatalogApp {
             self.delete_selected_system();
         }
 
+        if open_hotkeys {
+            self.show_hotkeys_modal = true;
+        }
+
         if let Err(error) = self.validate_before_render() {
             self.status_message = format!("State warning: {error}");
         }
@@ -2418,6 +2700,7 @@ impl eframe::App for SystemsCatalogApp {
                 }
                 if ui.button("Add Technology").clicked() {
                     self.show_add_tech_modal = true;
+                    self.focus_add_tech_name_on_open = true;
                 }
                 if ui.button("Save Catalog").clicked() {
                     self.show_save_catalog_modal = true;
@@ -2430,6 +2713,9 @@ impl eframe::App for SystemsCatalogApp {
                 }
                 if ui.button("Connection Style").clicked() {
                     self.show_line_style_modal = true;
+                }
+                if ui.button("Hotkeys").clicked() {
+                    self.show_hotkeys_modal = true;
                 }
 
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -2465,6 +2751,7 @@ impl eframe::App for SystemsCatalogApp {
         self.render_load_catalog_modal(ctx);
         self.render_new_catalog_confirm_modal(ctx);
         self.render_line_style_modal(ctx);
+        self.render_hotkeys_modal(ctx);
         self.save_ui_settings_if_dirty();
     }
 }

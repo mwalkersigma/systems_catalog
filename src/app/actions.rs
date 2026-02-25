@@ -1,4 +1,4 @@
-use crate::app::SystemsCatalogApp;
+use crate::app::{InteractionKind, SystemsCatalogApp};
 
 impl SystemsCatalogApp {
     pub(super) fn update_selected_system_details(&mut self) {
@@ -210,6 +210,7 @@ impl SystemsCatalogApp {
 
         let label = self.edited_link_label.trim();
         let note = self.edited_link_note.trim();
+        let kind = Self::interaction_kind_to_setting_value(self.edited_link_kind);
         let Some(system_id) = self.selected_system_id else {
             self.status_message = "Select a system first".to_owned();
             return;
@@ -217,7 +218,7 @@ impl SystemsCatalogApp {
 
         let result = self
             .repo
-            .update_link_details(link_id, label, note)
+            .update_link_details(link_id, label, note, kind)
             .and_then(|_| self.refresh_systems())
             .and_then(|_| self.load_selected_data(system_id));
 
@@ -375,6 +376,7 @@ impl SystemsCatalogApp {
                 self.status_message = format!("Deleted system: {system_name}");
                 self.map_link_click_source = None;
                 self.map_link_drag_from = None;
+                self.map_interaction_drag_from = None;
             }
             Err(error) => self.status_message = format!("Failed to delete system: {error}"),
         }
@@ -607,10 +609,20 @@ impl SystemsCatalogApp {
         };
 
         let label = self.new_link_label.trim().to_string();
-        self.create_link_between(source_id, target_id, &label);
+        self.create_link_between_kind(source_id, target_id, &label, InteractionKind::Standard);
     }
 
     pub(super) fn create_link_between(&mut self, source_id: i64, target_id: i64, label: &str) {
+        self.create_link_between_kind(source_id, target_id, label, InteractionKind::Standard);
+    }
+
+    pub(super) fn create_link_between_kind(
+        &mut self,
+        source_id: i64,
+        target_id: i64,
+        label: &str,
+        kind: InteractionKind,
+    ) {
         if source_id == target_id {
             self.status_message = "A system cannot link to itself".to_owned();
             return;
@@ -618,7 +630,12 @@ impl SystemsCatalogApp {
 
         let result = self
             .repo
-            .create_link(source_id, target_id, label)
+            .create_link(
+                source_id,
+                target_id,
+                label,
+                Self::interaction_kind_to_setting_value(kind),
+            )
             .and_then(|_| self.refresh_systems())
             .and_then(|_| self.load_selected_data(source_id));
 

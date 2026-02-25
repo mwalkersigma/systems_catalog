@@ -41,11 +41,20 @@ pub enum ChildSpawnMode {
     BelowPrevious,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InteractionKind {
+    Standard,
+    Pull,
+    Push,
+    Bidirectional,
+}
+
 #[derive(Debug, Clone)]
 pub struct VisibleInteraction {
     pub source_system_id: i64,
     pub target_system_id: i64,
     pub note: String,
+    pub kind: InteractionKind,
 }
 
 #[derive(Debug, Clone)]
@@ -93,6 +102,7 @@ pub struct SystemsCatalogApp {
     selected_link_id_for_edit: Option<i64>,
     edited_link_label: String,
     edited_link_note: String,
+    edited_link_kind: InteractionKind,
 
     new_tech_name: String,
     new_tech_description: String,
@@ -112,6 +122,8 @@ pub struct SystemsCatalogApp {
 
     map_positions: HashMap<i64, Pos2>,
     map_link_drag_from: Option<i64>,
+    map_interaction_drag_from: Option<i64>,
+    map_interaction_drag_kind: InteractionKind,
     map_link_click_source: Option<i64>,
     selected_map_system_ids: HashSet<i64>,
     map_selection_start_screen: Option<Pos2>,
@@ -126,13 +138,17 @@ pub struct SystemsCatalogApp {
     interaction_popup_pending_open_at_secs: Option<f64>,
     interaction_popup_active: Option<InteractionPopupState>,
     interaction_popup_close_at_secs: Option<f64>,
+    flow_inspector_from_system_id: Option<i64>,
+    flow_inspector_to_system_id: Option<i64>,
     collapsed_system_ids: HashSet<i64>,
 
     show_add_system_modal: bool,
     show_bulk_add_systems_modal: bool,
+    focus_bulk_add_system_names_on_open: bool,
     focus_add_system_name_on_open: bool,
     focus_add_tech_name_on_open: bool,
     show_add_tech_modal: bool,
+    show_hotkeys_modal: bool,
     show_line_style_modal: bool,
     show_save_catalog_modal: bool,
     show_load_catalog_modal: bool,
@@ -188,6 +204,7 @@ impl SystemsCatalogApp {
             selected_link_id_for_edit: None,
             edited_link_label: String::new(),
             edited_link_note: String::new(),
+            edited_link_kind: InteractionKind::Standard,
             new_tech_name: String::new(),
             new_tech_description: String::new(),
             new_tech_documentation_link: String::new(),
@@ -205,6 +222,8 @@ impl SystemsCatalogApp {
             fast_add_selected_catalog_tech_on_map: false,
             map_positions: HashMap::new(),
             map_link_drag_from: None,
+            map_interaction_drag_from: None,
+            map_interaction_drag_kind: InteractionKind::Standard,
             map_link_click_source: None,
             selected_map_system_ids: HashSet::new(),
             map_selection_start_screen: None,
@@ -219,12 +238,16 @@ impl SystemsCatalogApp {
             interaction_popup_pending_open_at_secs: None,
             interaction_popup_active: None,
             interaction_popup_close_at_secs: None,
+            flow_inspector_from_system_id: None,
+            flow_inspector_to_system_id: None,
             collapsed_system_ids: HashSet::new(),
             show_add_system_modal: false,
             show_bulk_add_systems_modal: false,
+            focus_bulk_add_system_names_on_open: false,
             focus_add_system_name_on_open: false,
             focus_add_tech_name_on_open: false,
             show_add_tech_modal: false,
+            show_hotkeys_modal: false,
             show_line_style_modal: false,
             show_save_catalog_modal: false,
             show_load_catalog_modal: false,
@@ -338,6 +361,7 @@ impl SystemsCatalogApp {
                 self.selected_link_id_for_edit = None;
                 self.edited_link_label.clear();
                 self.edited_link_note.clear();
+                self.edited_link_kind = InteractionKind::Standard;
             }
         }
 
@@ -346,6 +370,8 @@ impl SystemsCatalogApp {
                 self.selected_link_id_for_edit = Some(first_link.id);
                 self.edited_link_label = first_link.label.clone();
                 self.edited_link_note = first_link.note.clone();
+                self.edited_link_kind =
+                    Self::interaction_kind_from_setting_value(first_link.kind.as_str());
             }
         }
 
@@ -421,6 +447,9 @@ impl SystemsCatalogApp {
             .unwrap_or_default();
 
         self.selected_cumulative_child_tech = self.cumulative_child_tech_names(system_id);
+        if self.flow_inspector_from_system_id.is_none() {
+            self.flow_inspector_from_system_id = Some(system_id);
+        }
         self.selected_system_line_color_override = self
             .systems
             .iter()
@@ -605,7 +634,7 @@ impl SystemsCatalogApp {
 
     fn deduped_visible_interactions(&self) -> Vec<VisibleInteraction> {
         let representative_by_system = self.visible_representative_system_map();
-        let mut by_edge: HashMap<(i64, i64), String> = HashMap::new();
+        let mut by_edge: HashMap<(i64, i64), (String, InteractionKind)> = HashMap::new();
 
         for link in &self.all_links {
             let Some(source_id) = representative_by_system.get(&link.source_system_id).copied()
@@ -624,20 +653,26 @@ impl SystemsCatalogApp {
 
             by_edge
                 .entry((source_id, target_id))
-                .and_modify(|note| {
+                .and_modify(|(note, _kind)| {
                     if note.trim().is_empty() && !link.note.trim().is_empty() {
                         *note = link.note.clone();
                     }
                 })
-                .or_insert_with(|| link.note.clone());
+                .or_insert_with(|| {
+                    (
+                        link.note.clone(),
+                        Self::interaction_kind_from_setting_value(link.kind.as_str()),
+                    )
+                });
         }
 
         let mut interactions = by_edge
             .into_iter()
-            .map(|((source_system_id, target_system_id), note)| VisibleInteraction {
+            .map(|((source_system_id, target_system_id), (note, kind))| VisibleInteraction {
                 source_system_id,
                 target_system_id,
                 note,
+                kind,
             })
             .collect::<Vec<_>>();
 
@@ -684,6 +719,10 @@ impl SystemsCatalogApp {
         self.selected_link_id_for_edit = None;
         self.edited_link_label.clear();
         self.edited_link_note.clear();
+        self.edited_link_kind = InteractionKind::Standard;
+        self.map_link_drag_from = None;
+        self.map_interaction_drag_from = None;
+        self.map_interaction_drag_kind = InteractionKind::Standard;
         self.map_link_click_source = None;
         self.interaction_popup_pending = None;
         self.interaction_popup_pending_open_at_secs = None;
@@ -711,6 +750,33 @@ impl SystemsCatalogApp {
             "right_of_previous" => Some(ChildSpawnMode::RightOfPrevious),
             "below_previous" => Some(ChildSpawnMode::BelowPrevious),
             _ => None,
+        }
+    }
+
+    fn interaction_kind_to_setting_value(kind: InteractionKind) -> &'static str {
+        match kind {
+            InteractionKind::Standard => "standard",
+            InteractionKind::Pull => "pull",
+            InteractionKind::Push => "push",
+            InteractionKind::Bidirectional => "bidirectional",
+        }
+    }
+
+    fn interaction_kind_from_setting_value(value: &str) -> InteractionKind {
+        match value {
+            "pull" => InteractionKind::Pull,
+            "push" => InteractionKind::Push,
+            "bidirectional" => InteractionKind::Bidirectional,
+            _ => InteractionKind::Standard,
+        }
+    }
+
+    fn interaction_kind_label(kind: InteractionKind) -> &'static str {
+        match kind {
+            InteractionKind::Standard => "Standard",
+            InteractionKind::Pull => "Pull",
+            InteractionKind::Push => "Push",
+            InteractionKind::Bidirectional => "Bidirectional",
         }
     }
 
@@ -1003,6 +1069,7 @@ impl SystemsCatalogApp {
     fn open_bulk_add_systems_modal_with_prefill(&mut self, parent_id: Option<i64>) {
         self.bulk_new_system_parent_id = parent_id;
         self.show_bulk_add_systems_modal = true;
+        self.focus_bulk_add_system_names_on_open = true;
     }
 
     fn ensure_valid_bulk_parent_selection(&mut self) {
@@ -1021,6 +1088,105 @@ impl SystemsCatalogApp {
                 self.selected_system_parent_id = None;
             }
         }
+    }
+
+    fn ensure_valid_flow_inspector_selection(&mut self) {
+        if let Some(system_id) = self.flow_inspector_from_system_id {
+            let exists = self.systems.iter().any(|system| system.id == system_id);
+            if !exists {
+                self.flow_inspector_from_system_id = None;
+            }
+        }
+
+        if let Some(system_id) = self.flow_inspector_to_system_id {
+            let exists = self.systems.iter().any(|system| system.id == system_id);
+            if !exists {
+                self.flow_inspector_to_system_id = None;
+            }
+        }
+    }
+
+    fn flow_inspector_edges(&self) -> Vec<(i64, i64, InteractionKind)> {
+        let mut edges = Vec::new();
+
+        for link in &self.all_links {
+            let kind = Self::interaction_kind_from_setting_value(link.kind.as_str());
+            match kind {
+                InteractionKind::Standard | InteractionKind::Push => {
+                    edges.push((link.source_system_id, link.target_system_id, kind));
+                }
+                InteractionKind::Pull => {
+                    edges.push((link.target_system_id, link.source_system_id, kind));
+                }
+                InteractionKind::Bidirectional => {
+                    edges.push((
+                        link.source_system_id,
+                        link.target_system_id,
+                        InteractionKind::Bidirectional,
+                    ));
+                    edges.push((
+                        link.target_system_id,
+                        link.source_system_id,
+                        InteractionKind::Bidirectional,
+                    ));
+                }
+            }
+        }
+
+        edges
+    }
+
+    fn focused_flow_shortest_path(
+        &self,
+        source_system_id: i64,
+        target_system_id: i64,
+    ) -> Option<Vec<(i64, InteractionKind, i64)>> {
+        if source_system_id == target_system_id {
+            return Some(Vec::new());
+        }
+
+        let edges = self.flow_inspector_edges();
+        let mut adjacency: HashMap<i64, Vec<(i64, InteractionKind)>> = HashMap::new();
+        for (from, to, kind) in edges {
+            adjacency.entry(from).or_default().push((to, kind));
+        }
+
+        let mut queue = std::collections::VecDeque::new();
+        let mut visited = HashSet::new();
+        let mut previous: HashMap<i64, (i64, InteractionKind)> = HashMap::new();
+
+        queue.push_back(source_system_id);
+        visited.insert(source_system_id);
+
+        while let Some(current) = queue.pop_front() {
+            if current == target_system_id {
+                break;
+            }
+
+            if let Some(neighbors) = adjacency.get(&current) {
+                for (next, kind) in neighbors {
+                    if visited.insert(*next) {
+                        previous.insert(*next, (current, *kind));
+                        queue.push_back(*next);
+                    }
+                }
+            }
+        }
+
+        if !visited.contains(&target_system_id) {
+            return None;
+        }
+
+        let mut result = Vec::new();
+        let mut current = target_system_id;
+        while current != source_system_id {
+            let (prev, kind) = previous.get(&current).copied()?;
+            result.push((prev, kind, current));
+            current = prev;
+        }
+
+        result.reverse();
+        Some(result)
     }
 
     fn ensure_valid_link_target_selection(&mut self) {
@@ -1048,6 +1214,7 @@ impl SystemsCatalogApp {
                 self.selected_link_id_for_edit = None;
                 self.edited_link_label.clear();
                 self.edited_link_note.clear();
+                self.edited_link_kind = InteractionKind::Standard;
             }
         }
     }
@@ -1412,6 +1579,7 @@ impl SystemsCatalogApp {
         self.ensure_valid_parent_selection();
         self.ensure_valid_bulk_parent_selection();
         self.ensure_valid_selected_parent_selection();
+        self.ensure_valid_flow_inspector_selection();
         self.ensure_valid_link_target_selection();
         self.ensure_valid_tech_selection();
         self.ensure_valid_selected_link();

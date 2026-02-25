@@ -47,6 +47,7 @@ impl Repository {
                 target_system_id INTEGER NOT NULL,
                 label TEXT NOT NULL DEFAULT '',
                 note TEXT NOT NULL DEFAULT '',
+                kind TEXT NOT NULL DEFAULT 'standard',
                 UNIQUE(source_system_id, target_system_id),
                 FOREIGN KEY(source_system_id) REFERENCES systems(id) ON DELETE CASCADE,
                 FOREIGN KEY(target_system_id) REFERENCES systems(id) ON DELETE CASCADE
@@ -88,6 +89,7 @@ impl Repository {
         self.ensure_system_line_color_override_column()?;
         self.ensure_system_naming_columns()?;
         self.ensure_links_note_column()?;
+        self.ensure_links_kind_column()?;
         self.ensure_tech_catalog_columns()?;
         self.ensure_tech_catalog_visual_columns()?;
         self.ensure_notes_table_shape()?;
@@ -152,6 +154,17 @@ impl Repository {
         if !self.table_has_column("links", "note")? {
             self.conn
                 .execute("ALTER TABLE links ADD COLUMN note TEXT NOT NULL DEFAULT ''", [])?;
+        }
+
+        Ok(())
+    }
+
+    fn ensure_links_kind_column(&self) -> Result<()> {
+        if !self.table_has_column("links", "kind")? {
+            self.conn.execute(
+                "ALTER TABLE links ADD COLUMN kind TEXT NOT NULL DEFAULT 'standard'",
+                [],
+            )?;
         }
 
         Ok(())
@@ -409,7 +422,7 @@ impl Repository {
     pub fn list_links_for_system(&self, system_id: i64) -> Result<Vec<SystemLink>> {
         let mut stmt = self.conn.prepare(
             r#"
-            SELECT id, source_system_id, target_system_id, label, note
+            SELECT id, source_system_id, target_system_id, label, note, kind
             FROM links
             WHERE source_system_id = ?1 OR target_system_id = ?1
             ORDER BY id DESC
@@ -424,6 +437,7 @@ impl Repository {
                     target_system_id: row.get(2)?,
                     label: row.get(3)?,
                     note: row.get(4)?,
+                    kind: row.get(5)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -436,26 +450,34 @@ impl Repository {
         source_system_id: i64,
         target_system_id: i64,
         label: &str,
+        kind: &str,
     ) -> Result<()> {
         self.conn.execute(
             r#"
-            INSERT INTO links (source_system_id, target_system_id, label, note)
-            VALUES (?1, ?2, ?3, '')
+            INSERT INTO links (source_system_id, target_system_id, label, note, kind)
+            VALUES (?1, ?2, ?3, '', ?4)
             "#,
-            params![source_system_id, target_system_id, label],
+            params![source_system_id, target_system_id, label, kind],
         )?;
         Ok(())
     }
 
-    pub fn update_link_details(&self, link_id: i64, label: &str, note: &str) -> Result<()> {
+    pub fn update_link_details(
+        &self,
+        link_id: i64,
+        label: &str,
+        note: &str,
+        kind: &str,
+    ) -> Result<()> {
         self.conn.execute(
             r#"
             UPDATE links
             SET label = ?2,
-                note = ?3
+                note = ?3,
+                kind = ?4
             WHERE id = ?1
             "#,
-            params![link_id, label, note],
+            params![link_id, label, note, kind],
         )?;
 
         Ok(())
@@ -476,7 +498,7 @@ impl Repository {
     pub fn list_links(&self) -> Result<Vec<SystemLink>> {
         let mut stmt = self.conn.prepare(
             r#"
-            SELECT id, source_system_id, target_system_id, label, note
+            SELECT id, source_system_id, target_system_id, label, note, kind
             FROM links
             ORDER BY id DESC
             "#,
@@ -490,6 +512,7 @@ impl Repository {
                     target_system_id: row.get(2)?,
                     label: row.get(3)?,
                     note: row.get(4)?,
+                    kind: row.get(5)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
