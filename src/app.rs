@@ -11,6 +11,8 @@ use crate::models::{SystemLink, SystemNote, SystemRecord, TechItem};
 
 pub(crate) const MAP_NODE_SIZE: Vec2 = Vec2::new(170.0, 64.0);
 pub(crate) const MAP_WORLD_SIZE: Vec2 = Vec2::new(12000.0, 12000.0);
+pub(crate) const MAP_WORLD_MIN_SIZE: Vec2 = Vec2::new(4000.0, 4000.0);
+pub(crate) const MAP_WORLD_MAX_SIZE: Vec2 = Vec2::new(50000.0, 50000.0);
 pub(crate) const MAP_GRID_SPACING: f32 = 48.0;
 pub(crate) const MAP_MIN_ZOOM: f32 = 0.05;
 pub(crate) const MAP_MAX_ZOOM: f32 = 1.5;
@@ -22,11 +24,19 @@ pub enum LineTerminator {
     FilledArrow,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinePattern {
+    Solid,
+    Dashed,
+    Mitered,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct LineStyle {
     pub width: f32,
     pub color: Color32,
     pub terminator: LineTerminator,
+    pub pattern: LinePattern,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,6 +57,18 @@ pub enum InteractionKind {
     Pull,
     Push,
     Bidirectional,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppModal {
+    AddSystem,
+    BulkAddSystems,
+    AddTech,
+    Hotkeys,
+    LineStyle,
+    SaveCatalog,
+    LoadCatalog,
+    NewCatalogConfirm,
 }
 
 #[derive(Debug, Clone)]
@@ -131,6 +153,7 @@ pub struct SystemsCatalogApp {
     map_drag_started_on_node: bool,
     map_undo_stack: Vec<HashMap<i64, Pos2>>,
     snap_to_grid: bool,
+    map_world_size: Vec2,
     map_zoom: f32,
     map_pan: Vec2,
     map_last_view_center_local: Option<Pos2>,
@@ -153,6 +176,7 @@ pub struct SystemsCatalogApp {
     show_save_catalog_modal: bool,
     show_load_catalog_modal: bool,
     show_new_catalog_confirm_modal: bool,
+    modal_open_stack: Vec<AppModal>,
     save_catalog_path: String,
     load_catalog_path: String,
     recent_catalog_paths: Vec<String>,
@@ -160,6 +184,10 @@ pub struct SystemsCatalogApp {
 
     parent_line_style: LineStyle,
     interaction_line_style: LineStyle,
+    interaction_standard_line_style: LineStyle,
+    interaction_pull_line_style: LineStyle,
+    interaction_push_line_style: LineStyle,
+    interaction_bidirectional_line_style: LineStyle,
     show_parent_lines: bool,
     show_interaction_lines: bool,
     dimmed_line_opacity_percent: f32,
@@ -231,6 +259,7 @@ impl SystemsCatalogApp {
             map_drag_started_on_node: false,
             map_undo_stack: Vec::new(),
             snap_to_grid: false,
+            map_world_size: MAP_WORLD_SIZE,
             map_zoom: 1.0,
             map_pan: Vec2::ZERO,
             map_last_view_center_local: None,
@@ -252,6 +281,7 @@ impl SystemsCatalogApp {
             show_save_catalog_modal: false,
             show_load_catalog_modal: false,
             show_new_catalog_confirm_modal: false,
+            modal_open_stack: Vec::new(),
             save_catalog_path: "systems_catalog_export.db".to_owned(),
             load_catalog_path: "systems_catalog_export.db".to_owned(),
             recent_catalog_paths: Vec::new(),
@@ -260,11 +290,37 @@ impl SystemsCatalogApp {
                 width: 1.0,
                 color: Color32::from_gray(90),
                 terminator: LineTerminator::Arrow,
+                pattern: LinePattern::Solid,
             },
             interaction_line_style: LineStyle {
                 width: 1.5,
                 color: Color32::from_gray(140),
                 terminator: LineTerminator::FilledArrow,
+                pattern: LinePattern::Solid,
+            },
+            interaction_standard_line_style: LineStyle {
+                width: 1.5,
+                color: Color32::from_gray(140),
+                terminator: LineTerminator::Arrow,
+                pattern: LinePattern::Solid,
+            },
+            interaction_pull_line_style: LineStyle {
+                width: 1.5,
+                color: Color32::from_gray(140),
+                terminator: LineTerminator::Arrow,
+                pattern: LinePattern::Solid,
+            },
+            interaction_push_line_style: LineStyle {
+                width: 1.5,
+                color: Color32::from_gray(140),
+                terminator: LineTerminator::FilledArrow,
+                pattern: LinePattern::Solid,
+            },
+            interaction_bidirectional_line_style: LineStyle {
+                width: 1.5,
+                color: Color32::from_gray(140),
+                terminator: LineTerminator::Arrow,
+                pattern: LinePattern::Solid,
             },
             show_parent_lines: true,
             show_interaction_lines: true,
@@ -280,6 +336,59 @@ impl SystemsCatalogApp {
         app.refresh_systems()?;
         app.load_ui_settings()?;
         Ok(app)
+    }
+
+    fn is_modal_open(&self, modal: AppModal) -> bool {
+        match modal {
+            AppModal::AddSystem => self.show_add_system_modal,
+            AppModal::BulkAddSystems => self.show_bulk_add_systems_modal,
+            AppModal::AddTech => self.show_add_tech_modal,
+            AppModal::Hotkeys => self.show_hotkeys_modal,
+            AppModal::LineStyle => self.show_line_style_modal,
+            AppModal::SaveCatalog => self.show_save_catalog_modal,
+            AppModal::LoadCatalog => self.show_load_catalog_modal,
+            AppModal::NewCatalogConfirm => self.show_new_catalog_confirm_modal,
+        }
+    }
+
+    fn set_modal_open(&mut self, modal: AppModal, is_open: bool) {
+        match modal {
+            AppModal::AddSystem => self.show_add_system_modal = is_open,
+            AppModal::BulkAddSystems => self.show_bulk_add_systems_modal = is_open,
+            AppModal::AddTech => self.show_add_tech_modal = is_open,
+            AppModal::Hotkeys => self.show_hotkeys_modal = is_open,
+            AppModal::LineStyle => self.show_line_style_modal = is_open,
+            AppModal::SaveCatalog => self.show_save_catalog_modal = is_open,
+            AppModal::LoadCatalog => self.show_load_catalog_modal = is_open,
+            AppModal::NewCatalogConfirm => self.show_new_catalog_confirm_modal = is_open,
+        }
+    }
+
+    fn open_modal(&mut self, modal: AppModal) {
+        self.set_modal_open(modal, true);
+        self.modal_open_stack.retain(|active| *active != modal);
+        self.modal_open_stack.push(modal);
+    }
+
+    fn close_most_recent_open_modal(&mut self) -> bool {
+        while let Some(modal) = self.modal_open_stack.pop() {
+            if self.is_modal_open(modal) {
+                self.set_modal_open(modal, false);
+                return true;
+            }
+        }
+
+        false
+    }
+
+    fn prune_closed_modals_from_stack(&mut self) {
+        let mut still_open = Vec::new();
+        for modal in &self.modal_open_stack {
+            if self.is_modal_open(*modal) {
+                still_open.push(*modal);
+            }
+        }
+        self.modal_open_stack = still_open;
     }
 
     fn remove_legacy_window_settings(&mut self) -> Result<()> {
@@ -738,6 +847,14 @@ impl SystemsCatalogApp {
         }
     }
 
+    fn pattern_to_setting_value(pattern: LinePattern) -> &'static str {
+        match pattern {
+            LinePattern::Solid => "solid",
+            LinePattern::Dashed => "dashed",
+            LinePattern::Mitered => "mitered",
+        }
+    }
+
     fn child_spawn_mode_to_setting_value(mode: ChildSpawnMode) -> &'static str {
         match mode {
             ChildSpawnMode::RightOfPrevious => "right_of_previous",
@@ -789,29 +906,75 @@ impl SystemsCatalogApp {
         }
     }
 
+    fn pattern_from_setting_value(value: &str) -> Option<LinePattern> {
+        match value {
+            "solid" => Some(LinePattern::Solid),
+            "dashed" => Some(LinePattern::Dashed),
+            "mitered" => Some(LinePattern::Mitered),
+            _ => None,
+        }
+    }
+
     fn color_to_setting_value(color: Color32) -> String {
         format!("{},{},{},{}", color.r(), color.g(), color.b(), color.a())
     }
 
     fn color_from_setting_value(value: &str) -> Option<Color32> {
-        let parts = value
+        let trimmed = value.trim();
+
+        if let Some(hex) = trimmed.strip_prefix('#') {
+            if hex.len() == 6 {
+                let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+                let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+                let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+                return Some(Color32::from_rgba_unmultiplied(r, g, b, 255));
+            }
+
+            if hex.len() == 8 {
+                let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+                let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+                let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+                let a = u8::from_str_radix(&hex[6..8], 16).ok()?;
+                return Some(Color32::from_rgba_unmultiplied(r, g, b, a));
+            }
+        }
+
+        let parts = trimmed
             .split(',')
             .map(|part| part.trim().parse::<u8>().ok())
             .collect::<Vec<_>>();
 
-        if parts.len() != 4 {
-            return None;
+        if parts.len() == 4 {
+            return Some(Color32::from_rgba_unmultiplied(
+                parts[0]?, parts[1]?, parts[2]?, parts[3]?,
+            ));
         }
 
-        Some(Color32::from_rgba_unmultiplied(
-            parts[0]?, parts[1]?, parts[2]?, parts[3]?,
-        ))
+        if parts.len() == 3 {
+            return Some(Color32::from_rgba_unmultiplied(
+                parts[0]?, parts[1]?, parts[2]?, 255,
+            ));
+        }
+
+        None
     }
 
     fn load_ui_settings(&mut self) -> Result<()> {
         if let Some(value) = self.repo.get_setting("map_zoom")? {
             if let Ok(parsed) = value.parse::<f32>() {
                 self.map_zoom = parsed.clamp(MAP_MIN_ZOOM, MAP_MAX_ZOOM);
+            }
+        }
+
+        if let Some(value) = self.repo.get_setting("map_world_width")? {
+            if let Ok(parsed) = value.parse::<f32>() {
+                self.map_world_size.x = parsed.clamp(MAP_WORLD_MIN_SIZE.x, MAP_WORLD_MAX_SIZE.x);
+            }
+        }
+
+        if let Some(value) = self.repo.get_setting("map_world_height")? {
+            if let Ok(parsed) = value.parse::<f32>() {
+                self.map_world_size.y = parsed.clamp(MAP_WORLD_MIN_SIZE.y, MAP_WORLD_MAX_SIZE.y);
             }
         }
 
@@ -845,6 +1008,12 @@ impl SystemsCatalogApp {
             }
         }
 
+        if let Some(value) = self.repo.get_setting("parent_line_pattern")? {
+            if let Some(parsed) = Self::pattern_from_setting_value(&value) {
+                self.parent_line_style.pattern = parsed;
+            }
+        }
+
         if let Some(value) = self.repo.get_setting("interaction_line_width")? {
             if let Ok(parsed) = value.parse::<f32>() {
                 self.interaction_line_style.width = parsed.clamp(0.5, 6.0);
@@ -860,6 +1029,84 @@ impl SystemsCatalogApp {
         if let Some(value) = self.repo.get_setting("interaction_line_terminator")? {
             if let Some(parsed) = Self::terminator_from_setting_value(&value) {
                 self.interaction_line_style.terminator = parsed;
+            }
+        }
+
+        if let Some(value) = self.repo.get_setting("interaction_line_pattern")? {
+            if let Some(parsed) = Self::pattern_from_setting_value(&value) {
+                self.interaction_line_style.pattern = parsed;
+            }
+        }
+
+        self.interaction_standard_line_style = self.interaction_line_style;
+        self.interaction_pull_line_style = self.interaction_line_style;
+        self.interaction_push_line_style = self.interaction_line_style;
+        self.interaction_bidirectional_line_style = self.interaction_line_style;
+
+        if let Some(value) = self.repo.get_setting("interaction_standard_line_color")? {
+            if let Some(parsed) = Self::color_from_setting_value(&value) {
+                self.interaction_standard_line_style.color = parsed;
+            }
+        }
+        if let Some(value) = self.repo.get_setting("interaction_standard_line_terminator")? {
+            if let Some(parsed) = Self::terminator_from_setting_value(&value) {
+                self.interaction_standard_line_style.terminator = parsed;
+            }
+        }
+        if let Some(value) = self.repo.get_setting("interaction_standard_line_pattern")? {
+            if let Some(parsed) = Self::pattern_from_setting_value(&value) {
+                self.interaction_standard_line_style.pattern = parsed;
+            }
+        }
+
+        if let Some(value) = self.repo.get_setting("interaction_pull_line_color")? {
+            if let Some(parsed) = Self::color_from_setting_value(&value) {
+                self.interaction_pull_line_style.color = parsed;
+            }
+        }
+        if let Some(value) = self.repo.get_setting("interaction_pull_line_terminator")? {
+            if let Some(parsed) = Self::terminator_from_setting_value(&value) {
+                self.interaction_pull_line_style.terminator = parsed;
+            }
+        }
+        if let Some(value) = self.repo.get_setting("interaction_pull_line_pattern")? {
+            if let Some(parsed) = Self::pattern_from_setting_value(&value) {
+                self.interaction_pull_line_style.pattern = parsed;
+            }
+        }
+
+        if let Some(value) = self.repo.get_setting("interaction_push_line_color")? {
+            if let Some(parsed) = Self::color_from_setting_value(&value) {
+                self.interaction_push_line_style.color = parsed;
+            }
+        }
+        if let Some(value) = self.repo.get_setting("interaction_push_line_terminator")? {
+            if let Some(parsed) = Self::terminator_from_setting_value(&value) {
+                self.interaction_push_line_style.terminator = parsed;
+            }
+        }
+        if let Some(value) = self.repo.get_setting("interaction_push_line_pattern")? {
+            if let Some(parsed) = Self::pattern_from_setting_value(&value) {
+                self.interaction_push_line_style.pattern = parsed;
+            }
+        }
+
+        if let Some(value) = self.repo.get_setting("interaction_bidirectional_line_color")? {
+            if let Some(parsed) = Self::color_from_setting_value(&value) {
+                self.interaction_bidirectional_line_style.color = parsed;
+            }
+        }
+        if let Some(value) = self
+            .repo
+            .get_setting("interaction_bidirectional_line_terminator")?
+        {
+            if let Some(parsed) = Self::terminator_from_setting_value(&value) {
+                self.interaction_bidirectional_line_style.terminator = parsed;
+            }
+        }
+        if let Some(value) = self.repo.get_setting("interaction_bidirectional_line_pattern")? {
+            if let Some(parsed) = Self::pattern_from_setting_value(&value) {
+                self.interaction_bidirectional_line_style.pattern = parsed;
             }
         }
 
@@ -928,6 +1175,10 @@ impl SystemsCatalogApp {
             self.repo
                 .set_setting("map_zoom", &self.map_zoom.to_string())?;
             self.repo
+                .set_setting("map_world_width", &self.map_world_size.x.to_string())?;
+            self.repo
+                .set_setting("map_world_height", &self.map_world_size.y.to_string())?;
+            self.repo
                 .set_setting("map_pan_x", &self.map_pan.x.to_string())?;
             self.repo
                 .set_setting("map_pan_y", &self.map_pan.y.to_string())?;
@@ -944,6 +1195,10 @@ impl SystemsCatalogApp {
                 "parent_line_terminator",
                 Self::terminator_to_setting_value(self.parent_line_style.terminator),
             )?;
+            self.repo.set_setting(
+                "parent_line_pattern",
+                Self::pattern_to_setting_value(self.parent_line_style.pattern),
+            )?;
 
             self.repo.set_setting(
                 "interaction_line_width",
@@ -956,6 +1211,64 @@ impl SystemsCatalogApp {
             self.repo.set_setting(
                 "interaction_line_terminator",
                 Self::terminator_to_setting_value(self.interaction_line_style.terminator),
+            )?;
+            self.repo.set_setting(
+                "interaction_line_pattern",
+                Self::pattern_to_setting_value(self.interaction_line_style.pattern),
+            )?;
+
+            self.repo.set_setting(
+                "interaction_standard_line_color",
+                &Self::color_to_setting_value(self.interaction_standard_line_style.color),
+            )?;
+            self.repo.set_setting(
+                "interaction_standard_line_terminator",
+                Self::terminator_to_setting_value(self.interaction_standard_line_style.terminator),
+            )?;
+            self.repo.set_setting(
+                "interaction_standard_line_pattern",
+                Self::pattern_to_setting_value(self.interaction_standard_line_style.pattern),
+            )?;
+
+            self.repo.set_setting(
+                "interaction_pull_line_color",
+                &Self::color_to_setting_value(self.interaction_pull_line_style.color),
+            )?;
+            self.repo.set_setting(
+                "interaction_pull_line_terminator",
+                Self::terminator_to_setting_value(self.interaction_pull_line_style.terminator),
+            )?;
+            self.repo.set_setting(
+                "interaction_pull_line_pattern",
+                Self::pattern_to_setting_value(self.interaction_pull_line_style.pattern),
+            )?;
+
+            self.repo.set_setting(
+                "interaction_push_line_color",
+                &Self::color_to_setting_value(self.interaction_push_line_style.color),
+            )?;
+            self.repo.set_setting(
+                "interaction_push_line_terminator",
+                Self::terminator_to_setting_value(self.interaction_push_line_style.terminator),
+            )?;
+            self.repo.set_setting(
+                "interaction_push_line_pattern",
+                Self::pattern_to_setting_value(self.interaction_push_line_style.pattern),
+            )?;
+
+            self.repo.set_setting(
+                "interaction_bidirectional_line_color",
+                &Self::color_to_setting_value(self.interaction_bidirectional_line_style.color),
+            )?;
+            self.repo.set_setting(
+                "interaction_bidirectional_line_terminator",
+                Self::terminator_to_setting_value(
+                    self.interaction_bidirectional_line_style.terminator,
+                ),
+            )?;
+            self.repo.set_setting(
+                "interaction_bidirectional_line_pattern",
+                Self::pattern_to_setting_value(self.interaction_bidirectional_line_style.pattern),
             )?;
 
             self.repo.set_setting(
@@ -1062,13 +1375,13 @@ impl SystemsCatalogApp {
             }
         }
 
-        self.show_add_system_modal = true;
+        self.open_modal(AppModal::AddSystem);
         self.focus_add_system_name_on_open = true;
     }
 
     fn open_bulk_add_systems_modal_with_prefill(&mut self, parent_id: Option<i64>) {
         self.bulk_new_system_parent_id = parent_id;
-        self.show_bulk_add_systems_modal = true;
+        self.open_modal(AppModal::BulkAddSystems);
         self.focus_bulk_add_system_names_on_open = true;
     }
 
@@ -1504,8 +1817,8 @@ impl SystemsCatalogApp {
 
     fn clamp_node_position(&self, map_rect: Rect, position: Pos2, node_size: Vec2) -> Pos2 {
         let _ = map_rect;
-        let max_x = MAP_WORLD_SIZE.x - node_size.x - 8.0;
-        let max_y = MAP_WORLD_SIZE.y - node_size.y - 8.0;
+        let max_x = self.map_world_size.x - node_size.x - 8.0;
+        let max_y = self.map_world_size.y - node_size.y - 8.0;
 
         Pos2::new(
             position.x.clamp(8.0, max_x.max(8.0)),

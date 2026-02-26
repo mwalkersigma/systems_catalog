@@ -519,11 +519,19 @@ impl SystemsCatalogApp {
         }
 
         let parent_id = self.bulk_new_system_parent_id;
+        let parent_tech_ids = parent_id
+            .and_then(|id| self.system_tech_ids_by_system.get(&id).cloned())
+            .unwrap_or_default();
 
         let result = (|| -> anyhow::Result<()> {
             let mut created_ids = Vec::new();
             for name in &names {
                 let new_id = self.repo.create_system(name, "", parent_id)?;
+
+                for tech_id in &parent_tech_ids {
+                    let _ = self.repo.add_tech_to_system(new_id, *tech_id);
+                }
+
                 created_ids.push(new_id);
             }
 

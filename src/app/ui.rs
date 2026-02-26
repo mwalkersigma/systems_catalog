@@ -7,8 +7,9 @@ use eframe::egui::{
 use rfd::FileDialog;
 
 use crate::app::{
-    ChildSpawnMode, LineStyle, LineTerminator, SidebarTab, SystemsCatalogApp, MAP_NODE_SIZE,
-    MAP_MAX_ZOOM, MAP_MIN_ZOOM, MAP_WORLD_SIZE, InteractionKind,
+    AppModal, ChildSpawnMode, InteractionKind, LinePattern, LineStyle, LineTerminator,
+    SidebarTab, SystemsCatalogApp, MAP_MAX_ZOOM, MAP_MIN_ZOOM, MAP_NODE_SIZE,
+    MAP_WORLD_MAX_SIZE, MAP_WORLD_MIN_SIZE,
 };
 
 const MAP_GRID_SPACING: f32 = 48.0;
@@ -303,8 +304,8 @@ impl SystemsCatalogApp {
         );
         let origin = self.clamp_node_position(Rect::NOTHING, snapped_origin, node_size);
 
-        let max_columns = ((MAP_WORLD_SIZE.x / MAP_GRID_SPACING).ceil() as i32).max(1);
-        let max_rows = ((MAP_WORLD_SIZE.y / MAP_GRID_SPACING).ceil() as i32).max(1);
+        let max_columns = ((self.map_world_size.x / MAP_GRID_SPACING).ceil() as i32).max(1);
+        let max_rows = ((self.map_world_size.y / MAP_GRID_SPACING).ceil() as i32).max(1);
         let start_column = (origin.x / MAP_GRID_SPACING).round() as i32;
         let start_row = (origin.y / MAP_GRID_SPACING).round() as i32;
 
@@ -368,34 +369,47 @@ impl SystemsCatalogApp {
         style
     }
 
-    fn interaction_line_style_for(
-        &self,
-        source_system_id: i64,
-        target_system_id: i64,
-    ) -> LineStyle {
-        let mut style = self.interaction_line_style;
-        if let Some(override_color) = self.system_line_override_color(source_system_id) {
-            style.color = override_color;
-        } else if let Some(override_color) = self.system_line_override_color(target_system_id) {
-            style.color = override_color;
-        }
-        style
-    }
-
     fn interaction_line_style_for_kind(
         &self,
         source_system_id: i64,
         target_system_id: i64,
         kind: InteractionKind,
     ) -> LineStyle {
-        let mut style = self.interaction_line_style_for(source_system_id, target_system_id);
-        style.terminator = match kind {
-            InteractionKind::Push => LineTerminator::FilledArrow,
-            InteractionKind::Pull => LineTerminator::Arrow,
-            InteractionKind::Standard => LineTerminator::Arrow,
-            InteractionKind::Bidirectional => LineTerminator::Arrow,
+        let mut style = match kind {
+            InteractionKind::Standard => self.interaction_standard_line_style,
+            InteractionKind::Pull => self.interaction_pull_line_style,
+            InteractionKind::Push => self.interaction_push_line_style,
+            InteractionKind::Bidirectional => self.interaction_bidirectional_line_style,
         };
+
+        style.width = self.interaction_line_style.width;
+
+        if let Some(override_color) = self.system_line_override_color(source_system_id) {
+            style.color = override_color;
+        } else if let Some(override_color) = self.system_line_override_color(target_system_id) {
+            style.color = override_color;
+        }
+
         style
+    }
+
+    fn rect_side_midpoint(rect: Rect, direction_from_center: Vec2) -> Pos2 {
+        let center = rect.center();
+        if direction_from_center.length_sq() <= f32::EPSILON {
+            return center;
+        }
+
+        if direction_from_center.x.abs() >= direction_from_center.y.abs() {
+            if direction_from_center.x >= 0.0 {
+                Pos2::new(rect.right(), center.y)
+            } else {
+                Pos2::new(rect.left(), center.y)
+            }
+        } else if direction_from_center.y >= 0.0 {
+            Pos2::new(center.x, rect.bottom())
+        } else {
+            Pos2::new(center.x, rect.top())
+        }
     }
 
     fn rect_edge_point(rect: Rect, direction_from_center: Vec2) -> Pos2 {
@@ -423,7 +437,21 @@ impl SystemsCatalogApp {
         center + (direction_from_center * scale)
     }
 
-    fn card_to_card_endpoints(&self, from_rect: Rect, to_rect: Rect) -> (Pos2, Pos2) {
+    fn rect_anchor_point(rect: Rect, direction_from_center: Vec2, pattern: LinePattern) -> Pos2 {
+        match pattern {
+            LinePattern::Mitered => Self::rect_side_midpoint(rect, direction_from_center),
+            LinePattern::Solid | LinePattern::Dashed => {
+                Self::rect_edge_point(rect, direction_from_center)
+            }
+        }
+    }
+
+    fn card_to_card_endpoints(
+        &self,
+        from_rect: Rect,
+        to_rect: Rect,
+        pattern: LinePattern,
+    ) -> (Pos2, Pos2) {
         let from_center = from_rect.center();
         let to_center = to_rect.center();
         let direction = to_center - from_center;
@@ -432,14 +460,62 @@ impl SystemsCatalogApp {
             return (from_center, to_center);
         }
 
-        let start = Self::rect_edge_point(from_rect, direction);
-        let end = Self::rect_edge_point(to_rect, -direction);
+        let (outgoing_direction, incoming_direction) = match pattern {
+            LinePattern::Mitered => {
+                let near_straight_threshold = 6.0;
+                if direction.x.abs() <= near_straight_threshold
+                    || direction.y.abs() <= near_straight_threshold
+                {
+                    (direction, direction)
+                } else {
+                let mut start = Self::rect_side_midpoint(from_rect, direction);
+                let mut end = Self::rect_side_midpoint(to_rect, -direction);
+
+                for _ in 0..2 {
+                    let delta = end - start;
+                    let horizontal_first = delta.x.abs() >= delta.y.abs();
+
+                    let horizontal_component = if direction.x.abs() <= f32::EPSILON {
+                        if to_center.x >= from_center.x { 1.0 } else { -1.0 }
+                    } else {
+                        direction.x
+                    };
+
+                    let vertical_component = if direction.y.abs() <= f32::EPSILON {
+                        if to_center.y >= from_center.y { 1.0 } else { -1.0 }
+                    } else {
+                        direction.y
+                    };
+
+                    let outgoing = if horizontal_first {
+                        Vec2::new(horizontal_component, 0.0)
+                    } else {
+                        Vec2::new(0.0, vertical_component)
+                    };
+                    let incoming = if horizontal_first {
+                        Vec2::new(0.0, vertical_component)
+                    } else {
+                        Vec2::new(horizontal_component, 0.0)
+                    };
+
+                    start = Self::rect_side_midpoint(from_rect, outgoing);
+                    end = Self::rect_side_midpoint(to_rect, -incoming);
+                }
+
+                (start - from_center, to_center - end)
+                }
+            }
+            LinePattern::Solid | LinePattern::Dashed => (direction, direction),
+        };
+
+        let start = Self::rect_anchor_point(from_rect, outgoing_direction, pattern);
+        let end = Self::rect_anchor_point(to_rect, -incoming_direction, pattern);
         (start, end)
     }
 
-    fn rect_to_point_endpoint(&self, from_rect: Rect, to_point: Pos2) -> Pos2 {
+    fn rect_to_point_endpoint(&self, from_rect: Rect, to_point: Pos2, pattern: LinePattern) -> Pos2 {
         let direction = to_point - from_rect.center();
-        Self::rect_edge_point(from_rect, direction)
+        Self::rect_anchor_point(from_rect, direction, pattern)
     }
 
     fn line_color(&self, style: LineStyle, dimmed: bool, boosted: bool) -> Color32 {
@@ -477,23 +553,56 @@ impl SystemsCatalogApp {
 
         let color = self.line_color(style, dimmed, boosted);
         let stroke = Stroke::new(style.width * self.map_zoom.clamp(0.8, 1.8), color);
-        let unit = direction / distance;
+        let mut points = match style.pattern {
+            LinePattern::Mitered => {
+                let dx = to.x - from.x;
+                let dy = to.y - from.y;
+                let elbow = if dx.abs() >= dy.abs() {
+                    Pos2::new(to.x, from.y)
+                } else {
+                    Pos2::new(from.x, to.y)
+                };
+
+                if from.distance(elbow) < 2.0 || elbow.distance(to) < 2.0 {
+                    vec![from, to]
+                } else {
+                    vec![from, elbow, to]
+                }
+            }
+            LinePattern::Solid | LinePattern::Dashed => vec![from, to],
+        };
+
+        if points.len() < 2 {
+            return;
+        }
+
+        let last_index = points.len() - 1;
+        let last_start = points[last_index - 1];
+        let last_end = points[last_index];
+        let tail = last_end - last_start;
+        if tail.length_sq() <= f32::EPSILON {
+            return;
+        }
+
+        let unit = tail.normalized();
         let normal = Vec2::new(-unit.y, unit.x);
         let arrow_size = (9.0 * self.map_zoom).clamp(7.0, 18.0);
 
         match style.terminator {
             LineTerminator::None => {
-                painter.line_segment([from, to], stroke);
+                self.draw_line_path(painter, &points, stroke, style.pattern);
             }
             LineTerminator::Arrow => {
                 let line_end = to - (unit * (arrow_size + 2.0));
-                painter.line_segment([from, line_end], stroke);
+                points[last_index] = line_end;
+                self.draw_line_path(painter, &points, stroke, style.pattern);
 
                 let arrow_left = to - (unit * arrow_size) + (normal * (arrow_size * 0.45));
                 let arrow_right = to - (unit * arrow_size) - (normal * (arrow_size * 0.45));
 
                 painter.line_segment([to, arrow_left], stroke);
                 painter.line_segment([to, arrow_right], stroke);
+                painter.line_segment([arrow_left, arrow_right], stroke);
             }
             LineTerminator::FilledArrow => {
                 let tip = to;
@@ -502,7 +611,8 @@ impl SystemsCatalogApp {
                 let arrow_right = base - (normal * (arrow_size * 0.5));
                 let line_end = base - (unit * 1.0);
 
-                painter.line_segment([from, line_end], stroke);
+                points[last_index] = line_end;
+                self.draw_line_path(painter, &points, stroke, style.pattern);
                 painter.add(Shape::convex_polygon(
                     vec![tip, arrow_left, arrow_right],
                     color,
@@ -521,14 +631,13 @@ impl SystemsCatalogApp {
         dimmed: bool,
         boosted: bool,
     ) {
-        let color = self.line_color(style, dimmed, boosted);
-        let stroke = Stroke::new(style.width * self.map_zoom.clamp(0.8, 1.8), color);
-        painter.line_segment([from, to], stroke);
+        if style.terminator == LineTerminator::None {
+            self.draw_directed_connection(painter, from, to, style, dimmed, boosted);
+            return;
+        }
 
-        let mut arrow_style = style;
-        arrow_style.terminator = LineTerminator::Arrow;
-        self.draw_directed_connection(painter, from, to, arrow_style, dimmed, boosted);
-        self.draw_directed_connection(painter, to, from, arrow_style, dimmed, boosted);
+        self.draw_directed_connection(painter, from, to, style, dimmed, boosted);
+        self.draw_directed_connection(painter, to, from, style, dimmed, boosted);
     }
 
     fn terminator_label(terminator: LineTerminator) -> &'static str {
@@ -553,6 +662,69 @@ impl SystemsCatalogApp {
                 ui.selectable_value(terminator, LineTerminator::FilledArrow, "Filled arrow");
             });
         ui.label(label);
+    }
+
+    fn pattern_label(pattern: LinePattern) -> &'static str {
+        match pattern {
+            LinePattern::Solid => "Solid",
+            LinePattern::Dashed => "Dashed",
+            LinePattern::Mitered => "Mitered",
+        }
+    }
+
+    fn render_pattern_combo(ui: &mut egui::Ui, id: &str, label: &str, pattern: &mut LinePattern) {
+        egui::ComboBox::from_id_source(id)
+            .selected_text(Self::pattern_label(*pattern))
+            .show_ui(ui, |ui| {
+                ui.selectable_value(pattern, LinePattern::Solid, "Solid");
+                ui.selectable_value(pattern, LinePattern::Dashed, "Dashed");
+                ui.selectable_value(pattern, LinePattern::Mitered, "Mitered");
+            });
+        ui.label(label);
+    }
+
+    fn draw_dashed_segment(&self, painter: &egui::Painter, from: Pos2, to: Pos2, stroke: Stroke) {
+        let direction = to - from;
+        let distance = direction.length();
+        if distance < 1.0 {
+            return;
+        }
+
+        let unit = direction / distance;
+        let dash_len = (10.0 * self.map_zoom).clamp(6.0, 20.0);
+        let gap_len = (6.0 * self.map_zoom).clamp(4.0, 12.0);
+        let step = dash_len + gap_len;
+
+        let mut offset = 0.0;
+        while offset < distance {
+            let start = from + (unit * offset);
+            let end_offset = (offset + dash_len).min(distance);
+            let end = from + (unit * end_offset);
+            painter.line_segment([start, end], stroke);
+            offset += step;
+        }
+    }
+
+    fn draw_line_path(
+        &self,
+        painter: &egui::Painter,
+        points: &[Pos2],
+        stroke: Stroke,
+        pattern: LinePattern,
+    ) {
+        if points.len() < 2 {
+            return;
+        }
+
+        for segment in points.windows(2) {
+            let from = segment[0];
+            let to = segment[1];
+            if pattern == LinePattern::Dashed {
+                self.draw_dashed_segment(painter, from, to, stroke);
+            } else {
+                painter.line_segment([from, to], stroke);
+            }
+        }
     }
 
     fn lerp_color(&self, from: Color32, to: Color32, t: f32) -> Color32 {
@@ -612,6 +784,7 @@ impl SystemsCatalogApp {
                 tech.color
                     .as_deref()
                     .and_then(Self::color_from_setting_value)
+                    .map(|color| Color32::from_rgb(color.r(), color.g(), color.b()))
             })
             .take(self.tech_border_max_colors)
             .collect()
@@ -982,6 +1155,17 @@ impl SystemsCatalogApp {
                     changed = true;
                 }
 
+                let old_parent_pattern = self.parent_line_style.pattern;
+                Self::render_pattern_combo(
+                    ui,
+                    "parent_pattern",
+                    "Line pattern",
+                    &mut self.parent_line_style.pattern,
+                );
+                if old_parent_pattern != self.parent_line_style.pattern {
+                    changed = true;
+                }
+
                 ui.separator();
                 ui.label("Interaction connections");
                 changed |= ui
@@ -993,23 +1177,6 @@ impl SystemsCatalogApp {
                             .text("Width"),
                     )
                     .changed();
-                ui.horizontal(|ui| {
-                    ui.label("Color");
-                    changed |= ui
-                        .color_edit_button_srgba(&mut self.interaction_line_style.color)
-                        .changed();
-                });
-
-                let old_interaction_terminator = self.interaction_line_style.terminator;
-                Self::render_terminator_combo(
-                    ui,
-                    "interaction_terminator",
-                    "Terminator",
-                    &mut self.interaction_line_style.terminator,
-                );
-                if old_interaction_terminator != self.interaction_line_style.terminator {
-                    changed = true;
-                }
 
                 ui.separator();
                 changed |= ui
@@ -1035,6 +1202,136 @@ impl SystemsCatalogApp {
                         "Color card borders by technology",
                     )
                     .changed();
+                self.interaction_standard_line_style.width = self.interaction_line_style.width;
+                self.interaction_pull_line_style.width = self.interaction_line_style.width;
+                self.interaction_push_line_style.width = self.interaction_line_style.width;
+                self.interaction_bidirectional_line_style.width = self.interaction_line_style.width;
+
+                ui.label("Per interaction type");
+
+                ui.group(|ui| {
+                    ui.label("Standard");
+                    ui.horizontal(|ui| {
+                        ui.label("Color");
+                        changed |= ui
+                            .color_edit_button_srgba(&mut self.interaction_standard_line_style.color)
+                            .changed();
+                    });
+                    let old_terminator = self.interaction_standard_line_style.terminator;
+                    Self::render_terminator_combo(
+                        ui,
+                        "interaction_standard_terminator",
+                        "Arrow type",
+                        &mut self.interaction_standard_line_style.terminator,
+                    );
+                    if old_terminator != self.interaction_standard_line_style.terminator {
+                        changed = true;
+                    }
+                    let old_pattern = self.interaction_standard_line_style.pattern;
+                    Self::render_pattern_combo(
+                        ui,
+                        "interaction_standard_pattern",
+                        "Line type",
+                        &mut self.interaction_standard_line_style.pattern,
+                    );
+                    if old_pattern != self.interaction_standard_line_style.pattern {
+                        changed = true;
+                    }
+                });
+
+                ui.group(|ui| {
+                    ui.label("Pull");
+                    ui.horizontal(|ui| {
+                        ui.label("Color");
+                        changed |= ui
+                            .color_edit_button_srgba(&mut self.interaction_pull_line_style.color)
+                            .changed();
+                    });
+                    let old_terminator = self.interaction_pull_line_style.terminator;
+                    Self::render_terminator_combo(
+                        ui,
+                        "interaction_pull_terminator",
+                        "Arrow type",
+                        &mut self.interaction_pull_line_style.terminator,
+                    );
+                    if old_terminator != self.interaction_pull_line_style.terminator {
+                        changed = true;
+                    }
+                    let old_pattern = self.interaction_pull_line_style.pattern;
+                    Self::render_pattern_combo(
+                        ui,
+                        "interaction_pull_pattern",
+                        "Line type",
+                        &mut self.interaction_pull_line_style.pattern,
+                    );
+                    if old_pattern != self.interaction_pull_line_style.pattern {
+                        changed = true;
+                    }
+                });
+
+                ui.group(|ui| {
+                    ui.label("Push");
+                    ui.horizontal(|ui| {
+                        ui.label("Color");
+                        changed |= ui
+                            .color_edit_button_srgba(&mut self.interaction_push_line_style.color)
+                            .changed();
+                    });
+                    let old_terminator = self.interaction_push_line_style.terminator;
+                    Self::render_terminator_combo(
+                        ui,
+                        "interaction_push_terminator",
+                        "Arrow type",
+                        &mut self.interaction_push_line_style.terminator,
+                    );
+                    if old_terminator != self.interaction_push_line_style.terminator {
+                        changed = true;
+                    }
+                    let old_pattern = self.interaction_push_line_style.pattern;
+                    Self::render_pattern_combo(
+                        ui,
+                        "interaction_push_pattern",
+                        "Line type",
+                        &mut self.interaction_push_line_style.pattern,
+                    );
+                    if old_pattern != self.interaction_push_line_style.pattern {
+                        changed = true;
+                    }
+                });
+
+                ui.group(|ui| {
+                    ui.label("Bidirectional");
+                    ui.horizontal(|ui| {
+                        ui.label("Color");
+                        changed |= ui
+                            .color_edit_button_srgba(
+                                &mut self.interaction_bidirectional_line_style.color,
+                            )
+                            .changed();
+                    });
+                    let old_terminator = self.interaction_bidirectional_line_style.terminator;
+                    Self::render_terminator_combo(
+                        ui,
+                        "interaction_bidirectional_terminator",
+                        "Arrow type",
+                        &mut self.interaction_bidirectional_line_style.terminator,
+                    );
+                    if old_terminator != self.interaction_bidirectional_line_style.terminator {
+                        changed = true;
+                    }
+                    let old_pattern = self.interaction_bidirectional_line_style.pattern;
+                    Self::render_pattern_combo(
+                        ui,
+                        "interaction_bidirectional_pattern",
+                        "Line type",
+                        &mut self.interaction_bidirectional_line_style.pattern,
+                    );
+                    if old_pattern != self.interaction_bidirectional_line_style.pattern {
+                        changed = true;
+                    }
+                });
+
+                ui.separator();
                 changed |= ui
                     .add(
                         egui::Slider::new(&mut self.tech_border_max_colors, 1..=5)
@@ -1046,9 +1343,6 @@ impl SystemsCatalogApp {
                     self.settings_dirty = true;
                 }
 
-                if ui.button("Close").clicked() {
-                    self.show_line_style_modal = false;
-                }
             });
 
         self.show_line_style_modal = open;
@@ -1070,6 +1364,7 @@ impl SystemsCatalogApp {
                 ui.label("Alt+N  -> Add Technology");
                 ui.label("Delete  -> Delete selected system");
                 ui.label("Ctrl+Z  -> Undo map move");
+                ui.label("Esc  -> Close most recently opened modal");
                 ui.separator();
                 ui.label("Ctrl+Click  -> Select system + descendants");
                 ui.label("Alt+Click  -> Select system + ancestors");
@@ -1888,6 +2183,38 @@ impl SystemsCatalogApp {
             ui.label(format!("{:.0}%", self.map_zoom * 100.0));
         });
 
+        ui.horizontal(|ui| {
+            ui.label("Canvas");
+
+            let mut width = self.map_world_size.x;
+            if ui
+                .add(
+                    egui::DragValue::new(&mut width)
+                        .clamp_range(MAP_WORLD_MIN_SIZE.x..=MAP_WORLD_MAX_SIZE.x)
+                        .speed(50.0)
+                        .prefix("W "),
+                )
+                .changed()
+            {
+                self.map_world_size.x = width.clamp(MAP_WORLD_MIN_SIZE.x, MAP_WORLD_MAX_SIZE.x);
+                self.settings_dirty = true;
+            }
+
+            let mut height = self.map_world_size.y;
+            if ui
+                .add(
+                    egui::DragValue::new(&mut height)
+                        .clamp_range(MAP_WORLD_MIN_SIZE.y..=MAP_WORLD_MAX_SIZE.y)
+                        .speed(50.0)
+                        .prefix("H "),
+                )
+                .changed()
+            {
+                self.map_world_size.y = height.clamp(MAP_WORLD_MIN_SIZE.y, MAP_WORLD_MAX_SIZE.y);
+                self.settings_dirty = true;
+            }
+        });
+
         let mut desired_size = ui.available_size();
         desired_size.y = desired_size.y.max(420.0);
 
@@ -1914,7 +2241,7 @@ impl SystemsCatalogApp {
             .unwrap_or(false);
         let zoom_active = pointer_over_map || map_response.has_focus();
         if zoom_active && wheel_delta_y.abs() > f32::EPSILON {
-            let zoom_step = (wheel_delta_y / 400.0).clamp(-0.15, 0.15);
+            let zoom_step = (wheel_delta_y / 520.0).clamp(-0.10, 0.10);
             requested_zoom = Some((self.map_zoom + zoom_step).clamp(MAP_MIN_ZOOM, MAP_MAX_ZOOM));
         }
 
@@ -1931,8 +2258,10 @@ impl SystemsCatalogApp {
         let pan = self.map_pan;
 
         self.map_last_view_center_local = Some(Pos2::new(
-            ((map_rect.center().x - map_rect.left() - pan.x) / zoom).clamp(0.0, MAP_WORLD_SIZE.x),
-            ((map_rect.center().y - map_rect.top() - pan.y) / zoom).clamp(0.0, MAP_WORLD_SIZE.y),
+            ((map_rect.center().x - map_rect.left() - pan.x) / zoom)
+                .clamp(0.0, self.map_world_size.x),
+            ((map_rect.center().y - map_rect.top() - pan.y) / zoom)
+                .clamp(0.0, self.map_world_size.y),
         ));
 
         let to_screen = |local: Pos2| -> Pos2 {
@@ -1947,12 +2276,13 @@ impl SystemsCatalogApp {
             ((map_rect.top() - map_rect.top() - pan.y) / zoom).max(0.0),
         );
         let visible_local_max = Pos2::new(
-            ((map_rect.right() - map_rect.left() - pan.x) / zoom).min(MAP_WORLD_SIZE.x),
-            ((map_rect.bottom() - map_rect.top() - pan.y) / zoom).min(MAP_WORLD_SIZE.y),
+            ((map_rect.right() - map_rect.left() - pan.x) / zoom).min(self.map_world_size.x),
+            ((map_rect.bottom() - map_rect.top() - pan.y) / zoom).min(self.map_world_size.y),
         );
 
         let usable_world_top_left = to_screen(Pos2::new(0.0, 0.0));
-        let usable_world_bottom_right = to_screen(Pos2::new(MAP_WORLD_SIZE.x, MAP_WORLD_SIZE.y));
+        let usable_world_bottom_right =
+            to_screen(Pos2::new(self.map_world_size.x, self.map_world_size.y));
         let usable_rect = Rect::from_min_max(usable_world_top_left, usable_world_bottom_right)
             .intersect(map_rect);
 
@@ -2082,7 +2412,8 @@ impl SystemsCatalogApp {
 
                 let parent_style = self.parent_line_style_for(parent_id);
 
-                let (from, to) = self.card_to_card_endpoints(*parent_rect, *child_rect);
+                let (from, to) =
+                    self.card_to_card_endpoints(*parent_rect, *child_rect, parent_style.pattern);
 
                 self.draw_directed_connection(
                     &painter,
@@ -2098,6 +2429,25 @@ impl SystemsCatalogApp {
         let pointer_hover = ui.input(|input| input.pointer.hover_pos());
         let mut closest_hovered_interaction: Option<(crate::app::InteractionPopupState, f32)> =
             None;
+        let focused_flow_edges = if let (Some(from_id), Some(to_id)) = (
+            self.flow_inspector_from_system_id,
+            self.flow_inspector_to_system_id,
+        ) {
+            if from_id == to_id {
+                HashSet::new()
+            } else {
+                self.focused_flow_shortest_path(from_id, to_id)
+                    .map(|path| {
+                        path.into_iter()
+                            .map(|(from, _, to)| (from, to))
+                            .collect::<HashSet<(i64, i64)>>()
+                    })
+                    .unwrap_or_default()
+            }
+        } else {
+            HashSet::new()
+        };
+        let focused_flow_highlight_active = !focused_flow_edges.is_empty();
 
         if self.show_interaction_lines {
             for interaction in self.deduped_visible_interactions() {
@@ -2125,6 +2475,19 @@ impl SystemsCatalogApp {
                 let boosted = selected_id
                     .map(|id| id == source_system_id || id == target_system_id)
                     .unwrap_or(false);
+                let in_focused_flow_path = match interaction.kind {
+                    InteractionKind::Standard | InteractionKind::Push => {
+                        focused_flow_edges.contains(&(source_system_id, target_system_id))
+                    }
+                    InteractionKind::Pull => {
+                        focused_flow_edges.contains(&(target_system_id, source_system_id))
+                    }
+                    InteractionKind::Bidirectional => {
+                        focused_flow_edges.contains(&(source_system_id, target_system_id))
+                            || focused_flow_edges.contains(&(target_system_id, source_system_id))
+                    }
+                };
+                let dimmed_for_focused_flow = focused_flow_highlight_active && !in_focused_flow_path;
 
                 let interaction_style = self.interaction_line_style_for_kind(
                     source_system_id,
@@ -2133,12 +2496,24 @@ impl SystemsCatalogApp {
                 );
 
                 let (from, to) = match interaction.kind {
-                    InteractionKind::Pull => self.card_to_card_endpoints(*target_rect, *source_rect),
+                    InteractionKind::Pull => self.card_to_card_endpoints(
+                        *target_rect,
+                        *source_rect,
+                        interaction_style.pattern,
+                    ),
                     InteractionKind::Push | InteractionKind::Standard => {
-                        self.card_to_card_endpoints(*source_rect, *target_rect)
+                        self.card_to_card_endpoints(
+                            *source_rect,
+                            *target_rect,
+                            interaction_style.pattern,
+                        )
                     }
                     InteractionKind::Bidirectional => {
-                        self.card_to_card_endpoints(*source_rect, *target_rect)
+                        self.card_to_card_endpoints(
+                            *source_rect,
+                            *target_rect,
+                            interaction_style.pattern,
+                        )
                     }
                 };
 
@@ -2148,8 +2523,8 @@ impl SystemsCatalogApp {
                         from,
                         to,
                         interaction_style,
-                        dimmed || dimmed_for_tech,
-                        selected_id.is_some() && boosted,
+                        dimmed || dimmed_for_tech || dimmed_for_focused_flow,
+                        (selected_id.is_some() && boosted) || in_focused_flow_path,
                     );
                 } else {
                     self.draw_directed_connection(
@@ -2157,8 +2532,8 @@ impl SystemsCatalogApp {
                         from,
                         to,
                         interaction_style,
-                        dimmed || dimmed_for_tech,
-                        selected_id.is_some() && boosted,
+                        dimmed || dimmed_for_tech || dimmed_for_focused_flow,
+                        (selected_id.is_some() && boosted) || in_focused_flow_path,
                     );
                 }
 
@@ -2546,7 +2921,11 @@ impl SystemsCatalogApp {
         if let Some(source_id) = self.map_link_drag_from {
             if let Some(source_rect) = node_rects.get(&source_id) {
                 if let Some(pointer_pos) = ui.input(|input| input.pointer.interact_pos()) {
-                    let from = self.rect_to_point_endpoint(*source_rect, pointer_pos);
+                    let from = self.rect_to_point_endpoint(
+                        *source_rect,
+                        pointer_pos,
+                        self.parent_line_style.pattern,
+                    );
                     self.draw_directed_connection(
                         &painter,
                         from,
@@ -2579,17 +2958,34 @@ impl SystemsCatalogApp {
         if let Some(source_id) = self.map_interaction_drag_from {
             if let Some(source_rect) = node_rects.get(&source_id) {
                 if let Some(pointer_pos) = ui.input(|input| input.pointer.interact_pos()) {
+                    let preview_style = self.interaction_line_style_for_kind(
+                        source_id,
+                        source_id,
+                        self.map_interaction_drag_kind,
+                    );
                     let (from, to) = match self.map_interaction_drag_kind {
                         InteractionKind::Pull => {
-                            let endpoint = self.rect_to_point_endpoint(*source_rect, pointer_pos);
+                            let endpoint = self.rect_to_point_endpoint(
+                                *source_rect,
+                                pointer_pos,
+                                preview_style.pattern,
+                            );
                             (pointer_pos, endpoint)
                         }
                         InteractionKind::Push | InteractionKind::Standard => {
-                            let endpoint = self.rect_to_point_endpoint(*source_rect, pointer_pos);
+                            let endpoint = self.rect_to_point_endpoint(
+                                *source_rect,
+                                pointer_pos,
+                                preview_style.pattern,
+                            );
                             (endpoint, pointer_pos)
                         }
                         InteractionKind::Bidirectional => {
-                            let endpoint = self.rect_to_point_endpoint(*source_rect, pointer_pos);
+                            let endpoint = self.rect_to_point_endpoint(
+                                *source_rect,
+                                pointer_pos,
+                                preview_style.pattern,
+                            );
                             (endpoint, pointer_pos)
                         }
                     };
@@ -2598,7 +2994,7 @@ impl SystemsCatalogApp {
                         &painter,
                         from,
                         to,
-                        self.interaction_line_style,
+                        preview_style,
                         false,
                         false,
                     );
@@ -2640,6 +3036,10 @@ impl SystemsCatalogApp {
 
 impl eframe::App for SystemsCatalogApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.prune_closed_modals_from_stack();
+
+        let close_recent_modal =
+            ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
         let open_bulk_add_system = ctx.input_mut(|input| {
             input.consume_key(
                 egui::Modifiers {
@@ -2661,6 +3061,10 @@ impl eframe::App for SystemsCatalogApp {
         let open_hotkeys =
             ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::F1));
 
+        if close_recent_modal && self.close_most_recent_open_modal() {
+            self.status_message = "Closed dialog".to_owned();
+        }
+
         if open_bulk_add_system {
             self.open_bulk_add_systems_modal_with_prefill(self.selected_system_id);
         }
@@ -2670,7 +3074,7 @@ impl eframe::App for SystemsCatalogApp {
         }
 
         if open_add_tech {
-            self.show_add_tech_modal = true;
+            self.open_modal(AppModal::AddTech);
             self.focus_add_tech_name_on_open = true;
         }
 
@@ -2683,7 +3087,7 @@ impl eframe::App for SystemsCatalogApp {
         }
 
         if open_hotkeys {
-            self.show_hotkeys_modal = true;
+            self.open_modal(AppModal::Hotkeys);
         }
 
         if let Err(error) = self.validate_before_render() {
@@ -2699,23 +3103,23 @@ impl eframe::App for SystemsCatalogApp {
                     self.open_bulk_add_systems_modal_with_prefill(self.selected_system_id);
                 }
                 if ui.button("Add Technology").clicked() {
-                    self.show_add_tech_modal = true;
+                    self.open_modal(AppModal::AddTech);
                     self.focus_add_tech_name_on_open = true;
                 }
                 if ui.button("Save Catalog").clicked() {
-                    self.show_save_catalog_modal = true;
+                    self.open_modal(AppModal::SaveCatalog);
                 }
                 if ui.button("Load Catalog").clicked() {
-                    self.show_load_catalog_modal = true;
+                    self.open_modal(AppModal::LoadCatalog);
                 }
                 if ui.button("New Catalog").clicked() {
-                    self.show_new_catalog_confirm_modal = true;
+                    self.open_modal(AppModal::NewCatalogConfirm);
                 }
                 if ui.button("Connection Style").clicked() {
-                    self.show_line_style_modal = true;
+                    self.open_modal(AppModal::LineStyle);
                 }
                 if ui.button("Hotkeys").clicked() {
-                    self.show_hotkeys_modal = true;
+                    self.open_modal(AppModal::Hotkeys);
                 }
 
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
