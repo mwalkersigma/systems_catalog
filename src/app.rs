@@ -31,6 +31,18 @@ pub enum LinePattern {
     Mitered,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineLayerDepth {
+    BehindCards,
+    AboveCards,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineLayerOrder {
+    ParentThenInteraction,
+    InteractionThenParent,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct LineStyle {
     pub width: f32,
@@ -190,6 +202,8 @@ pub struct SystemsCatalogApp {
     interaction_bidirectional_line_style: LineStyle,
     show_parent_lines: bool,
     show_interaction_lines: bool,
+    line_layer_depth: LineLayerDepth,
+    line_layer_order: LineLayerOrder,
     dimmed_line_opacity_percent: f32,
     selected_line_brightness_percent: f32,
     show_tech_border_colors: bool,
@@ -324,6 +338,8 @@ impl SystemsCatalogApp {
             },
             show_parent_lines: true,
             show_interaction_lines: true,
+            line_layer_depth: LineLayerDepth::BehindCards,
+            line_layer_order: LineLayerOrder::ParentThenInteraction,
             dimmed_line_opacity_percent: 18.0,
             selected_line_brightness_percent: 135.0,
             show_tech_border_colors: false,
@@ -855,6 +871,20 @@ impl SystemsCatalogApp {
         }
     }
 
+    fn line_layer_depth_to_setting_value(depth: LineLayerDepth) -> &'static str {
+        match depth {
+            LineLayerDepth::BehindCards => "behind_cards",
+            LineLayerDepth::AboveCards => "above_cards",
+        }
+    }
+
+    fn line_layer_order_to_setting_value(order: LineLayerOrder) -> &'static str {
+        match order {
+            LineLayerOrder::ParentThenInteraction => "parent_then_interaction",
+            LineLayerOrder::InteractionThenParent => "interaction_then_parent",
+        }
+    }
+
     fn child_spawn_mode_to_setting_value(mode: ChildSpawnMode) -> &'static str {
         match mode {
             ChildSpawnMode::RightOfPrevious => "right_of_previous",
@@ -911,6 +941,22 @@ impl SystemsCatalogApp {
             "solid" => Some(LinePattern::Solid),
             "dashed" => Some(LinePattern::Dashed),
             "mitered" => Some(LinePattern::Mitered),
+            _ => None,
+        }
+    }
+
+    fn line_layer_depth_from_setting_value(value: &str) -> Option<LineLayerDepth> {
+        match value {
+            "behind_cards" => Some(LineLayerDepth::BehindCards),
+            "above_cards" => Some(LineLayerDepth::AboveCards),
+            _ => None,
+        }
+    }
+
+    fn line_layer_order_from_setting_value(value: &str) -> Option<LineLayerOrder> {
+        match value {
+            "parent_then_interaction" => Some(LineLayerOrder::ParentThenInteraction),
+            "interaction_then_parent" => Some(LineLayerOrder::InteractionThenParent),
             _ => None,
         }
     }
@@ -1118,6 +1164,18 @@ impl SystemsCatalogApp {
             self.show_interaction_lines = value == "true";
         }
 
+        if let Some(value) = self.repo.get_setting("line_layer_depth")? {
+            if let Some(parsed) = Self::line_layer_depth_from_setting_value(&value) {
+                self.line_layer_depth = parsed;
+            }
+        }
+
+        if let Some(value) = self.repo.get_setting("line_layer_order")? {
+            if let Some(parsed) = Self::line_layer_order_from_setting_value(&value) {
+                self.line_layer_order = parsed;
+            }
+        }
+
         if let Some(value) = self.repo.get_setting("dimmed_line_opacity_percent")? {
             if let Ok(parsed) = value.parse::<f32>() {
                 self.dimmed_line_opacity_percent = parsed.clamp(0.0, 100.0);
@@ -1286,6 +1344,16 @@ impl SystemsCatalogApp {
                 } else {
                     "false"
                 },
+            )?;
+
+            self.repo.set_setting(
+                "line_layer_depth",
+                Self::line_layer_depth_to_setting_value(self.line_layer_depth),
+            )?;
+
+            self.repo.set_setting(
+                "line_layer_order",
+                Self::line_layer_order_to_setting_value(self.line_layer_order),
             )?;
 
             self.repo.set_setting(

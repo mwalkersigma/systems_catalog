@@ -6,9 +6,10 @@ use eframe::egui::{
 };
 use rfd::FileDialog;
 
+use crate::models::SystemRecord;
 use crate::app::{
-    AppModal, ChildSpawnMode, InteractionKind, LinePattern, LineStyle, LineTerminator,
-    SidebarTab, SystemsCatalogApp, MAP_MAX_ZOOM, MAP_MIN_ZOOM, MAP_NODE_SIZE,
+    AppModal, ChildSpawnMode, InteractionKind, LineLayerDepth, LineLayerOrder, LinePattern,
+    LineStyle, LineTerminator, SidebarTab, SystemsCatalogApp, MAP_MAX_ZOOM, MAP_MIN_ZOOM, MAP_NODE_SIZE,
     MAP_WORLD_MAX_SIZE, MAP_WORLD_MIN_SIZE,
 };
 
@@ -683,6 +684,198 @@ impl SystemsCatalogApp {
         ui.label(label);
     }
 
+    fn line_layer_depth_label(depth: LineLayerDepth) -> &'static str {
+        match depth {
+            LineLayerDepth::BehindCards => "Behind cards",
+            LineLayerDepth::AboveCards => "Above cards",
+        }
+    }
+
+    fn line_layer_order_label(order: LineLayerOrder) -> &'static str {
+        match order {
+            LineLayerOrder::ParentThenInteraction => "Parent below interaction",
+            LineLayerOrder::InteractionThenParent => "Parent above interaction",
+        }
+    }
+
+    fn draw_parent_lines_layer(
+        &self,
+        painter: &egui::Painter,
+        visible_systems: &[SystemRecord],
+        node_rects: &HashMap<i64, Rect>,
+        selected_id: Option<i64>,
+        tech_filter_active: bool,
+    ) {
+        if !self.show_parent_lines {
+            return;
+        }
+
+        for system in visible_systems {
+            let Some(parent_id) = system.parent_id else {
+                continue;
+            };
+
+            let Some(parent_rect) = node_rects.get(&parent_id) else {
+                continue;
+            };
+            let Some(child_rect) = node_rects.get(&system.id) else {
+                continue;
+            };
+
+            let dimmed = selected_id
+                .map(|id| id != parent_id && id != system.id)
+                .unwrap_or(false);
+            let dimmed_for_tech = selected_id.is_some()
+                && tech_filter_active
+                && (!self
+                    .systems_using_selected_catalog_tech
+                    .contains(&parent_id)
+                    || !self
+                        .systems_using_selected_catalog_tech
+                        .contains(&system.id));
+            let boosted = selected_id
+                .map(|id| id == parent_id || id == system.id)
+                .unwrap_or(false);
+
+            let parent_style = self.parent_line_style_for(parent_id);
+            let (from, to) =
+                self.card_to_card_endpoints(*parent_rect, *child_rect, parent_style.pattern);
+
+            self.draw_directed_connection(
+                painter,
+                from,
+                to,
+                parent_style,
+                dimmed || dimmed_for_tech,
+                selected_id.is_some() && boosted,
+            );
+        }
+    }
+
+    fn draw_interaction_lines_layer(
+        &self,
+        painter: &egui::Painter,
+        map_rect: Rect,
+        pointer_hover: Option<Pos2>,
+        node_rects: &HashMap<i64, Rect>,
+        selected_id: Option<i64>,
+        tech_filter_active: bool,
+        focused_flow_edges: &HashSet<(i64, i64)>,
+        focused_flow_highlight_active: bool,
+    ) -> Option<(crate::app::InteractionPopupState, f32)> {
+        if !self.show_interaction_lines {
+            return None;
+        }
+
+        let mut closest_hovered_interaction: Option<(crate::app::InteractionPopupState, f32)> =
+            None;
+
+        for interaction in self.deduped_visible_interactions() {
+            let source_system_id = interaction.source_system_id;
+            let target_system_id = interaction.target_system_id;
+
+            let Some(source_rect) = node_rects.get(&source_system_id) else {
+                continue;
+            };
+            let Some(target_rect) = node_rects.get(&target_system_id) else {
+                continue;
+            };
+
+            let dimmed = selected_id
+                .map(|id| id != source_system_id && id != target_system_id)
+                .unwrap_or(false);
+            let dimmed_for_tech = selected_id.is_some()
+                && tech_filter_active
+                && (!self
+                    .systems_using_selected_catalog_tech
+                    .contains(&source_system_id)
+                    || !self
+                        .systems_using_selected_catalog_tech
+                        .contains(&target_system_id));
+            let boosted = selected_id
+                .map(|id| id == source_system_id || id == target_system_id)
+                .unwrap_or(false);
+            let in_focused_flow_path = match interaction.kind {
+                InteractionKind::Standard | InteractionKind::Push => {
+                    focused_flow_edges.contains(&(source_system_id, target_system_id))
+                }
+                InteractionKind::Pull => {
+                    focused_flow_edges.contains(&(target_system_id, source_system_id))
+                }
+                InteractionKind::Bidirectional => {
+                    focused_flow_edges.contains(&(source_system_id, target_system_id))
+                        || focused_flow_edges.contains(&(target_system_id, source_system_id))
+                }
+            };
+            let dimmed_for_focused_flow = focused_flow_highlight_active && !in_focused_flow_path;
+
+            let interaction_style =
+                self.interaction_line_style_for_kind(source_system_id, target_system_id, interaction.kind);
+
+            let (from, to) = match interaction.kind {
+                InteractionKind::Pull => self.card_to_card_endpoints(
+                    *target_rect,
+                    *source_rect,
+                    interaction_style.pattern,
+                ),
+                InteractionKind::Push | InteractionKind::Standard => self.card_to_card_endpoints(
+                    *source_rect,
+                    *target_rect,
+                    interaction_style.pattern,
+                ),
+                InteractionKind::Bidirectional => self.card_to_card_endpoints(
+                    *source_rect,
+                    *target_rect,
+                    interaction_style.pattern,
+                ),
+            };
+
+            if interaction.kind == InteractionKind::Bidirectional {
+                self.draw_bidirectional_connection(
+                    painter,
+                    from,
+                    to,
+                    interaction_style,
+                    dimmed || dimmed_for_tech || dimmed_for_focused_flow,
+                    (selected_id.is_some() && boosted) || in_focused_flow_path,
+                );
+            } else {
+                self.draw_directed_connection(
+                    painter,
+                    from,
+                    to,
+                    interaction_style,
+                    dimmed || dimmed_for_tech || dimmed_for_focused_flow,
+                    (selected_id.is_some() && boosted) || in_focused_flow_path,
+                );
+            }
+
+            if !interaction.note.trim().is_empty() {
+                if let Some(pointer) = pointer_hover.filter(|pos| map_rect.contains(*pos)) {
+                    let hover_distance = Self::point_to_segment_distance(pointer, from, to);
+                    let hover_threshold = (10.0 * self.map_zoom).clamp(8.0, 18.0);
+                    if hover_distance <= hover_threshold {
+                        let popup_state = crate::app::InteractionPopupState {
+                            source_system_name: self.system_name_by_id(source_system_id),
+                            target_system_name: self.system_name_by_id(target_system_id),
+                            note: interaction.note.clone(),
+                            anchor_screen: pointer,
+                        };
+
+                        match &closest_hovered_interaction {
+                            Some((_, best_distance)) if *best_distance <= hover_distance => {}
+                            _ => {
+                                closest_hovered_interaction = Some((popup_state, hover_distance));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        closest_hovered_interaction
+    }
+
     fn draw_dashed_segment(&self, painter: &egui::Painter, from: Pos2, to: Pos2, stroke: Stroke) {
         let direction = to - from;
         let distance = direction.length();
@@ -1177,6 +1370,50 @@ impl SystemsCatalogApp {
                             .text("Width"),
                     )
                     .changed();
+
+                ui.horizontal(|ui| {
+                    ui.label("Line layer");
+                    let previous = self.line_layer_depth;
+                    egui::ComboBox::from_id_source("line_layer_depth")
+                        .selected_text(Self::line_layer_depth_label(self.line_layer_depth))
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut self.line_layer_depth,
+                                LineLayerDepth::BehindCards,
+                                "Behind cards",
+                            );
+                            ui.selectable_value(
+                                &mut self.line_layer_depth,
+                                LineLayerDepth::AboveCards,
+                                "Above cards",
+                            );
+                        });
+                    if previous != self.line_layer_depth {
+                        changed = true;
+                    }
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("Parent vs interaction");
+                    let previous = self.line_layer_order;
+                    egui::ComboBox::from_id_source("line_layer_order")
+                        .selected_text(Self::line_layer_order_label(self.line_layer_order))
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut self.line_layer_order,
+                                LineLayerOrder::ParentThenInteraction,
+                                "Parent below interaction",
+                            );
+                            ui.selectable_value(
+                                &mut self.line_layer_order,
+                                LineLayerOrder::InteractionThenParent,
+                                "Parent above interaction",
+                            );
+                        });
+                    if previous != self.line_layer_order {
+                        changed = true;
+                    }
+                });
 
                 ui.separator();
                 changed |= ui
@@ -2382,53 +2619,7 @@ impl SystemsCatalogApp {
             }
         }
 
-        if self.show_parent_lines {
-            for system in &visible_systems {
-                let Some(parent_id) = system.parent_id else {
-                    continue;
-                };
-
-                let Some(parent_rect) = node_rects.get(&parent_id) else {
-                    continue;
-                };
-                let Some(child_rect) = node_rects.get(&system.id) else {
-                    continue;
-                };
-
-                let dimmed = selected_id
-                    .map(|id| id != parent_id && id != system.id)
-                    .unwrap_or(false);
-                let dimmed_for_tech = selected_id.is_some()
-                    && tech_filter_active
-                    && (!self
-                        .systems_using_selected_catalog_tech
-                        .contains(&parent_id)
-                        || !self
-                            .systems_using_selected_catalog_tech
-                            .contains(&system.id));
-                let boosted = selected_id
-                    .map(|id| id == parent_id || id == system.id)
-                    .unwrap_or(false);
-
-                let parent_style = self.parent_line_style_for(parent_id);
-
-                let (from, to) =
-                    self.card_to_card_endpoints(*parent_rect, *child_rect, parent_style.pattern);
-
-                self.draw_directed_connection(
-                    &painter,
-                    from,
-                    to,
-                    parent_style,
-                    dimmed || dimmed_for_tech,
-                    selected_id.is_some() && boosted,
-                );
-            }
-        }
-
         let pointer_hover = ui.input(|input| input.pointer.hover_pos());
-        let mut closest_hovered_interaction: Option<(crate::app::InteractionPopupState, f32)> =
-            None;
         let focused_flow_edges = if let (Some(from_id), Some(to_id)) = (
             self.flow_inspector_from_system_id,
             self.flow_inspector_to_system_id,
@@ -2448,134 +2639,51 @@ impl SystemsCatalogApp {
             HashSet::new()
         };
         let focused_flow_highlight_active = !focused_flow_edges.is_empty();
+        let mut closest_hovered_interaction: Option<(crate::app::InteractionPopupState, f32)> =
+            None;
 
-        if self.show_interaction_lines {
-            for interaction in self.deduped_visible_interactions() {
-                let source_system_id = interaction.source_system_id;
-                let target_system_id = interaction.target_system_id;
-
-                let Some(source_rect) = node_rects.get(&source_system_id) else {
-                    continue;
-                };
-                let Some(target_rect) = node_rects.get(&target_system_id) else {
-                    continue;
-                };
-
-                let dimmed = selected_id
-                    .map(|id| id != source_system_id && id != target_system_id)
-                    .unwrap_or(false);
-                let dimmed_for_tech = selected_id.is_some()
-                    && tech_filter_active
-                    && (!self
-                        .systems_using_selected_catalog_tech
-                        .contains(&source_system_id)
-                        || !self
-                            .systems_using_selected_catalog_tech
-                            .contains(&target_system_id));
-                let boosted = selected_id
-                    .map(|id| id == source_system_id || id == target_system_id)
-                    .unwrap_or(false);
-                let in_focused_flow_path = match interaction.kind {
-                    InteractionKind::Standard | InteractionKind::Push => {
-                        focused_flow_edges.contains(&(source_system_id, target_system_id))
-                    }
-                    InteractionKind::Pull => {
-                        focused_flow_edges.contains(&(target_system_id, source_system_id))
-                    }
-                    InteractionKind::Bidirectional => {
-                        focused_flow_edges.contains(&(source_system_id, target_system_id))
-                            || focused_flow_edges.contains(&(target_system_id, source_system_id))
-                    }
-                };
-                let dimmed_for_focused_flow = focused_flow_highlight_active && !in_focused_flow_path;
-
-                let interaction_style = self.interaction_line_style_for_kind(
-                    source_system_id,
-                    target_system_id,
-                    interaction.kind,
-                );
-
-                let (from, to) = match interaction.kind {
-                    InteractionKind::Pull => self.card_to_card_endpoints(
-                        *target_rect,
-                        *source_rect,
-                        interaction_style.pattern,
-                    ),
-                    InteractionKind::Push | InteractionKind::Standard => {
-                        self.card_to_card_endpoints(
-                            *source_rect,
-                            *target_rect,
-                            interaction_style.pattern,
-                        )
-                    }
-                    InteractionKind::Bidirectional => {
-                        self.card_to_card_endpoints(
-                            *source_rect,
-                            *target_rect,
-                            interaction_style.pattern,
-                        )
-                    }
-                };
-
-                if interaction.kind == InteractionKind::Bidirectional {
-                    self.draw_bidirectional_connection(
+        if self.line_layer_depth == LineLayerDepth::BehindCards {
+            match self.line_layer_order {
+                LineLayerOrder::ParentThenInteraction => {
+                    self.draw_parent_lines_layer(
                         &painter,
-                        from,
-                        to,
-                        interaction_style,
-                        dimmed || dimmed_for_tech || dimmed_for_focused_flow,
-                        (selected_id.is_some() && boosted) || in_focused_flow_path,
+                        &visible_systems,
+                        &node_rects,
+                        selected_id,
+                        tech_filter_active,
                     );
-                } else {
-                    self.draw_directed_connection(
+                    closest_hovered_interaction = self.draw_interaction_lines_layer(
                         &painter,
-                        from,
-                        to,
-                        interaction_style,
-                        dimmed || dimmed_for_tech || dimmed_for_focused_flow,
-                        (selected_id.is_some() && boosted) || in_focused_flow_path,
+                        map_rect,
+                        pointer_hover,
+                        &node_rects,
+                        selected_id,
+                        tech_filter_active,
+                        &focused_flow_edges,
+                        focused_flow_highlight_active,
                     );
                 }
-
-                if !interaction.note.trim().is_empty() {
-                    if let Some(pointer) = pointer_hover.filter(|pos| map_rect.contains(*pos)) {
-                        let hover_distance = Self::point_to_segment_distance(pointer, from, to);
-                        let hover_threshold = (10.0 * self.map_zoom).clamp(8.0, 18.0);
-                        if hover_distance <= hover_threshold {
-                            let popup_state = crate::app::InteractionPopupState {
-                                source_system_name: self.system_name_by_id(source_system_id),
-                                target_system_name: self.system_name_by_id(target_system_id),
-                                note: interaction.note.clone(),
-                                anchor_screen: pointer,
-                            };
-
-                            match &closest_hovered_interaction {
-                                Some((_, best_distance)) if *best_distance <= hover_distance => {}
-                                _ => {
-                                    closest_hovered_interaction =
-                                        Some((popup_state, hover_distance));
-                                }
-                            }
-                        }
-                    }
+                LineLayerOrder::InteractionThenParent => {
+                    closest_hovered_interaction = self.draw_interaction_lines_layer(
+                        &painter,
+                        map_rect,
+                        pointer_hover,
+                        &node_rects,
+                        selected_id,
+                        tech_filter_active,
+                        &focused_flow_edges,
+                        focused_flow_highlight_active,
+                    );
+                    self.draw_parent_lines_layer(
+                        &painter,
+                        &visible_systems,
+                        &node_rects,
+                        selected_id,
+                        tech_filter_active,
+                    );
                 }
             }
         }
-
-        let now_secs = ui.input(|input| input.time);
-        let clicked_on_interaction = ui.input(|input| input.pointer.primary_clicked());
-        if clicked_on_interaction {
-            if let Some((popup_state, _)) = closest_hovered_interaction.clone() {
-                self.interaction_popup_active = Some(popup_state);
-                self.interaction_popup_pending = None;
-                self.interaction_popup_pending_open_at_secs = None;
-                self.interaction_popup_close_at_secs = None;
-            }
-        }
-
-        let hovered_popup_state = closest_hovered_interaction.map(|(state, _)| state);
-        self.update_interaction_note_popup_state(hovered_popup_state, now_secs);
-        self.render_interaction_note_popup(&painter, map_rect);
 
         let mut snap_preview_positions: HashMap<i64, Pos2> = HashMap::new();
 
@@ -2892,6 +3000,64 @@ impl SystemsCatalogApp {
                 }
             }
         }
+
+        if self.line_layer_depth == LineLayerDepth::AboveCards {
+            match self.line_layer_order {
+                LineLayerOrder::ParentThenInteraction => {
+                    self.draw_parent_lines_layer(
+                        &painter,
+                        &visible_systems,
+                        &node_rects,
+                        selected_id,
+                        tech_filter_active,
+                    );
+                    closest_hovered_interaction = self.draw_interaction_lines_layer(
+                        &painter,
+                        map_rect,
+                        pointer_hover,
+                        &node_rects,
+                        selected_id,
+                        tech_filter_active,
+                        &focused_flow_edges,
+                        focused_flow_highlight_active,
+                    );
+                }
+                LineLayerOrder::InteractionThenParent => {
+                    closest_hovered_interaction = self.draw_interaction_lines_layer(
+                        &painter,
+                        map_rect,
+                        pointer_hover,
+                        &node_rects,
+                        selected_id,
+                        tech_filter_active,
+                        &focused_flow_edges,
+                        focused_flow_highlight_active,
+                    );
+                    self.draw_parent_lines_layer(
+                        &painter,
+                        &visible_systems,
+                        &node_rects,
+                        selected_id,
+                        tech_filter_active,
+                    );
+                }
+            }
+        }
+
+        let now_secs = ui.input(|input| input.time);
+        let clicked_on_interaction = ui.input(|input| input.pointer.primary_clicked());
+        if clicked_on_interaction {
+            if let Some((popup_state, _)) = closest_hovered_interaction.clone() {
+                self.interaction_popup_active = Some(popup_state);
+                self.interaction_popup_pending = None;
+                self.interaction_popup_pending_open_at_secs = None;
+                self.interaction_popup_close_at_secs = None;
+            }
+        }
+
+        let hovered_popup_state = closest_hovered_interaction.map(|(state, _)| state);
+        self.update_interaction_note_popup_state(hovered_popup_state, now_secs);
+        self.render_interaction_note_popup(&painter, map_rect);
 
         if self.snap_to_grid {
             for (system_id, preview_position) in &snap_preview_positions {
