@@ -1,6 +1,529 @@
-use crate::app::{InteractionKind, SystemsCatalogApp};
+use std::collections::{HashMap, HashSet};
+
+use crate::app::{CopiedSystemEntry, InteractionKind, SystemsCatalogApp};
 
 impl SystemsCatalogApp {
+    pub(super) fn create_zone_from_rect(
+        &mut self,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+    ) {
+        let clamped_width = width.max(24.0);
+        let clamped_height = height.max(24.0);
+
+        let zone_name = format!("Zone {}", self.zones.len() + 1);
+        let color_value = Some(Self::color_to_setting_value(self.selected_zone_color));
+
+        let result = self
+            .repo
+            .create_zone(
+                zone_name.as_str(),
+                x,
+                y,
+                clamped_width,
+                clamped_height,
+                color_value.as_deref(),
+                self.selected_zone_render_priority,
+            )
+            .and_then(|new_zone_id| {
+                self.refresh_systems()?;
+                self.select_zone(new_zone_id);
+                Ok(())
+            });
+
+        match result {
+            Ok(_) => {
+                self.status_message = "Zone created".to_owned();
+            }
+            Err(error) => {
+                self.status_message = format!("Failed to create zone: {error}");
+            }
+        }
+    }
+
+    pub(super) fn update_selected_zone_properties(&mut self) {
+        let Some(zone_id) = self.selected_zone_id else {
+            return;
+        };
+
+        let Some(existing) = self.zones.iter().find(|zone| zone.id == zone_id).cloned() else {
+            return;
+        };
+
+        let name = self.selected_zone_name.trim();
+        let name = if name.is_empty() { "Zone" } else { name };
+
+        let color_value = Some(Self::color_to_setting_value(self.selected_zone_color));
+        let result = self
+            .repo
+            .update_zone(
+                zone_id,
+                name,
+                existing.x,
+                existing.y,
+                existing.width,
+                existing.height,
+                color_value.as_deref(),
+                self.selected_zone_render_priority,
+            )
+            .and_then(|_| self.refresh_systems());
+
+        if result.is_err() {
+            self.status_message = "Failed to update zone".to_owned();
+        }
+    }
+
+    pub(super) fn update_selected_zone_geometry(
+        &mut self,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+    ) {
+        let Some(zone_id) = self.selected_zone_id else {
+            return;
+        };
+
+        let Some(_) = self.zones.iter().find(|zone| zone.id == zone_id) else {
+            return;
+        };
+
+        let clamped_width = width.max(24.0);
+        let clamped_height = height.max(24.0);
+        let clamped_x = x.max(0.0);
+        let clamped_y = y.max(0.0);
+
+        let max_x = (self.map_world_size.x - clamped_width).max(0.0);
+        let max_y = (self.map_world_size.y - clamped_height).max(0.0);
+
+        let name = self.selected_zone_name.trim();
+        let name = if name.is_empty() { "Zone" } else { name };
+        let color_value = Some(Self::color_to_setting_value(self.selected_zone_color));
+
+        let result = self
+            .repo
+            .update_zone(
+                zone_id,
+                name,
+                clamped_x.min(max_x),
+                clamped_y.min(max_y),
+                clamped_width,
+                clamped_height,
+                color_value.as_deref(),
+                self.selected_zone_render_priority,
+            )
+            .and_then(|_| self.refresh_systems())
+            .and_then(|_| {
+                self.select_zone(zone_id);
+                Ok(())
+            });
+
+        if result.is_err() {
+            self.status_message = "Failed to update zone geometry".to_owned();
+        }
+    }
+
+    pub(super) fn delete_selected_zone(&mut self) {
+        let Some(zone_id) = self.selected_zone_id else {
+            return;
+        };
+
+        let result = self.repo.delete_zone(zone_id).and_then(|_| self.refresh_systems());
+
+        match result {
+            Ok(_) => {
+                self.selected_zone_id = None;
+                self.selected_zone_name.clear();
+                self.selected_zone_render_priority = 1;
+                self.status_message = "Zone deleted".to_owned();
+            }
+            Err(error) => {
+                self.status_message = format!("Failed to delete zone: {error}");
+            }
+        }
+    }
+
+    fn escape_clipboard_field(value: &str) -> String {
+        value
+            .replace('\\', "\\\\")
+            .replace('\t', "\\t")
+            .replace('\n', "\\n")
+            .replace('\r', "\\r")
+    }
+
+    fn unescape_clipboard_field(value: &str) -> String {
+        let mut result = String::new();
+        let mut chars = value.chars();
+
+        while let Some(ch) = chars.next() {
+            if ch != '\\' {
+                result.push(ch);
+                continue;
+            }
+
+            match chars.next() {
+                Some('t') => result.push('\t'),
+                Some('n') => result.push('\n'),
+                Some('r') => result.push('\r'),
+                Some('\\') => result.push('\\'),
+                Some(other) => {
+                    result.push('\\');
+                    result.push(other);
+                }
+                None => result.push('\\'),
+            }
+        }
+
+        result
+    }
+
+    pub(super) fn copied_systems_payload(&self) -> Option<String> {
+        if self.copied_system_entries.is_empty() {
+            return None;
+        }
+
+        let mut payload = String::from("systems-catalog-cards:v2\n");
+        for entry in &self.copied_system_entries {
+            let escaped_name = Self::escape_clipboard_field(entry.name.as_str());
+            let escaped_description = Self::escape_clipboard_field(entry.description.as_str());
+            let parent_index = entry
+                .parent_index
+                .map(|index| index.to_string())
+                .unwrap_or_else(|| "-1".to_owned());
+            payload.push_str(
+                format!(
+                    "{}\t{}\t{}\t{}\t{}\n",
+                    escaped_name,
+                    escaped_description,
+                    parent_index,
+                    entry.relative_x,
+                    entry.relative_y
+                )
+                .as_str(),
+            );
+        }
+
+        Some(payload)
+    }
+
+    pub(super) fn load_copied_systems_from_payload(&mut self, payload: &str) -> bool {
+        let trimmed = payload.trim_end();
+        if let Some(rest) = trimmed.strip_prefix("systems-catalog-cards:v2") {
+            let entries = rest
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .filter_map(|line| {
+                    let columns = line.split('\t').collect::<Vec<_>>();
+                    if columns.len() < 5 {
+                        return None;
+                    }
+
+                    let name = Self::unescape_clipboard_field(columns[0]);
+                    if name.trim().is_empty() {
+                        return None;
+                    }
+
+                    let description = Self::unescape_clipboard_field(columns[1]);
+                    let parent_index = columns[2]
+                        .parse::<isize>()
+                        .ok()
+                        .and_then(|index| if index >= 0 { Some(index as usize) } else { None });
+                    let relative_x = columns[3].parse::<f32>().ok().unwrap_or(0.0);
+                    let relative_y = columns[4].parse::<f32>().ok().unwrap_or(0.0);
+
+                    Some(CopiedSystemEntry {
+                        name,
+                        description,
+                        parent_index,
+                        relative_x,
+                        relative_y,
+                    })
+                })
+                .collect::<Vec<_>>();
+
+            if entries.is_empty() {
+                return false;
+            }
+
+            self.copied_system_entries = entries;
+            return true;
+        }
+
+        let Some(rest) = trimmed.strip_prefix("systems-catalog-cards:v1") else {
+            return false;
+        };
+
+        let copied = rest
+            .lines()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(|name| name.to_owned())
+            .collect::<Vec<_>>();
+
+        if copied.is_empty() {
+            return false;
+        }
+
+        self.copied_system_entries = copied
+            .into_iter()
+            .enumerate()
+            .map(|(index, name)| CopiedSystemEntry {
+                name,
+                description: String::new(),
+                parent_index: None,
+                relative_x: index as f32 * 36.0,
+                relative_y: 0.0,
+            })
+            .collect();
+        true
+    }
+
+    fn create_system_with_generated_unique_name(
+        &self,
+        base_name: &str,
+        description: &str,
+        parent_id: Option<i64>,
+    ) -> anyhow::Result<i64> {
+        let base = base_name.trim();
+        if base.is_empty() {
+            return Err(anyhow::anyhow!("System name is required"));
+        }
+
+        if let Ok(id) = self.repo.create_system(base, description, parent_id) {
+            return Ok(id);
+        }
+
+        for attempt in 1..=250 {
+            let candidate = if attempt == 1 {
+                format!("{base} Copy")
+            } else {
+                format!("{base} Copy {attempt}")
+            };
+
+            if let Ok(id) = self.repo.create_system(candidate.as_str(), description, parent_id) {
+                return Ok(id);
+            }
+        }
+
+        Err(anyhow::anyhow!(
+            "Unable to create unique system name for '{}'",
+            base
+        ))
+    }
+
+    pub(super) fn copy_selected_map_systems(&mut self) {
+        let mut source_ids = self.selected_map_system_ids.clone();
+        if source_ids.is_empty() {
+            if let Some(system_id) = self.selected_system_id {
+                source_ids.insert(system_id);
+            }
+        }
+
+        if source_ids.is_empty() {
+            self.status_message =
+                "Copy failed: select one or more cards (or a system) first".to_owned();
+            return;
+        }
+
+        let mut copied_systems = self
+            .systems
+            .iter()
+            .filter(|system| source_ids.contains(&system.id))
+            .cloned()
+            .collect::<Vec<_>>();
+
+        copied_systems.sort_by_key(|system| system.id);
+
+        if copied_systems.is_empty() {
+            self.status_message = "Copy failed: no matching systems found".to_owned();
+            return;
+        }
+
+        let id_to_index = copied_systems
+            .iter()
+            .enumerate()
+            .map(|(index, system)| (system.id, index))
+            .collect::<HashMap<_, _>>();
+
+        let copied_positions = copied_systems
+            .iter()
+            .map(|system| {
+                self.map_positions
+                    .get(&system.id)
+                    .copied()
+                    .or_else(|| match (system.map_x, system.map_y) {
+                        (Some(x), Some(y)) => Some(eframe::egui::Pos2::new(x, y)),
+                        _ => None,
+                    })
+                    .unwrap_or(eframe::egui::Pos2::new(0.0, 0.0))
+            })
+            .collect::<Vec<_>>();
+
+        let min_x = copied_positions
+            .iter()
+            .map(|position| position.x)
+            .fold(f32::INFINITY, f32::min);
+        let min_y = copied_positions
+            .iter()
+            .map(|position| position.y)
+            .fold(f32::INFINITY, f32::min);
+
+        self.copied_system_entries = copied_systems
+            .iter()
+            .enumerate()
+            .map(|(index, system)| {
+                let position = copied_positions[index];
+                CopiedSystemEntry {
+                    name: system.name.clone(),
+                    description: system.description.clone(),
+                    parent_index: system
+                        .parent_id
+                        .and_then(|parent_id| id_to_index.get(&parent_id).copied()),
+                    relative_x: position.x - min_x,
+                    relative_y: position.y - min_y,
+                }
+            })
+            .collect();
+
+        self.status_message = format!(
+            "Copied {} card(s) to clipboard",
+            self.copied_system_entries.len()
+        );
+    }
+
+    pub(super) fn paste_copied_systems(&mut self) {
+        if self.copied_system_entries.is_empty() {
+            self.status_message =
+                "Paste failed: clipboard is empty (use Ctrl+C first)".to_owned();
+            return;
+        }
+
+        let parent_id = self.selected_system_id;
+        let parent_tech_ids = parent_id
+            .and_then(|id| self.system_tech_ids_by_system.get(&id).cloned())
+            .unwrap_or_default();
+
+        let entries_to_create = self.copied_system_entries.clone();
+        let result = (|| -> anyhow::Result<usize> {
+            let mut created_ids_by_entry = HashMap::<usize, i64>::new();
+            let mut created_order = Vec::<usize>::new();
+            let mut remaining = (0..entries_to_create.len()).collect::<HashSet<_>>();
+
+            while !remaining.is_empty() {
+                let mut progress = false;
+                let pending = remaining.iter().copied().collect::<Vec<_>>();
+
+                for entry_index in pending {
+                    let entry = &entries_to_create[entry_index];
+
+                    let effective_parent_id = match entry.parent_index {
+                        Some(parent_entry_index) => {
+                            let Some(created_parent_id) =
+                                created_ids_by_entry.get(&parent_entry_index).copied()
+                            else {
+                                continue;
+                            };
+
+                            Some(created_parent_id)
+                        }
+                        None => parent_id,
+                    };
+
+                    let new_id = self.create_system_with_generated_unique_name(
+                        entry.name.as_str(),
+                        entry.description.as_str(),
+                        effective_parent_id,
+                    )?;
+
+                    if effective_parent_id == parent_id {
+                        for tech_id in &parent_tech_ids {
+                            let _ = self.repo.add_tech_to_system(new_id, *tech_id);
+                        }
+                    }
+
+                    created_ids_by_entry.insert(entry_index, new_id);
+                    created_order.push(entry_index);
+                    remaining.remove(&entry_index);
+                    progress = true;
+                }
+
+                if !progress {
+                    return Err(anyhow::anyhow!(
+                        "Unable to resolve clipboard hierarchy for paste"
+                    ));
+                }
+            }
+
+            self.refresh_systems()?;
+
+            let anchor_position = if parent_id.is_some() {
+                self.find_next_free_child_spawn_position(parent_id)
+                    .unwrap_or_else(|| self.find_next_free_root_spawn_position())
+            } else {
+                self.find_next_free_root_spawn_position()
+            };
+
+            let mut pasted_set = HashSet::new();
+            for entry_index in created_order {
+                let Some(created_id) = created_ids_by_entry.get(&entry_index).copied() else {
+                    continue;
+                };
+
+                let entry = &entries_to_create[entry_index];
+                let desired_position = eframe::egui::Pos2::new(
+                    anchor_position.x + entry.relative_x,
+                    anchor_position.y + entry.relative_y,
+                );
+
+                let node_size = self
+                    .systems
+                    .iter()
+                    .find(|system| system.id == created_id)
+                    .map(|_system| crate::app::MAP_NODE_SIZE)
+                    .unwrap_or(crate::app::MAP_NODE_SIZE);
+
+                let clamped = self.clamp_node_position(
+                    eframe::egui::Rect::NOTHING,
+                    desired_position,
+                    node_size,
+                );
+
+                self.map_positions.insert(created_id, clamped);
+                self.persist_map_position(created_id, clamped);
+                pasted_set.insert(created_id);
+            }
+
+            if let Some(first_created_id) = created_ids_by_entry.values().next().copied() {
+                self.selected_system_id = Some(first_created_id);
+                let _ = self.load_selected_data(first_created_id);
+            }
+
+            self.selected_map_system_ids = pasted_set;
+
+            Ok(created_ids_by_entry.len())
+        })();
+
+        match result {
+            Ok(count) => {
+                if let Some(parent_id) = parent_id {
+                    self.status_message = format!(
+                        "Pasted {} card(s) as children of '{}'",
+                        count,
+                        self.system_name_by_id(parent_id)
+                    );
+                } else {
+                    self.status_message = format!("Pasted {} card(s) at root", count);
+                }
+            }
+            Err(error) => {
+                self.status_message = format!("Failed to paste cards: {error}");
+            }
+        }
+    }
+
     pub(super) fn update_selected_system_details(&mut self) {
         let Some(system_id) = self.selected_system_id else {
             self.status_message = "Select a system first".to_owned();

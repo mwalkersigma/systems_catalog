@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
+use arboard::Clipboard;
 use eframe::egui::{
     self, Align, Color32, FontId, Layout, Pos2, Rect, RichText, Sense, Shape, Stroke, Vec2,
 };
@@ -9,8 +10,8 @@ use rfd::FileDialog;
 use crate::models::SystemRecord;
 use crate::app::{
     AppModal, ChildSpawnMode, InteractionKind, LineLayerDepth, LineLayerOrder, LinePattern,
-    LineStyle, LineTerminator, SidebarTab, SystemsCatalogApp, MAP_MAX_ZOOM, MAP_MIN_ZOOM, MAP_NODE_SIZE,
-    MAP_WORLD_MAX_SIZE, MAP_WORLD_MIN_SIZE,
+    LineStyle, LineTerminator, SidebarTab, SystemsCatalogApp, ZoneDragKind, MAP_MAX_ZOOM,
+    MAP_MIN_ZOOM, MAP_NODE_SIZE, MAP_WORLD_MAX_SIZE, MAP_WORLD_MIN_SIZE,
 };
 
 const MAP_GRID_SPACING: f32 = 48.0;
@@ -28,6 +29,40 @@ const INTERACTION_NOTE_POPUP_OPEN_DELAY_SECS: f64 = 0.2;
 const INTERACTION_NOTE_POPUP_CLOSE_DELAY_SECS: f64 = 0.2;
 
 impl SystemsCatalogApp {
+    fn copy_selected_systems_to_clipboard(&mut self) {
+        self.copy_selected_map_systems();
+
+        let Some(payload) = self.copied_systems_payload() else {
+            return;
+        };
+
+        match Clipboard::new().and_then(|mut clipboard| clipboard.set_text(payload)) {
+            Ok(_) => {
+                self.status_message.push_str(" (system clipboard updated)");
+            }
+            Err(error) => {
+                self.status_message = format!("{} (clipboard write failed: {error})", self.status_message);
+            }
+        }
+    }
+
+    fn load_copied_systems_from_clipboard(&mut self) {
+        let Ok(mut clipboard) = Clipboard::new() else {
+            return;
+        };
+
+        let Ok(text) = clipboard.get_text() else {
+            return;
+        };
+
+        if self.load_copied_systems_from_payload(text.as_str()) {
+            self.status_message = format!(
+                "Loaded {} card(s) from system clipboard",
+                self.copied_system_entries.len()
+            );
+        }
+    }
+
     fn point_to_segment_distance(point: Pos2, segment_start: Pos2, segment_end: Pos2) -> f32 {
         let segment = segment_end - segment_start;
         let segment_length_sq = segment.length_sq();
@@ -781,9 +816,14 @@ impl SystemsCatalogApp {
                 continue;
             };
 
-            let dimmed = selected_id
-                .map(|id| id != source_system_id && id != target_system_id)
+            let in_primary_selection = selected_id
+                .map(|id| id == source_system_id || id == target_system_id)
                 .unwrap_or(false);
+            let in_selection_set = self.selected_map_system_ids.contains(&source_system_id)
+                || self.selected_map_system_ids.contains(&target_system_id);
+            let has_any_selection = selected_id.is_some() || !self.selected_map_system_ids.is_empty();
+
+            let dimmed = has_any_selection && !(in_primary_selection || in_selection_set);
             let dimmed_for_tech = selected_id.is_some()
                 && tech_filter_active
                 && (!self
@@ -792,9 +832,7 @@ impl SystemsCatalogApp {
                     || !self
                         .systems_using_selected_catalog_tech
                         .contains(&target_system_id));
-            let boosted = selected_id
-                .map(|id| id == source_system_id || id == target_system_id)
-                .unwrap_or(false);
+            let boosted = in_primary_selection || in_selection_set;
             let in_focused_flow_path = match interaction.kind {
                 InteractionKind::Standard | InteractionKind::Push => {
                     focused_flow_edges.contains(&(source_system_id, target_system_id))
@@ -1599,6 +1637,8 @@ impl SystemsCatalogApp {
                 ui.label("Ctrl+N  -> Add System");
                 ui.label("Ctrl+Shift+N  -> Bulk Add Systems");
                 ui.label("Alt+N  -> Add Technology");
+                ui.label("Alt+C  -> Copy highlighted cards");
+                ui.label("Alt+V  -> Paste copied cards");
                 ui.label("Delete  -> Delete selected system");
                 ui.label("Ctrl+Z  -> Undo map move");
                 ui.label("Esc  -> Close most recently opened modal");
@@ -2374,7 +2414,7 @@ impl SystemsCatalogApp {
 
     fn render_map_canvas(&mut self, ui: &mut egui::Ui) {
         ui.heading("Mind Map");
-        ui.label("Hold Space and drag to pan. Scroll to zoom. Shift+drag child -> parent to assign parent. Ctrl+R/B/F + drag creates Standard/Pull/Push interaction. Drag on empty map space to box-select systems.");
+        ui.label("Hold Space and drag to pan. Scroll to zoom. Shift+drag child -> parent to assign parent. Ctrl+R/B/F + drag creates Standard/Pull/Push interaction. Alt+C/Alt+V copies and pastes highlighted cards. Drag on empty map space to box-select systems.");
 
         let mut requested_zoom: Option<f32> = None;
 
@@ -2452,6 +2492,56 @@ impl SystemsCatalogApp {
             }
         });
 
+        ui.horizontal(|ui| {
+            let draw_zone_label = if self.zone_draw_mode {
+                "Drawing zones: ON"
+            } else {
+                "Draw Zone"
+            };
+
+            if ui.selectable_label(self.zone_draw_mode, draw_zone_label).clicked() {
+                self.zone_draw_mode = !self.zone_draw_mode;
+                self.zone_draw_start_screen = None;
+                self.zone_draw_end_screen = None;
+                self.zone_drag_kind = None;
+                self.zone_drag_start_local = None;
+            }
+
+            if let Some(_zone_id) = self.selected_zone_id {
+                ui.label("Zone");
+                if ui
+                    .text_edit_singleline(&mut self.selected_zone_name)
+                    .changed()
+                {
+                    self.update_selected_zone_properties();
+                }
+
+                if ui
+                    .color_edit_button_srgba(&mut self.selected_zone_color)
+                    .changed()
+                {
+                    self.update_selected_zone_properties();
+                }
+
+                let mut render_priority = self.selected_zone_render_priority;
+                if ui
+                    .add(
+                        egui::DragValue::new(&mut render_priority)
+                            .speed(1.0)
+                            .prefix("Priority "),
+                    )
+                    .changed()
+                {
+                    self.selected_zone_render_priority = render_priority;
+                    self.update_selected_zone_properties();
+                }
+
+                if ui.small_button("Delete Zone").clicked() {
+                    self.delete_selected_zone();
+                }
+            }
+        });
+
         let mut desired_size = ui.available_size();
         desired_size.y = desired_size.y.max(420.0);
 
@@ -2508,6 +2598,16 @@ impl SystemsCatalogApp {
             )
         };
 
+        let map_world_width = self.map_world_size.x;
+        let map_world_height = self.map_world_size.y;
+
+        let to_local = |screen: Pos2| -> Pos2 {
+            Pos2::new(
+                ((screen.x - map_rect.left() - pan.x) / zoom).clamp(0.0, map_world_width),
+                ((screen.y - map_rect.top() - pan.y) / zoom).clamp(0.0, map_world_height),
+            )
+        };
+
         let visible_local_min = Pos2::new(
             ((map_rect.left() - map_rect.left() - pan.x) / zoom).max(0.0),
             ((map_rect.top() - map_rect.top() - pan.y) / zoom).max(0.0),
@@ -2522,6 +2622,87 @@ impl SystemsCatalogApp {
             to_screen(Pos2::new(self.map_world_size.x, self.map_world_size.y));
         let usable_rect = Rect::from_min_max(usable_world_top_left, usable_world_bottom_right)
             .intersect(map_rect);
+
+        struct ZoneRenderItem {
+            id: i64,
+            rect: Rect,
+            name: String,
+            fill_color: Color32,
+            render_priority: i64,
+        }
+
+        let mut zone_render_items = self
+            .zones
+            .iter()
+            .filter_map(|zone| {
+                let top_left = to_screen(Pos2::new(zone.x, zone.y));
+                let bottom_right = to_screen(Pos2::new(zone.x + zone.width, zone.y + zone.height));
+                let zone_rect = Rect::from_two_pos(top_left, bottom_right).intersect(map_rect);
+
+                if zone_rect.width() <= 0.0 || zone_rect.height() <= 0.0 {
+                    return None;
+                }
+
+                let fill_color = zone
+                    .color
+                    .as_deref()
+                    .and_then(Self::color_from_setting_value)
+                    .unwrap_or(Color32::from_rgba_unmultiplied(96, 140, 255, 40));
+
+                Some(ZoneRenderItem {
+                    id: zone.id,
+                    rect: zone_rect,
+                    name: zone.name.clone(),
+                    fill_color,
+                    render_priority: zone.render_priority,
+                })
+            })
+            .collect::<Vec<_>>();
+
+        zone_render_items.sort_by(|left, right| {
+            left.render_priority
+                .cmp(&right.render_priority)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+
+        let draw_zone_group = |draw_above_grid: bool, painter: &egui::Painter| {
+            for zone in &zone_render_items {
+                let should_draw_above_grid = zone.render_priority > 0;
+                if should_draw_above_grid != draw_above_grid {
+                    continue;
+                }
+
+                let draw_fill = Color32::from_rgba_unmultiplied(
+                    zone.fill_color.r(),
+                    zone.fill_color.g(),
+                    zone.fill_color.b(),
+                    zone.fill_color.a().max(20),
+                );
+
+                painter.rect_filled(zone.rect, 4.0, draw_fill);
+                painter.rect_stroke(
+                    zone.rect,
+                    4.0,
+                    Stroke::new(
+                        1.0,
+                        Color32::from_rgb(
+                            zone.fill_color.r(),
+                            zone.fill_color.g(),
+                            zone.fill_color.b(),
+                        ),
+                    ),
+                );
+                painter.text(
+                    zone.rect.left_top() + Vec2::new(6.0, 4.0),
+                    egui::Align2::LEFT_TOP,
+                    zone.name.as_str(),
+                    FontId::proportional((12.0 * self.map_zoom).clamp(10.0, 14.0)),
+                    Color32::from_gray(210),
+                );
+            }
+        };
+
+        draw_zone_group(false, &painter);
 
         if usable_rect.width() > 0.0 && usable_rect.height() > 0.0 {
             let grid_stroke = Stroke::new(1.0, Color32::from_gray(32));
@@ -2553,6 +2734,8 @@ impl SystemsCatalogApp {
             }
         }
 
+        draw_zone_group(true, &painter);
+
         let visible_ids = self.visible_system_ids();
         let visible_systems = self
             .systems
@@ -2571,10 +2754,135 @@ impl SystemsCatalogApp {
             }
         }
 
+        if !space_down && !self.zone_draw_mode {
+            if let Some(selected_zone_id) = self.selected_zone_id {
+                let selected_zone_rect = zone_render_items
+                    .iter()
+                    .find(|zone| zone.id == selected_zone_id)
+                    .map(|zone| zone.rect);
+
+                if let Some(zone_rect) = selected_zone_rect {
+                    painter.rect_stroke(zone_rect, 4.0, Stroke::new(1.5, Color32::from_gray(235)));
+
+                    let handle_rect = Rect::from_center_size(
+                        zone_rect.right_bottom(),
+                        Vec2::splat(12.0),
+                    )
+                    .intersect(map_rect);
+
+                    painter.rect_filled(handle_rect, 2.0, Color32::from_gray(225));
+                    painter.rect_stroke(handle_rect, 2.0, Stroke::new(1.0, Color32::from_gray(25)));
+
+                    let move_response = ui.interact(
+                        zone_rect,
+                        ui.id().with(("zone_move", selected_zone_id)),
+                        Sense::click_and_drag(),
+                    );
+                    let resize_response = ui.interact(
+                        handle_rect,
+                        ui.id().with(("zone_resize", selected_zone_id)),
+                        Sense::click_and_drag(),
+                    );
+
+                    if resize_response.drag_started() {
+                        if let Some(pointer_pos) = ui.input(|input| input.pointer.interact_pos()) {
+                            let start_local = to_local(pointer_pos);
+                            self.zone_drag_kind = Some(ZoneDragKind::ResizeBottomRight);
+                            self.zone_drag_start_local = Some(start_local);
+
+                            if let Some(existing) =
+                                self.zones.iter().find(|zone| zone.id == selected_zone_id)
+                            {
+                                self.zone_drag_initial_x = existing.x;
+                                self.zone_drag_initial_y = existing.y;
+                                self.zone_drag_initial_width = existing.width;
+                                self.zone_drag_initial_height = existing.height;
+                            }
+                        }
+                    } else if move_response.drag_started() {
+                        if let Some(pointer_pos) = ui.input(|input| input.pointer.interact_pos()) {
+                            let start_local = to_local(pointer_pos);
+                            self.zone_drag_kind = Some(ZoneDragKind::Move);
+                            self.zone_drag_start_local = Some(start_local);
+
+                            if let Some(existing) =
+                                self.zones.iter().find(|zone| zone.id == selected_zone_id)
+                            {
+                                self.zone_drag_initial_x = existing.x;
+                                self.zone_drag_initial_y = existing.y;
+                                self.zone_drag_initial_width = existing.width;
+                                self.zone_drag_initial_height = existing.height;
+                            }
+                        }
+                    }
+
+                    if let (Some(drag_kind), Some(start_local), Some(pointer_pos)) = (
+                        self.zone_drag_kind,
+                        self.zone_drag_start_local,
+                        ui.input(|input| input.pointer.interact_pos()),
+                    ) {
+                        let current_local = to_local(pointer_pos);
+                        let delta = current_local - start_local;
+
+                        let (mut next_x, mut next_y, mut next_width, mut next_height) = (
+                            self.zone_drag_initial_x,
+                            self.zone_drag_initial_y,
+                            self.zone_drag_initial_width,
+                            self.zone_drag_initial_height,
+                        );
+
+                        match drag_kind {
+                            ZoneDragKind::Move => {
+                                next_x += delta.x;
+                                next_y += delta.y;
+                            }
+                            ZoneDragKind::ResizeBottomRight => {
+                                next_width = (next_width + delta.x).max(24.0);
+                                next_height = (next_height + delta.y).max(24.0);
+                            }
+                        }
+
+                        let max_x = (self.map_world_size.x - next_width).max(0.0);
+                        let max_y = (self.map_world_size.y - next_height).max(0.0);
+                        next_x = next_x.clamp(0.0, max_x);
+                        next_y = next_y.clamp(0.0, max_y);
+                        next_width = next_width.min((self.map_world_size.x - next_x).max(24.0));
+                        next_height = next_height.min((self.map_world_size.y - next_y).max(24.0));
+
+                        if let Some(zone) = self.zones.iter_mut().find(|zone| zone.id == selected_zone_id) {
+                            zone.x = next_x;
+                            zone.y = next_y;
+                            zone.width = next_width;
+                            zone.height = next_height;
+                        }
+                    }
+
+                    if self.zone_drag_kind.is_some() && ui.input(|input| input.pointer.any_released()) {
+                        if let Some(updated) = self
+                            .zones
+                            .iter()
+                            .find(|zone| zone.id == selected_zone_id)
+                            .cloned()
+                        {
+                            self.update_selected_zone_geometry(
+                                updated.x,
+                                updated.y,
+                                updated.width,
+                                updated.height,
+                            );
+                        }
+
+                        self.zone_drag_kind = None;
+                        self.zone_drag_start_local = None;
+                    }
+                }
+            }
+        }
+
         let selected_id = self.selected_system_id;
         let tech_filter_active = self.selected_catalog_tech_id_for_edit.is_some();
 
-        if !space_down {
+        if !space_down && !self.zone_draw_mode && self.zone_drag_kind.is_none() {
             if map_response.drag_started() {
                 let pointer_pos = ui.input(|input| input.pointer.interact_pos());
                 self.map_drag_started_on_node = pointer_pos
@@ -2616,6 +2924,63 @@ impl SystemsCatalogApp {
 
             if ui.input(|input| input.pointer.any_released()) {
                 self.map_drag_started_on_node = false;
+            }
+        }
+
+        if self.zone_draw_mode && !space_down {
+            if map_response.drag_started() {
+                let pointer_pos = ui.input(|input| input.pointer.interact_pos());
+                self.zone_draw_start_screen = pointer_pos;
+                self.zone_draw_end_screen = pointer_pos;
+            }
+
+            if map_response.dragged() {
+                self.zone_draw_end_screen = ui.input(|input| input.pointer.interact_pos());
+            }
+
+            if let (Some(start), Some(end)) = (self.zone_draw_start_screen, self.zone_draw_end_screen)
+            {
+                let preview_rect = Rect::from_two_pos(start, end).intersect(map_rect);
+                painter.rect_filled(
+                    preview_rect,
+                    4.0,
+                    Color32::from_rgba_unmultiplied(
+                        self.selected_zone_color.r(),
+                        self.selected_zone_color.g(),
+                        self.selected_zone_color.b(),
+                        self.selected_zone_color.a().max(18),
+                    ),
+                );
+                painter.rect_stroke(
+                    preview_rect,
+                    4.0,
+                    Stroke::new(
+                        1.5,
+                        Color32::from_rgb(
+                            self.selected_zone_color.r(),
+                            self.selected_zone_color.g(),
+                            self.selected_zone_color.b(),
+                        ),
+                    ),
+                );
+            }
+
+            let released = ui.input(|input| input.pointer.any_released());
+            if released {
+                if let (Some(start), Some(end)) =
+                    (self.zone_draw_start_screen.take(), self.zone_draw_end_screen.take())
+                {
+                    let local_start = to_local(start);
+                    let local_end = to_local(end);
+                    let min_x = local_start.x.min(local_end.x);
+                    let min_y = local_start.y.min(local_end.y);
+                    let width = (local_end.x - local_start.x).abs();
+                    let height = (local_end.y - local_start.y).abs();
+
+                    if width >= 16.0 && height >= 16.0 {
+                        self.create_zone_from_rect(min_x, min_y, width, height);
+                    }
+                }
             }
         }
 
@@ -2702,7 +3067,7 @@ impl SystemsCatalogApp {
             if node_interact_rect.width() <= 0.0 || node_interact_rect.height() <= 0.0 {
                 continue;
             }
-            let interaction_sense = if space_down {
+            let interaction_sense = if space_down || self.zone_draw_mode || self.zone_drag_kind.is_some() {
                 Sense::hover()
             } else {
                 Sense::click_and_drag()
@@ -3187,6 +3552,22 @@ impl SystemsCatalogApp {
         }
 
         if map_response.clicked() && !space_down {
+            let clicked_zone_id = ui
+                .input(|input| input.pointer.interact_pos())
+                .and_then(|pointer_pos| {
+                    zone_render_items
+                        .iter()
+                        .rev()
+                        .find(|zone| zone.rect.contains(pointer_pos))
+                        .map(|zone| zone.id)
+                });
+
+            if let Some(zone_id) = clicked_zone_id {
+                self.select_zone(zone_id);
+                self.status_message = "Zone selected".to_owned();
+                return;
+            }
+
             let clicked_on_node = ui
                 .input(|input| input.pointer.interact_pos())
                 .map(|pointer_pos| node_rects.values().any(|rect| rect.contains(pointer_pos)))
@@ -3194,6 +3575,11 @@ impl SystemsCatalogApp {
 
             if !clicked_on_node {
                 self.clear_selection();
+                self.selected_zone_id = None;
+                self.selected_zone_name.clear();
+                self.selected_zone_render_priority = 1;
+                self.zone_drag_kind = None;
+                self.zone_drag_start_local = None;
                 self.status_message = "Selection cleared".to_owned();
             }
         }
@@ -3220,6 +3606,10 @@ impl eframe::App for SystemsCatalogApp {
             ctx.input_mut(|input| input.consume_key(egui::Modifiers::CTRL, egui::Key::N));
         let open_add_tech =
             ctx.input_mut(|input| input.consume_key(egui::Modifiers::ALT, egui::Key::N));
+        let copy_selected_cards =
+            ctx.input_mut(|input| input.consume_key(egui::Modifiers::ALT, egui::Key::C));
+        let paste_copied_cards =
+            ctx.input_mut(|input| input.consume_key(egui::Modifiers::ALT, egui::Key::V));
         let undo_map_change =
             ctx.input_mut(|input| input.consume_key(egui::Modifiers::CTRL, egui::Key::Z));
         let delete_selected =
@@ -3242,6 +3632,15 @@ impl eframe::App for SystemsCatalogApp {
         if open_add_tech {
             self.open_modal(AppModal::AddTech);
             self.focus_add_tech_name_on_open = true;
+        }
+
+        if copy_selected_cards {
+            self.copy_selected_systems_to_clipboard();
+        }
+
+        if paste_copied_cards {
+            self.load_copied_systems_from_clipboard();
+            self.paste_copied_systems();
         }
 
         if undo_map_change {
@@ -3267,6 +3666,13 @@ impl eframe::App for SystemsCatalogApp {
                 }
                 if ui.button("Bulk Add").clicked() {
                     self.open_bulk_add_systems_modal_with_prefill(self.selected_system_id);
+                }
+                if ui.button("Copy Selected").clicked() {
+                    self.copy_selected_systems_to_clipboard();
+                }
+                if ui.button("Paste Cards").clicked() {
+                    self.load_copied_systems_from_clipboard();
+                    self.paste_copied_systems();
                 }
                 if ui.button("Add Technology").clicked() {
                     self.open_modal(AppModal::AddTech);

@@ -45,3 +45,15 @@ pub struct TechItem {
     pub color: Option<String>,
     pub display_priority: i64,
 }
+
+#[derive(Debug, Clone)]
+pub struct ZoneRecord {
+    pub id: i64,
+    pub name: String,
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub color: Option<String>,
+    pub render_priority: i64,
+}

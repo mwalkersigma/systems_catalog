@@ -7,7 +7,7 @@ use anyhow::{anyhow, Result};
 use eframe::egui::{Color32, Pos2, Rect, Vec2};
 
 use crate::db::Repository;
-use crate::models::{SystemLink, SystemNote, SystemRecord, TechItem};
+use crate::models::{SystemLink, SystemNote, SystemRecord, TechItem, ZoneRecord};
 
 pub(crate) const MAP_NODE_SIZE: Vec2 = Vec2::new(170.0, 64.0);
 pub(crate) const MAP_WORLD_SIZE: Vec2 = Vec2::new(12000.0, 12000.0);
@@ -72,6 +72,12 @@ pub enum InteractionKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ZoneDragKind {
+    Move,
+    ResizeBottomRight,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppModal {
     AddSystem,
     BulkAddSystems,
@@ -99,6 +105,15 @@ pub struct InteractionPopupState {
     pub anchor_screen: Pos2,
 }
 
+#[derive(Debug, Clone)]
+pub struct CopiedSystemEntry {
+    pub name: String,
+    pub description: String,
+    pub parent_index: Option<usize>,
+    pub relative_x: f32,
+    pub relative_y: f32,
+}
+
 /// Primary UI application state.
 ///
 /// TypeScript analogy: this struct is similar to a React component's local state + service
@@ -120,6 +135,7 @@ pub struct SystemsCatalogApp {
     new_system_name: String,
     new_system_description: String,
     new_system_parent_id: Option<i64>,
+    copied_system_entries: Vec<CopiedSystemEntry>,
     bulk_new_system_names: String,
     bulk_new_system_parent_id: Option<i64>,
     new_child_spawn_mode: ChildSpawnMode,
@@ -155,6 +171,20 @@ pub struct SystemsCatalogApp {
     fast_add_selected_catalog_tech_on_map: bool,
 
     map_positions: HashMap<i64, Pos2>,
+    zones: Vec<ZoneRecord>,
+    selected_zone_id: Option<i64>,
+    selected_zone_name: String,
+    selected_zone_color: Color32,
+    selected_zone_render_priority: i64,
+    zone_draw_mode: bool,
+    zone_draw_start_screen: Option<Pos2>,
+    zone_draw_end_screen: Option<Pos2>,
+    zone_drag_kind: Option<ZoneDragKind>,
+    zone_drag_start_local: Option<Pos2>,
+    zone_drag_initial_x: f32,
+    zone_drag_initial_y: f32,
+    zone_drag_initial_width: f32,
+    zone_drag_initial_height: f32,
     map_link_drag_from: Option<i64>,
     map_interaction_drag_from: Option<i64>,
     map_interaction_drag_kind: InteractionKind,
@@ -231,6 +261,7 @@ impl SystemsCatalogApp {
             new_system_name: String::new(),
             new_system_description: String::new(),
             new_system_parent_id: None,
+            copied_system_entries: Vec::new(),
             bulk_new_system_names: String::new(),
             bulk_new_system_parent_id: None,
             new_child_spawn_mode: ChildSpawnMode::RightOfPrevious,
@@ -263,6 +294,20 @@ impl SystemsCatalogApp {
             system_tech_ids_by_system: HashMap::new(),
             fast_add_selected_catalog_tech_on_map: false,
             map_positions: HashMap::new(),
+            zones: Vec::new(),
+            selected_zone_id: None,
+            selected_zone_name: String::new(),
+            selected_zone_color: Color32::from_rgba_unmultiplied(96, 140, 255, 48),
+            selected_zone_render_priority: 1,
+            zone_draw_mode: false,
+            zone_draw_start_screen: None,
+            zone_draw_end_screen: None,
+            zone_drag_kind: None,
+            zone_drag_start_local: None,
+            zone_drag_initial_x: 0.0,
+            zone_drag_initial_y: 0.0,
+            zone_drag_initial_width: 0.0,
+            zone_drag_initial_height: 0.0,
             map_link_drag_from: None,
             map_interaction_drag_from: None,
             map_interaction_drag_kind: InteractionKind::Standard,
@@ -420,6 +465,7 @@ impl SystemsCatalogApp {
         self.systems = self.repo.list_systems()?;
         self.all_links = self.repo.list_links()?;
         self.tech_catalog = self.repo.list_tech_catalog()?;
+        self.zones = self.repo.list_zones()?;
         let assignments = self.repo.list_system_tech_assignments()?;
         self.system_tech_ids_by_system.clear();
         for (system_id, tech_id) in assignments {
@@ -469,7 +515,33 @@ impl SystemsCatalogApp {
             self.load_selected_data(selected)?;
         }
 
+        if let Some(selected_zone_id) = self.selected_zone_id {
+            if self.zones.iter().any(|zone| zone.id == selected_zone_id) {
+                self.select_zone(selected_zone_id);
+            } else {
+                self.selected_zone_id = None;
+                self.selected_zone_name.clear();
+                self.selected_zone_render_priority = 1;
+                self.zone_drag_kind = None;
+                self.zone_drag_start_local = None;
+            }
+        }
+
         Ok(())
+    }
+
+    fn select_zone(&mut self, zone_id: i64) {
+        self.selected_zone_id = Some(zone_id);
+
+        if let Some(zone) = self.zones.iter().find(|zone| zone.id == zone_id) {
+            self.selected_zone_name = zone.name.clone();
+            self.selected_zone_color = zone
+                .color
+                .as_deref()
+                .and_then(Self::color_from_setting_value)
+                .unwrap_or(Color32::from_rgba_unmultiplied(96, 140, 255, 48));
+            self.selected_zone_render_priority = zone.render_priority;
+        }
     }
 
     fn load_selected_data(&mut self, system_id: i64) -> Result<()> {
@@ -962,7 +1034,8 @@ impl SystemsCatalogApp {
     }
 
     fn color_to_setting_value(color: Color32) -> String {
-        format!("{},{},{},{}", color.r(), color.g(), color.b(), color.a())
+        let [r, g, b, a] = color.to_srgba_unmultiplied();
+        format!("{r},{g},{b},{a}")
     }
 
     fn color_from_setting_value(value: &str) -> Option<Color32> {

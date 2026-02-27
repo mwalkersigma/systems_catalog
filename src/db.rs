@@ -3,7 +3,7 @@ use std::path::Path;
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
 
-use crate::models::{SystemLink, SystemNote, SystemRecord, TechItem};
+use crate::models::{SystemLink, SystemNote, SystemRecord, TechItem, ZoneRecord};
 
 /// Data access layer that owns the SQLite connection.
 ///
@@ -82,6 +82,17 @@ impl Repository {
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS zones (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                x REAL NOT NULL,
+                y REAL NOT NULL,
+                width REAL NOT NULL,
+                height REAL NOT NULL,
+                color TEXT NULL,
+                render_priority INTEGER NOT NULL DEFAULT 1
+            );
             "#,
         )?;
 
@@ -93,6 +104,7 @@ impl Repository {
         self.ensure_tech_catalog_columns()?;
         self.ensure_tech_catalog_visual_columns()?;
         self.ensure_notes_table_shape()?;
+        self.ensure_zones_columns()?;
 
         Ok(())
     }
@@ -228,6 +240,17 @@ impl Repository {
             DROP TABLE notes_legacy;
             "#,
         )?;
+
+        Ok(())
+    }
+
+    fn ensure_zones_columns(&self) -> Result<()> {
+        if !self.table_has_column("zones", "render_priority")? {
+            self.conn.execute(
+                "ALTER TABLE zones ADD COLUMN render_priority INTEGER NOT NULL DEFAULT 1",
+                [],
+            )?;
+        }
 
         Ok(())
     }
@@ -599,6 +622,7 @@ impl Repository {
             self.conn.execute("DELETE FROM systems", [])?;
             self.conn.execute("DELETE FROM tech_catalog", [])?;
             self.conn.execute("DELETE FROM app_settings", [])?;
+            self.conn.execute("DELETE FROM zones", [])?;
 
             self.conn.execute(
                 "INSERT INTO systems (id, name, description, parent_id, map_x, map_y, line_color_override) SELECT id, name, description, parent_id, map_x, map_y, line_color_override FROM imported.systems",
@@ -625,6 +649,31 @@ impl Repository {
                 [],
             )?;
 
+            let mut zone_table_stmt = self
+                .conn
+                .prepare("SELECT COUNT(*) FROM imported.sqlite_master WHERE type = 'table' AND name = 'zones'")?;
+            let imported_has_zones: i64 = zone_table_stmt.query_row([], |row| row.get(0))?;
+
+            if imported_has_zones > 0 {
+                let mut imported_zone_priority_column_stmt = self.conn.prepare(
+                    "SELECT COUNT(*) FROM imported.pragma_table_info('zones') WHERE name = 'render_priority'",
+                )?;
+                let imported_has_zone_priority: i64 =
+                    imported_zone_priority_column_stmt.query_row([], |row| row.get(0))?;
+
+                if imported_has_zone_priority > 0 {
+                    self.conn.execute(
+                        "INSERT INTO zones (id, name, x, y, width, height, color, render_priority) SELECT id, name, x, y, width, height, color, render_priority FROM imported.zones",
+                        [],
+                    )?;
+                } else {
+                    self.conn.execute(
+                        "INSERT INTO zones (id, name, x, y, width, height, color, render_priority) SELECT id, name, x, y, width, height, color, 1 FROM imported.zones",
+                        [],
+                    )?;
+                }
+            }
+
             self.conn.execute("DETACH DATABASE imported", [])?;
             Ok(())
         })();
@@ -639,6 +688,90 @@ impl Repository {
         self.conn.execute("DELETE FROM notes", [])?;
         self.conn.execute("DELETE FROM systems", [])?;
         self.conn.execute("DELETE FROM tech_catalog", [])?;
+        self.conn.execute("DELETE FROM zones", [])?;
+        Ok(())
+    }
+
+    pub fn list_zones(&self) -> Result<Vec<ZoneRecord>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT id, name, x, y, width, height, color, render_priority
+            FROM zones
+            ORDER BY render_priority ASC, id ASC
+            "#,
+        )?;
+
+        let zones = stmt
+            .query_map([], |row| {
+                Ok(ZoneRecord {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    x: row.get(2)?,
+                    y: row.get(3)?,
+                    width: row.get(4)?,
+                    height: row.get(5)?,
+                    color: row.get(6)?,
+                    render_priority: row.get(7)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        Ok(zones)
+    }
+
+    pub fn create_zone(
+        &self,
+        name: &str,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        color: Option<&str>,
+        render_priority: i64,
+    ) -> Result<i64> {
+        self.conn.execute(
+            r#"
+            INSERT INTO zones (name, x, y, width, height, color, render_priority)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "#,
+            params![name, x, y, width, height, color, render_priority],
+        )?;
+
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn update_zone(
+        &self,
+        zone_id: i64,
+        name: &str,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        color: Option<&str>,
+        render_priority: i64,
+    ) -> Result<()> {
+        self.conn.execute(
+            r#"
+            UPDATE zones
+            SET name = ?2,
+                x = ?3,
+                y = ?4,
+                width = ?5,
+                height = ?6,
+                color = ?7,
+                render_priority = ?8
+            WHERE id = ?1
+            "#,
+            params![zone_id, name, x, y, width, height, color, render_priority],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn delete_zone(&self, zone_id: i64) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM zones WHERE id = ?1", params![zone_id])?;
         Ok(())
     }
 
