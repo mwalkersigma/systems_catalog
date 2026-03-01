@@ -2260,42 +2260,79 @@ impl SystemsCatalogApp {
 
         let total_connections = incoming_connections + outgoing_connections;
 
-        ui.separator();
-        ui.label("System stats");
-        ui.label(format!("Total connections: {}", total_connections));
-        ui.label(format!("Incoming: {}", incoming_connections));
-        ui.label(format!("Outgoing: {}", outgoing_connections));
-        ui.label(format!("• Standard: {}", standard_connections));
-        ui.label(format!("• Pull: {}", pull_connections));
-        ui.label(format!("• Push: {}", push_connections));
-        ui.label(format!("• Bidirectional: {}", bidirectional_connections));
+        let subtree_ids = self.system_and_descendant_ids(system.id);
+        let subtree_system_count = subtree_ids.len();
+        let mut subtree_total_connections = 0usize;
+        let mut subtree_standard_connections = 0usize;
+        let mut subtree_pull_connections = 0usize;
+        let mut subtree_push_connections = 0usize;
+        let mut subtree_bidirectional_connections = 0usize;
 
-        let mut ancestor_names = Vec::new();
-        let mut seen = HashSet::new();
-        let mut current_parent = system.parent_id;
-
-        while let Some(parent_id) = current_parent {
-            if !seen.insert(parent_id) {
-                break;
+        for link in &self.all_links {
+            let touches_subtree =
+                subtree_ids.contains(&link.source_system_id) || subtree_ids.contains(&link.target_system_id);
+            if !touches_subtree {
+                continue;
             }
 
-            if let Some(parent) = self.systems.iter().find(|candidate| candidate.id == parent_id) {
-                ancestor_names.push(parent.name.clone());
-                current_parent = parent.parent_id;
-            } else {
-                break;
+            subtree_total_connections += 1;
+            match Self::interaction_kind_from_setting_value(link.kind.as_str()) {
+                InteractionKind::Standard => subtree_standard_connections += 1,
+                InteractionKind::Pull => subtree_pull_connections += 1,
+                InteractionKind::Push => subtree_push_connections += 1,
+                InteractionKind::Bidirectional => subtree_bidirectional_connections += 1,
             }
         }
 
-        ui.separator();
-        ui.label("Ancestors");
-        if ancestor_names.is_empty() {
-            ui.label("No ancestors (root system).");
-        } else {
-            for ancestor_name in ancestor_names {
-                ui.label(format!("• {ancestor_name}"));
-            }
-        }
+        let badge_bg = Color32::from_rgba_unmultiplied(65, 85, 120, 80);
+        ui.horizontal_wrapped(|ui| {
+            ui.label(
+                RichText::new(format!("Connections {}", total_connections))
+                    .small()
+                    .strong()
+                    .background_color(badge_bg),
+            );
+            ui.label(
+                RichText::new(format!("In {}", incoming_connections))
+                    .small()
+                    .strong()
+                    .background_color(badge_bg),
+            );
+            ui.label(
+                RichText::new(format!("Out {}", outgoing_connections))
+                    .small()
+                    .strong()
+                    .background_color(badge_bg),
+            );
+            ui.label(
+                RichText::new(format!("Subtree {} systems / {} links", subtree_system_count, subtree_total_connections))
+                    .small()
+                    .strong()
+                    .background_color(badge_bg),
+            );
+        });
+
+        egui::CollapsingHeader::new("Stats")
+            .default_open(false)
+            .show(ui, |ui| {
+                ui.label("Direct system connections");
+                ui.label(format!("Total: {}", total_connections));
+                ui.label(format!("Incoming: {}", incoming_connections));
+                ui.label(format!("Outgoing: {}", outgoing_connections));
+                ui.label(format!("• Standard: {}", standard_connections));
+                ui.label(format!("• Pull: {}", pull_connections));
+                ui.label(format!("• Push: {}", push_connections));
+                ui.label(format!("• Bidirectional: {}", bidirectional_connections));
+
+                ui.separator();
+                ui.label("Subtree connections (selected system + all descendants)");
+                ui.label(format!("Systems in subtree: {}", subtree_system_count));
+                ui.label(format!("Total links touching subtree: {}", subtree_total_connections));
+                ui.label(format!("• Standard: {}", subtree_standard_connections));
+                ui.label(format!("• Pull: {}", subtree_pull_connections));
+                ui.label(format!("• Push: {}", subtree_push_connections));
+                ui.label(format!("• Bidirectional: {}", subtree_bidirectional_connections));
+            });
 
         ui.separator();
         ui.label("Name");
@@ -2369,34 +2406,37 @@ impl SystemsCatalogApp {
         });
 
         ui.separator();
-        ui.label("Per-system line color override");
-        ui.horizontal(|ui| {
-            let mut use_override = self.selected_system_line_color_override.is_some();
-            if ui.checkbox(&mut use_override, "Enable override").changed() {
-                if use_override {
-                    self.selected_system_line_color_override =
-                        Some(self.interaction_line_style.color);
-                } else {
-                    self.selected_system_line_color_override = None;
-                }
-            }
+        egui::CollapsingHeader::new("Line color override")
+            .default_open(false)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let mut use_override = self.selected_system_line_color_override.is_some();
+                    if ui.checkbox(&mut use_override, "Enable override").changed() {
+                        if use_override {
+                            self.selected_system_line_color_override =
+                                Some(self.interaction_line_style.color);
+                        } else {
+                            self.selected_system_line_color_override = None;
+                        }
+                    }
 
-            if let Some(mut color) = self.selected_system_line_color_override {
-                if ui.color_edit_button_srgba(&mut color).changed() {
-                    self.selected_system_line_color_override = Some(color);
-                }
-            }
-        });
+                    if let Some(mut color) = self.selected_system_line_color_override {
+                        if ui.color_edit_button_srgba(&mut color).changed() {
+                            self.selected_system_line_color_override = Some(color);
+                        }
+                    }
+                });
 
-        ui.horizontal(|ui| {
-            if ui.button("Save line override").clicked() {
-                self.update_selected_system_line_color_override();
-            }
-            if ui.button("Clear override").clicked() {
-                self.selected_system_line_color_override = None;
-                self.update_selected_system_line_color_override();
-            }
-        });
+                ui.horizontal(|ui| {
+                    if ui.button("Save line override").clicked() {
+                        self.update_selected_system_line_color_override();
+                    }
+                    if ui.button("Clear override").clicked() {
+                        self.selected_system_line_color_override = None;
+                        self.update_selected_system_line_color_override();
+                    }
+                });
+            });
 
         ui.separator();
         ui.label("Interactions");
