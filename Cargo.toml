@@ -10,6 +10,7 @@ eframe = { version = "0.27.2", default-features = false, features = ["default_fo
 rusqlite = { version = "0.31", features = ["bundled"] }
 rfd = "0.14"
 arboard = "3.4"
+egui_material_icons = "0.5.0"
 
 [build-dependencies]
 winres = "0.1"

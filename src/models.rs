@@ -11,6 +11,8 @@ pub struct SystemRecord {
     pub line_color_override: Option<String>,
     pub naming_root: bool,
     pub naming_delimiter: String,
+    pub system_type: String,
+    pub route_methods: Option<String>,
 }
 
 /// Directed interaction from one system to another.

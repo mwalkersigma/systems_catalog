@@ -153,6 +153,10 @@ pub struct SystemsCatalogApp {
     edited_system_description: String,
     selected_system_naming_root: bool,
     selected_system_naming_delimiter: String,
+    new_system_type: String,
+    new_system_route_methods: HashSet<String>,
+    selected_system_type: String,
+    selected_system_route_methods: HashSet<String>,
 
     new_link_target_id: Option<i64>,
     new_link_label: String,
@@ -292,6 +296,10 @@ impl SystemsCatalogApp {
             edited_system_description: String::new(),
             selected_system_naming_root: false,
             selected_system_naming_delimiter: "/".to_owned(),
+            new_system_type: "service".to_owned(),
+            new_system_route_methods: HashSet::new(),
+            selected_system_type: "service".to_owned(),
+            selected_system_route_methods: HashSet::new(),
             new_link_target_id: None,
             new_link_label: String::new(),
             selected_link_id_for_edit: None,
@@ -678,6 +686,13 @@ impl SystemsCatalogApp {
             } else {
                 system.naming_delimiter.clone()
             };
+            self.selected_system_type = Self::normalize_system_type(system.system_type.as_str());
+            let mut selected_methods =
+                Self::route_methods_set_from_storage(system.route_methods.as_deref());
+            if self.selected_system_type == "api" {
+                selected_methods.extend(self.inferred_api_methods_from_children(system.id));
+            }
+            self.selected_system_route_methods = selected_methods;
         }
 
         if let Some(selected_note_id) = self.selected_note_id_for_edit {
@@ -1047,6 +1062,8 @@ impl SystemsCatalogApp {
         self.edited_system_description.clear();
         self.selected_system_naming_root = false;
         self.selected_system_naming_delimiter = "/".to_owned();
+        self.selected_system_type = "service".to_owned();
+        self.selected_system_route_methods.clear();
         self.selected_link_id_for_edit = None;
         self.edited_link_label.clear();
         self.edited_link_note.clear();
@@ -1131,6 +1148,87 @@ impl SystemsCatalogApp {
             InteractionKind::Push => "Push",
             InteractionKind::Bidirectional => "Bidirectional",
         }
+    }
+
+    fn normalize_system_type(value: &str) -> String {
+        match value.trim().to_lowercase().as_str() {
+            "route" | "api" => "api".to_owned(),
+            "database" => "database".to_owned(),
+            _ => "service".to_owned(),
+        }
+    }
+
+    fn supported_http_methods() -> &'static [&'static str] {
+        &["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"]
+    }
+
+    fn normalize_http_method(value: &str) -> &'static str {
+        match value.trim().to_uppercase().as_str() {
+            "GET" => "GET",
+            "POST" => "POST",
+            "PUT" => "PUT",
+            "PATCH" => "PATCH",
+            "DELETE" => "DELETE",
+            "OPTIONS" => "OPTIONS",
+            "HEAD" => "HEAD",
+            _ => "GET",
+        }
+    }
+
+    fn route_methods_set_from_storage(value: Option<&str>) -> HashSet<String> {
+        let mut methods = value
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .filter(|method| !method.is_empty())
+            .map(Self::normalize_http_method)
+            .map(str::to_owned)
+            .collect::<HashSet<_>>();
+
+        methods.retain(|method| Self::supported_http_methods().contains(&method.as_str()));
+        methods
+    }
+
+    fn route_methods_storage_from_set(methods: &HashSet<String>) -> Option<String> {
+        let mut ordered = Self::supported_http_methods()
+            .iter()
+            .filter(|method| methods.contains(**method))
+            .map(|method| method.to_string())
+            .collect::<Vec<_>>();
+
+        if ordered.is_empty() {
+            return None;
+        }
+
+        ordered.sort_by_key(|method| {
+            Self::supported_http_methods()
+                .iter()
+                .position(|candidate| candidate == &method.as_str())
+                .unwrap_or(usize::MAX)
+        });
+
+        Some(ordered.join(","))
+    }
+
+    fn inferred_api_methods_from_children(&self, parent_system_id: i64) -> HashSet<String> {
+        let supported_methods = Self::supported_http_methods();
+        self.systems
+            .iter()
+            .filter(|system| system.parent_id == Some(parent_system_id))
+            .filter_map(|system| {
+                let trimmed_name = system.name.trim();
+                if trimmed_name.is_empty() || trimmed_name != trimmed_name.to_uppercase() {
+                    return None;
+                }
+
+                let normalized = trimmed_name.to_uppercase();
+                if supported_methods.contains(&normalized.as_str()) {
+                    Some(normalized)
+                } else {
+                    None
+                }
+            })
+            .collect::<HashSet<_>>()
     }
 
     fn terminator_from_setting_value(value: &str) -> Option<LineTerminator> {
@@ -1722,6 +1820,22 @@ impl SystemsCatalogApp {
         }
 
         edges
+    }
+
+    fn flow_directional_counts_for_system(&self, system_id: i64) -> (usize, usize) {
+        let mut incoming = 0usize;
+        let mut outgoing = 0usize;
+
+        for (from, to, _) in self.flow_inspector_edges() {
+            if from == system_id {
+                outgoing += 1;
+            }
+            if to == system_id {
+                incoming += 1;
+            }
+        }
+
+        (incoming, outgoing)
     }
 
     fn focused_flow_shortest_path(

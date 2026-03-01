@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use arboard::Clipboard;
+use egui_material_icons::icons::{ICON_ADD, ICON_DATABASE, ICON_REMOVE, ICON_ROUTE};
 use eframe::egui::{
     self, Align, Color32, FontId, Layout, Pos2, Rect, RichText, Sense, Shape, Stroke, Vec2,
 };
@@ -186,9 +187,9 @@ impl SystemsCatalogApp {
 
     fn disclosure_icon(is_collapsed: bool) -> &'static str {
         if is_collapsed {
-            "+"
+            ICON_ADD
         } else {
-            "-"
+            ICON_REMOVE
         }
     }
 
@@ -1095,6 +1096,38 @@ impl SystemsCatalogApp {
 
                 ui.label("Description");
                 ui.add(egui::TextEdit::multiline(&mut self.new_system_description).desired_rows(4));
+
+                ui.horizontal(|ui| {
+                    ui.label("System type");
+                    let selected_type_label = match self.new_system_type.as_str() {
+                        "api" => "API",
+                        "database" => "Database",
+                        _ => "Service",
+                    };
+                    egui::ComboBox::from_label("Type")
+                        .selected_text(selected_type_label)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.new_system_type, "service".to_owned(), "Service");
+                            ui.selectable_value(&mut self.new_system_type, "api".to_owned(), "API");
+                            ui.selectable_value(&mut self.new_system_type, "database".to_owned(), "Database");
+                        });
+                });
+
+                if self.new_system_type == "api" {
+                    ui.label("Route methods handled");
+                    ui.horizontal_wrapped(|ui| {
+                        for method in Self::supported_http_methods() {
+                            let mut enabled = self.new_system_route_methods.contains(*method);
+                            if ui.checkbox(&mut enabled, *method).changed() {
+                                if enabled {
+                                    self.new_system_route_methods.insert((*method).to_owned());
+                                } else {
+                                    self.new_system_route_methods.remove(*method);
+                                }
+                            }
+                        }
+                    });
+                }
 
                 let selected_parent_label = self
                     .new_system_parent_id
@@ -2278,18 +2311,37 @@ impl SystemsCatalogApp {
                 continue;
             }
 
-            if link.source_system_id == system.id {
-                outgoing_connections += 1;
-            }
-            if link.target_system_id == system.id {
-                incoming_connections += 1;
-            }
-
-            match Self::interaction_kind_from_setting_value(link.kind.as_str()) {
+            let kind = Self::interaction_kind_from_setting_value(link.kind.as_str());
+            match kind {
                 InteractionKind::Standard => standard_connections += 1,
                 InteractionKind::Pull => pull_connections += 1,
                 InteractionKind::Push => push_connections += 1,
                 InteractionKind::Bidirectional => bidirectional_connections += 1,
+            }
+
+            match kind {
+                InteractionKind::Standard | InteractionKind::Push => {
+                    if link.source_system_id == system.id {
+                        outgoing_connections += 1;
+                    }
+                    if link.target_system_id == system.id {
+                        incoming_connections += 1;
+                    }
+                }
+                InteractionKind::Pull => {
+                    if link.target_system_id == system.id {
+                        outgoing_connections += 1;
+                    }
+                    if link.source_system_id == system.id {
+                        incoming_connections += 1;
+                    }
+                }
+                InteractionKind::Bidirectional => {
+                    if touches_system {
+                        incoming_connections += 1;
+                        outgoing_connections += 1;
+                    }
+                }
             }
         }
 
@@ -2389,6 +2441,37 @@ impl SystemsCatalogApp {
             ui.text_edit_singleline(&mut self.selected_system_naming_delimiter);
         });
         ui.label(format!("Current path: {}", self.naming_path_for_system(system.id)));
+
+        ui.separator();
+        ui.label("System classification");
+        let selected_type_label = match self.selected_system_type.as_str() {
+            "api" => "API",
+            "database" => "Database",
+            _ => "Service",
+        };
+        egui::ComboBox::from_label("Type")
+            .selected_text(selected_type_label)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut self.selected_system_type, "service".to_owned(), "Service");
+                ui.selectable_value(&mut self.selected_system_type, "api".to_owned(), "API");
+                ui.selectable_value(&mut self.selected_system_type, "database".to_owned(), "Database");
+            });
+
+        if self.selected_system_type == "api" {
+            ui.label("Route methods handled");
+            ui.horizontal_wrapped(|ui| {
+                for method in Self::supported_http_methods() {
+                    let mut enabled = self.selected_system_route_methods.contains(*method);
+                    if ui.checkbox(&mut enabled, *method).changed() {
+                        if enabled {
+                            self.selected_system_route_methods.insert((*method).to_owned());
+                        } else {
+                            self.selected_system_route_methods.remove(*method);
+                        }
+                    }
+                }
+            });
+        }
 
         ui.horizontal(|ui| {
             if ui.button("Save details").clicked() {
@@ -2831,6 +2914,14 @@ impl SystemsCatalogApp {
                 if let (Some(from_id), Some(to_id)) =
                     (self.flow_inspector_from_system_id, self.flow_inspector_to_system_id)
                 {
+                    let (start_incoming, start_outgoing) =
+                        self.flow_directional_counts_for_system(from_id);
+                    let (stop_incoming, stop_outgoing) =
+                        self.flow_directional_counts_for_system(to_id);
+                    ui.label(format!(
+                        "Start In/Out: {start_incoming}/{start_outgoing}    Stop In/Out: {stop_incoming}/{stop_outgoing}"
+                    ));
+
                     if from_id == to_id {
                         ui.label("Select two different systems.");
                     } else if let Some(path) = self.focused_flow_shortest_path(from_id, to_id) {
@@ -3170,7 +3261,7 @@ impl SystemsCatalogApp {
                     painter.text(
                         disclosure_center,
                         egui::Align2::CENTER_CENTER,
-                        "-",
+                        Self::disclosure_icon(false),
                         FontId::proportional((13.0 * self.map_zoom).clamp(10.0, 18.0)),
                         Color32::from_gray(20),
                     );
@@ -4025,7 +4116,18 @@ impl SystemsCatalogApp {
             let text_wrap_width =
                 (node_rect.width() - (MAP_CARD_HORIZONTAL_PADDING * self.map_zoom)).max(24.0);
             let wrapped_text = painter.layout(
-                system.name.to_owned(),
+                {
+                    let prefix = match system.system_type.as_str() {
+                        "route" | "api" => ICON_ROUTE,
+                        "database" => ICON_DATABASE,
+                        _ => "",
+                    };
+                    if prefix.is_empty() {
+                        system.name.clone()
+                    } else {
+                        format!("{prefix} {}", system.name)
+                    }
+                },
                 font_id,
                 text_color,
                 text_wrap_width,

@@ -1,8 +1,76 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::app::{CopiedSystemEntry, InteractionKind, SystemsCatalogApp};
+use crate::app::{CopiedSystemEntry, InteractionKind, SystemsCatalogApp, MAP_GRID_SPACING, MAP_NODE_SIZE};
 
 impl SystemsCatalogApp {
+    fn spawn_route_method_systems(
+        &mut self,
+        route_system_id: i64,
+        methods: &HashSet<String>,
+    ) -> anyhow::Result<()> {
+        if methods.is_empty() {
+            return Ok(());
+        }
+
+        let Some(route_position) = self.effective_map_position(route_system_id) else {
+            return Ok(());
+        };
+
+        let mut existing_rects = self
+            .systems
+            .iter()
+            .filter_map(|system| {
+                self.effective_map_position(system.id)
+                    .map(|position| eframe::egui::Rect::from_min_size(position, MAP_NODE_SIZE))
+            })
+            .collect::<Vec<_>>();
+
+        let ordered_methods = Self::supported_http_methods()
+            .iter()
+            .filter(|method| methods.contains(**method))
+            .map(|method| (*method).to_owned())
+            .collect::<Vec<_>>();
+
+        let mut created_any = false;
+        for method in ordered_methods {
+            let already_exists = self
+                .systems
+                .iter()
+                .any(|system| system.parent_id == Some(route_system_id) && system.name.eq_ignore_ascii_case(method.as_str()));
+            if already_exists {
+                continue;
+            }
+
+            let child_id =
+                self.repo
+                    .create_system(method.as_str(), "", Some(route_system_id), "service", None)?;
+
+            let base_x = route_position.x + (MAP_GRID_SPACING * 2.0);
+            let mut candidate = eframe::egui::Pos2::new(base_x, route_position.y + MAP_GRID_SPACING);
+
+            loop {
+                let candidate_rect = eframe::egui::Rect::from_min_size(candidate, MAP_NODE_SIZE);
+                let blocked = existing_rects.iter().any(|rect| rect.intersects(candidate_rect));
+                if !blocked {
+                    break;
+                }
+                candidate.y += MAP_GRID_SPACING;
+            }
+
+            let clamped = self.clamp_node_position(eframe::egui::Rect::NOTHING, candidate, MAP_NODE_SIZE);
+            self.map_positions.insert(child_id, clamped);
+            self.persist_map_position(child_id, clamped);
+            existing_rects.push(eframe::egui::Rect::from_min_size(clamped, MAP_NODE_SIZE));
+            created_any = true;
+        }
+
+        if created_any {
+            self.refresh_systems()?;
+        }
+
+        Ok(())
+    }
+
     pub(super) fn create_zone_from_rect(
         &mut self,
         x: f32,
@@ -423,7 +491,10 @@ impl SystemsCatalogApp {
             return Err(anyhow::anyhow!("System name is required"));
         }
 
-        if let Ok(id) = self.repo.create_system(base, description, parent_id) {
+        if let Ok(id) = self
+            .repo
+            .create_system(base, description, parent_id, "service", None)
+        {
             return Ok(id);
         }
 
@@ -434,7 +505,10 @@ impl SystemsCatalogApp {
                 format!("{base} Copy {attempt}")
             };
 
-            if let Ok(id) = self.repo.create_system(candidate.as_str(), description, parent_id) {
+            if let Ok(id) = self
+                .repo
+                .create_system(candidate.as_str(), description, parent_id, "service", None)
+            {
                 return Ok(id);
             }
         }
@@ -674,6 +748,20 @@ impl SystemsCatalogApp {
             naming_delimiter
         };
 
+        let system_type = Self::normalize_system_type(self.selected_system_type.as_str());
+        let route_methods_set_for_spawn = if system_type == "api" {
+            let mut methods = self.selected_system_route_methods.clone();
+            methods.extend(self.inferred_api_methods_from_children(system_id));
+            methods
+        } else {
+            HashSet::new()
+        };
+        let route_methods = if system_type == "api" {
+            Self::route_methods_storage_from_set(&route_methods_set_for_spawn)
+        } else {
+            None
+        };
+
         let result = self
             .repo
             .update_system_details(
@@ -682,8 +770,12 @@ impl SystemsCatalogApp {
                 self.edited_system_description.trim(),
                 self.selected_system_naming_root,
                 naming_delimiter,
+                system_type.as_str(),
+                route_methods.as_deref(),
             )
             .and_then(|_| self.refresh_systems())
+            .and_then(|_| self.load_selected_data(system_id))
+            .and_then(|_| self.spawn_route_method_systems(system_id, &route_methods_set_for_spawn))
             .and_then(|_| self.load_selected_data(system_id));
 
         match result {
@@ -1111,6 +1203,17 @@ impl SystemsCatalogApp {
 
         let parent_id = self.new_system_parent_id;
         let description = self.new_system_description.trim();
+        let system_type = Self::normalize_system_type(self.new_system_type.as_str());
+        let route_methods = if system_type == "api" {
+            Self::route_methods_storage_from_set(&self.new_system_route_methods)
+        } else {
+            None
+        };
+        let route_methods_set_for_spawn = if system_type == "api" {
+            self.new_system_route_methods.clone()
+        } else {
+            HashSet::new()
+        };
         let assigned_tech_ids = self
             .new_system_assigned_tech_ids
             .iter()
@@ -1119,7 +1222,13 @@ impl SystemsCatalogApp {
 
         let result = self
             .repo
-            .create_system(name, description, parent_id)
+            .create_system(
+                name,
+                description,
+                parent_id,
+                system_type.as_str(),
+                route_methods.as_deref(),
+            )
             .and_then(|new_id| {
                 for tech_id in &assigned_tech_ids {
                     self.repo.add_tech_to_system(new_id, *tech_id)?;
@@ -1138,6 +1247,8 @@ impl SystemsCatalogApp {
                     self.persist_map_position(new_id, spawn_position);
                 }
 
+                self.spawn_route_method_systems(new_id, &route_methods_set_for_spawn)?;
+
                 Ok(())
             });
 
@@ -1146,6 +1257,8 @@ impl SystemsCatalogApp {
                 self.new_system_name.clear();
                 self.new_system_description.clear();
                 self.new_system_parent_id = None;
+                self.new_system_type = "service".to_owned();
+                self.new_system_route_methods.clear();
                 self.new_system_tech_id_for_assignment = None;
                 self.new_system_assigned_tech_ids.clear();
                 self.show_add_system_modal = false;
@@ -1180,7 +1293,9 @@ impl SystemsCatalogApp {
         let result = (|| -> anyhow::Result<()> {
             let mut created_ids = Vec::new();
             for name in &names {
-                let new_id = self.repo.create_system(name, "", parent_id)?;
+                let new_id = self
+                    .repo
+                    .create_system(name, "", parent_id, "service", None)?;
 
                 for tech_id in &parent_tech_ids {
                     let _ = self.repo.add_tech_to_system(new_id, *tech_id);

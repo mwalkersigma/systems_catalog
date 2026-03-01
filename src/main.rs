@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use app::SystemsCatalogApp;
 use db::Repository;
-use eframe::egui::{Vec2, ViewportBuilder};
+use eframe::egui::{FontData, FontDefinitions, FontFamily, Vec2, ViewportBuilder};
 
 fn main() -> eframe::Result<()> {
     let database_path = PathBuf::from("systems_catalog.db");
@@ -28,6 +28,23 @@ fn main() -> eframe::Result<()> {
         "Systems Catalog",
         native_options,
         Box::new(move |creation_context| {
+            let mut fonts = FontDefinitions::default();
+            fonts.font_data.insert(
+                "material_icons".to_owned(),
+                FontData::from_static(egui_material_icons::FONT_DATA),
+            );
+            fonts
+                .families
+                .entry(FontFamily::Proportional)
+                .or_default()
+                .push("material_icons".to_owned());
+            fonts
+                .families
+                .entry(FontFamily::Monospace)
+                .or_default()
+                .push("material_icons".to_owned());
+            creation_context.egui_ctx.set_fonts(fonts);
+
             creation_context
                 .egui_ctx
                 .set_visuals(eframe::egui::Visuals::dark());

@@ -38,6 +38,8 @@ impl Repository {
                 line_color_override TEXT NULL,
                 naming_root INTEGER NOT NULL DEFAULT 0,
                 naming_delimiter TEXT NOT NULL DEFAULT '/',
+                system_type TEXT NOT NULL DEFAULT 'service',
+                route_methods TEXT NULL,
                 FOREIGN KEY(parent_id) REFERENCES systems(id) ON DELETE SET NULL
             );
 
@@ -114,6 +116,7 @@ impl Repository {
         self.ensure_systems_position_columns()?;
         self.ensure_system_line_color_override_column()?;
         self.ensure_system_naming_columns()?;
+        self.ensure_system_type_columns()?;
         self.ensure_links_note_column()?;
         self.ensure_links_kind_column()?;
         self.ensure_tech_catalog_columns()?;
@@ -173,6 +176,22 @@ impl Repository {
             "UPDATE systems SET display_name = name WHERE display_name IS NULL OR TRIM(display_name) = ''",
             [],
         )?;
+
+        Ok(())
+    }
+
+    fn ensure_system_type_columns(&self) -> Result<()> {
+        if !self.table_has_column("systems", "system_type")? {
+            self.conn.execute(
+                "ALTER TABLE systems ADD COLUMN system_type TEXT NOT NULL DEFAULT 'service'",
+                [],
+            )?;
+        }
+
+        if !self.table_has_column("systems", "route_methods")? {
+            self.conn
+                .execute("ALTER TABLE systems ADD COLUMN route_methods TEXT NULL", [])?;
+        }
 
         Ok(())
     }
@@ -311,7 +330,9 @@ impl Repository {
                 map_y,
                 line_color_override,
                 naming_root,
-                naming_delimiter
+                naming_delimiter,
+                system_type,
+                route_methods
             FROM systems
             ORDER BY LOWER(COALESCE(NULLIF(display_name, ''), name));
             "#,
@@ -329,6 +350,8 @@ impl Repository {
                     line_color_override: row.get(6)?,
                     naming_root: row.get::<_, i64>(7)? != 0,
                     naming_delimiter: row.get(8)?,
+                    system_type: row.get(9)?,
+                    route_methods: row.get(10)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -341,6 +364,8 @@ impl Repository {
         name: &str,
         description: &str,
         parent_id: Option<i64>,
+        system_type: &str,
+        route_methods: Option<&str>,
     ) -> Result<i64> {
         let mut unique_internal_name = name.trim().to_owned();
         if unique_internal_name.is_empty() {
@@ -370,11 +395,20 @@ impl Repository {
                 description,
                 parent_id,
                 naming_root,
-                naming_delimiter
+                naming_delimiter,
+                system_type,
+                route_methods
             )
-            VALUES (?1, ?2, ?3, ?4, 0, '/')
+            VALUES (?1, ?2, ?3, ?4, 0, '/', ?5, ?6)
             "#,
-            params![unique_internal_name, name, description, parent_id],
+            params![
+                unique_internal_name,
+                name,
+                description,
+                parent_id,
+                system_type,
+                route_methods
+            ],
         )?;
 
         Ok(self.conn.last_insert_rowid())
@@ -400,6 +434,8 @@ impl Repository {
         description: &str,
         naming_root: bool,
         naming_delimiter: &str,
+        system_type: &str,
+        route_methods: Option<&str>,
     ) -> Result<()> {
         self.conn.execute(
             r#"
@@ -407,7 +443,9 @@ impl Repository {
             SET display_name = ?2,
                 description = ?3,
                 naming_root = ?4,
-                naming_delimiter = ?5
+                naming_delimiter = ?5,
+                system_type = ?6,
+                route_methods = ?7
             WHERE id = ?1
             "#,
             params![
@@ -415,7 +453,9 @@ impl Repository {
                 display_name,
                 description,
                 if naming_root { 1 } else { 0 },
-                naming_delimiter
+                naming_delimiter,
+                system_type,
+                route_methods
             ],
         )?;
 
@@ -659,14 +699,106 @@ impl Repository {
             self.conn.execute("DELETE FROM zones", [])?;
             self.conn.execute("DELETE FROM zone_system_offsets", [])?;
 
-            self.conn.execute(
-                "INSERT INTO systems (id, name, description, parent_id, map_x, map_y, line_color_override) SELECT id, name, description, parent_id, map_x, map_y, line_color_override FROM imported.systems",
+            let imported_has_systems_display_name: i64 = self.conn.query_row(
+                "SELECT COUNT(*) FROM imported.pragma_table_info('systems') WHERE name = 'display_name'",
                 [],
+                |row| row.get(0),
             )?;
-            self.conn.execute(
-                "INSERT INTO links (id, source_system_id, target_system_id, label) SELECT id, source_system_id, target_system_id, label FROM imported.links",
+            let imported_has_systems_map_x: i64 = self.conn.query_row(
+                "SELECT COUNT(*) FROM imported.pragma_table_info('systems') WHERE name = 'map_x'",
                 [],
+                |row| row.get(0),
             )?;
+            let imported_has_systems_map_y: i64 = self.conn.query_row(
+                "SELECT COUNT(*) FROM imported.pragma_table_info('systems') WHERE name = 'map_y'",
+                [],
+                |row| row.get(0),
+            )?;
+            let imported_has_systems_line_color_override: i64 = self.conn.query_row(
+                "SELECT COUNT(*) FROM imported.pragma_table_info('systems') WHERE name = 'line_color_override'",
+                [],
+                |row| row.get(0),
+            )?;
+            let imported_has_systems_naming_root: i64 = self.conn.query_row(
+                "SELECT COUNT(*) FROM imported.pragma_table_info('systems') WHERE name = 'naming_root'",
+                [],
+                |row| row.get(0),
+            )?;
+            let imported_has_systems_naming_delimiter: i64 = self.conn.query_row(
+                "SELECT COUNT(*) FROM imported.pragma_table_info('systems') WHERE name = 'naming_delimiter'",
+                [],
+                |row| row.get(0),
+            )?;
+            let imported_has_systems_system_type: i64 = self.conn.query_row(
+                "SELECT COUNT(*) FROM imported.pragma_table_info('systems') WHERE name = 'system_type'",
+                [],
+                |row| row.get(0),
+            )?;
+            let imported_has_systems_route_methods: i64 = self.conn.query_row(
+                "SELECT COUNT(*) FROM imported.pragma_table_info('systems') WHERE name = 'route_methods'",
+                [],
+                |row| row.get(0),
+            )?;
+
+            let display_name_select = if imported_has_systems_display_name > 0 {
+                "display_name"
+            } else {
+                "name"
+            };
+            let map_x_select = if imported_has_systems_map_x > 0 { "map_x" } else { "NULL" };
+            let map_y_select = if imported_has_systems_map_y > 0 { "map_y" } else { "NULL" };
+            let line_color_override_select = if imported_has_systems_line_color_override > 0 {
+                "line_color_override"
+            } else {
+                "NULL"
+            };
+            let naming_root_select = if imported_has_systems_naming_root > 0 {
+                "naming_root"
+            } else {
+                "0"
+            };
+            let naming_delimiter_select = if imported_has_systems_naming_delimiter > 0 {
+                "naming_delimiter"
+            } else {
+                "'/'"
+            };
+            let system_type_select = if imported_has_systems_system_type > 0 {
+                "system_type"
+            } else {
+                "'service'"
+            };
+            let route_methods_select = if imported_has_systems_route_methods > 0 {
+                "route_methods"
+            } else {
+                "NULL"
+            };
+
+            let systems_insert_sql = format!(
+                "INSERT INTO systems (id, name, display_name, description, parent_id, map_x, map_y, line_color_override, naming_root, naming_delimiter, system_type, route_methods) SELECT id, name, {display_name_select}, description, parent_id, {map_x_select}, {map_y_select}, {line_color_override_select}, {naming_root_select}, {naming_delimiter_select}, {system_type_select}, {route_methods_select} FROM imported.systems"
+            );
+            self.conn.execute(systems_insert_sql.as_str(), [])?;
+
+            let imported_has_links_note: i64 = self.conn.query_row(
+                "SELECT COUNT(*) FROM imported.pragma_table_info('links') WHERE name = 'note'",
+                [],
+                |row| row.get(0),
+            )?;
+            let imported_has_links_kind: i64 = self.conn.query_row(
+                "SELECT COUNT(*) FROM imported.pragma_table_info('links') WHERE name = 'kind'",
+                [],
+                |row| row.get(0),
+            )?;
+            let note_select = if imported_has_links_note > 0 { "note" } else { "''" };
+            let kind_select = if imported_has_links_kind > 0 {
+                "kind"
+            } else {
+                "'standard'"
+            };
+
+            let links_insert_sql = format!(
+                "INSERT INTO links (id, source_system_id, target_system_id, label, note, kind) SELECT id, source_system_id, target_system_id, label, {note_select}, {kind_select} FROM imported.links"
+            );
+            self.conn.execute(links_insert_sql.as_str(), [])?;
             self.conn.execute(
                 "INSERT INTO notes (id, system_id, body, updated_at) SELECT id, system_id, body, updated_at FROM imported.notes",
                 [],
