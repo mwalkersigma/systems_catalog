@@ -83,9 +83,17 @@ pub enum AppModal {
     BulkAddSystems,
     AddTech,
     Hotkeys,
+    InteractionStyle,
+    FlowInspector,
     SaveCatalog,
     LoadCatalog,
     NewCatalogConfirm,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlowInspectorPickTarget {
+    Start,
+    Stop,
 }
 
 #[derive(Debug, Clone)]
@@ -211,6 +219,9 @@ pub struct SystemsCatalogApp {
     interaction_popup_close_at_secs: Option<f64>,
     flow_inspector_from_system_id: Option<i64>,
     flow_inspector_to_system_id: Option<i64>,
+    interaction_style_modal_kind: InteractionKind,
+    flow_inspector_pick_target: Option<FlowInspectorPickTarget>,
+    flow_inspector_last_seen_selected_system_id: Option<i64>,
     collapsed_system_ids: HashSet<i64>,
     auto_collapsed_zone_representative_ids: HashSet<i64>,
     zone_representative_to_zone_ids: HashMap<i64, Vec<i64>>,
@@ -222,6 +233,8 @@ pub struct SystemsCatalogApp {
     focus_add_tech_name_on_open: bool,
     show_add_tech_modal: bool,
     show_hotkeys_modal: bool,
+    show_interaction_style_modal: bool,
+    show_flow_inspector_modal: bool,
     show_save_catalog_modal: bool,
     show_load_catalog_modal: bool,
     show_new_catalog_confirm_modal: bool,
@@ -342,6 +355,9 @@ impl SystemsCatalogApp {
             interaction_popup_close_at_secs: None,
             flow_inspector_from_system_id: None,
             flow_inspector_to_system_id: None,
+            interaction_style_modal_kind: InteractionKind::Standard,
+            flow_inspector_pick_target: None,
+            flow_inspector_last_seen_selected_system_id: None,
             collapsed_system_ids: HashSet::new(),
             auto_collapsed_zone_representative_ids: HashSet::new(),
             zone_representative_to_zone_ids: HashMap::new(),
@@ -352,6 +368,8 @@ impl SystemsCatalogApp {
             focus_add_tech_name_on_open: false,
             show_add_tech_modal: false,
             show_hotkeys_modal: false,
+            show_interaction_style_modal: false,
+            show_flow_inspector_modal: false,
             show_save_catalog_modal: false,
             show_load_catalog_modal: false,
             show_new_catalog_confirm_modal: false,
@@ -420,6 +438,8 @@ impl SystemsCatalogApp {
             AppModal::BulkAddSystems => self.show_bulk_add_systems_modal,
             AppModal::AddTech => self.show_add_tech_modal,
             AppModal::Hotkeys => self.show_hotkeys_modal,
+            AppModal::InteractionStyle => self.show_interaction_style_modal,
+            AppModal::FlowInspector => self.show_flow_inspector_modal,
             AppModal::SaveCatalog => self.show_save_catalog_modal,
             AppModal::LoadCatalog => self.show_load_catalog_modal,
             AppModal::NewCatalogConfirm => self.show_new_catalog_confirm_modal,
@@ -432,6 +452,8 @@ impl SystemsCatalogApp {
             AppModal::BulkAddSystems => self.show_bulk_add_systems_modal = is_open,
             AppModal::AddTech => self.show_add_tech_modal = is_open,
             AppModal::Hotkeys => self.show_hotkeys_modal = is_open,
+            AppModal::InteractionStyle => self.show_interaction_style_modal = is_open,
+            AppModal::FlowInspector => self.show_flow_inspector_modal = is_open,
             AppModal::SaveCatalog => self.show_save_catalog_modal = is_open,
             AppModal::LoadCatalog => self.show_load_catalog_modal = is_open,
             AppModal::NewCatalogConfirm => self.show_new_catalog_confirm_modal = is_open,

@@ -9,9 +9,10 @@ use rfd::FileDialog;
 
 use crate::models::SystemRecord;
 use crate::app::{
-    AppModal, ChildSpawnMode, InteractionKind, LineLayerDepth, LineLayerOrder, LinePattern,
-    LineStyle, LineTerminator, SidebarTab, SystemsCatalogApp, ZoneDragKind, MAP_MAX_ZOOM,
-    MAP_MIN_ZOOM, MAP_NODE_SIZE, MAP_WORLD_MAX_SIZE, MAP_WORLD_MIN_SIZE,
+    AppModal, ChildSpawnMode, FlowInspectorPickTarget, InteractionKind, LineLayerDepth,
+    LineLayerOrder, LinePattern, LineStyle, LineTerminator, SidebarTab, SystemsCatalogApp,
+    ZoneDragKind, MAP_MAX_ZOOM, MAP_MIN_ZOOM, MAP_NODE_SIZE, MAP_WORLD_MAX_SIZE,
+    MAP_WORLD_MIN_SIZE,
 };
 
 const MAP_GRID_SPACING: f32 = 48.0;
@@ -846,6 +847,8 @@ impl SystemsCatalogApp {
                 }
             };
             let dimmed_for_focused_flow = focused_flow_highlight_active && !in_focused_flow_path;
+            let should_dim_interaction =
+                (dimmed || dimmed_for_tech || dimmed_for_focused_flow) && !in_focused_flow_path;
 
             let interaction_style =
                 self.interaction_line_style_for_kind(source_system_id, target_system_id, interaction.kind);
@@ -874,7 +877,7 @@ impl SystemsCatalogApp {
                     from,
                     to,
                     interaction_style,
-                    dimmed || dimmed_for_tech || dimmed_for_focused_flow,
+                    should_dim_interaction,
                     (selected_id.is_some() && boosted) || in_focused_flow_path,
                 );
             } else {
@@ -883,7 +886,7 @@ impl SystemsCatalogApp {
                     from,
                     to,
                     interaction_style,
-                    dimmed || dimmed_for_tech || dimmed_for_focused_flow,
+                    should_dim_interaction,
                     (selected_id.is_some() && boosted) || in_focused_flow_path,
                 );
             }
@@ -1384,6 +1387,141 @@ impl SystemsCatalogApp {
             });
 
         self.show_hotkeys_modal = open;
+    }
+
+    fn render_interaction_style_modal(&mut self, ctx: &egui::Context) {
+        if !self.show_interaction_style_modal {
+            return;
+        }
+
+        let kind = self.interaction_style_modal_kind;
+        let title = format!(
+            "{} Interaction Style",
+            Self::interaction_kind_label(kind)
+        );
+
+        let mut open = self.show_interaction_style_modal;
+        egui::Window::new(title)
+            .collapsible(false)
+            .resizable(false)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                let mut changed = false;
+
+                ui.horizontal(|ui| {
+                    ui.label("Color");
+                    changed |= match kind {
+                        InteractionKind::Standard => ui
+                            .color_edit_button_srgba(&mut self.interaction_standard_line_style.color)
+                            .changed(),
+                        InteractionKind::Pull => ui
+                            .color_edit_button_srgba(&mut self.interaction_pull_line_style.color)
+                            .changed(),
+                        InteractionKind::Push => ui
+                            .color_edit_button_srgba(&mut self.interaction_push_line_style.color)
+                            .changed(),
+                        InteractionKind::Bidirectional => ui
+                            .color_edit_button_srgba(
+                                &mut self.interaction_bidirectional_line_style.color,
+                            )
+                            .changed(),
+                    };
+                });
+
+                let terminator_changed = match kind {
+                    InteractionKind::Standard => {
+                        let old = self.interaction_standard_line_style.terminator;
+                        Self::render_terminator_combo(
+                            ui,
+                            "modal_int_standard_term",
+                            "Arrow",
+                            &mut self.interaction_standard_line_style.terminator,
+                        );
+                        old != self.interaction_standard_line_style.terminator
+                    }
+                    InteractionKind::Pull => {
+                        let old = self.interaction_pull_line_style.terminator;
+                        Self::render_terminator_combo(
+                            ui,
+                            "modal_int_pull_term",
+                            "Arrow",
+                            &mut self.interaction_pull_line_style.terminator,
+                        );
+                        old != self.interaction_pull_line_style.terminator
+                    }
+                    InteractionKind::Push => {
+                        let old = self.interaction_push_line_style.terminator;
+                        Self::render_terminator_combo(
+                            ui,
+                            "modal_int_push_term",
+                            "Arrow",
+                            &mut self.interaction_push_line_style.terminator,
+                        );
+                        old != self.interaction_push_line_style.terminator
+                    }
+                    InteractionKind::Bidirectional => {
+                        let old = self.interaction_bidirectional_line_style.terminator;
+                        Self::render_terminator_combo(
+                            ui,
+                            "modal_int_bidirectional_term",
+                            "Arrow",
+                            &mut self.interaction_bidirectional_line_style.terminator,
+                        );
+                        old != self.interaction_bidirectional_line_style.terminator
+                    }
+                };
+                changed |= terminator_changed;
+
+                let pattern_changed = match kind {
+                    InteractionKind::Standard => {
+                        let old = self.interaction_standard_line_style.pattern;
+                        Self::render_pattern_combo(
+                            ui,
+                            "modal_int_standard_pattern",
+                            "Pattern",
+                            &mut self.interaction_standard_line_style.pattern,
+                        );
+                        old != self.interaction_standard_line_style.pattern
+                    }
+                    InteractionKind::Pull => {
+                        let old = self.interaction_pull_line_style.pattern;
+                        Self::render_pattern_combo(
+                            ui,
+                            "modal_int_pull_pattern",
+                            "Pattern",
+                            &mut self.interaction_pull_line_style.pattern,
+                        );
+                        old != self.interaction_pull_line_style.pattern
+                    }
+                    InteractionKind::Push => {
+                        let old = self.interaction_push_line_style.pattern;
+                        Self::render_pattern_combo(
+                            ui,
+                            "modal_int_push_pattern",
+                            "Pattern",
+                            &mut self.interaction_push_line_style.pattern,
+                        );
+                        old != self.interaction_push_line_style.pattern
+                    }
+                    InteractionKind::Bidirectional => {
+                        let old = self.interaction_bidirectional_line_style.pattern;
+                        Self::render_pattern_combo(
+                            ui,
+                            "modal_int_bidirectional_pattern",
+                            "Pattern",
+                            &mut self.interaction_bidirectional_line_style.pattern,
+                        );
+                        old != self.interaction_bidirectional_line_style.pattern
+                    }
+                };
+                changed |= pattern_changed;
+
+                if changed {
+                    self.settings_dirty = true;
+                }
+            });
+
+        self.show_interaction_style_modal = open;
     }
 
     fn render_save_catalog_modal(&mut self, ctx: &egui::Context) {
@@ -1964,130 +2102,27 @@ impl SystemsCatalogApp {
                         self.interaction_line_style.width;
 
                     ui.separator();
-
-                    ui.menu_button("Standard", |ui| {
-                        let mut c = false;
-                        ui.horizontal(|ui| {
-                            ui.label("Color");
-                            c |= ui
-                                .color_edit_button_srgba(
-                                    &mut self.interaction_standard_line_style.color,
-                                )
-                                .changed();
-                        });
-                        let old = self.interaction_standard_line_style.terminator;
-                        Self::render_terminator_combo(
-                            ui,
-                            "menu_int_std_term",
-                            "Arrow",
-                            &mut self.interaction_standard_line_style.terminator,
-                        );
-                        c |= old != self.interaction_standard_line_style.terminator;
-                        let old = self.interaction_standard_line_style.pattern;
-                        Self::render_pattern_combo(
-                            ui,
-                            "menu_int_std_pat",
-                            "Pattern",
-                            &mut self.interaction_standard_line_style.pattern,
-                        );
-                        c |= old != self.interaction_standard_line_style.pattern;
-                        if c {
-                            self.settings_dirty = true;
-                        }
-                    });
-
-                    ui.menu_button("Pull", |ui| {
-                        let mut c = false;
-                        ui.horizontal(|ui| {
-                            ui.label("Color");
-                            c |= ui
-                                .color_edit_button_srgba(
-                                    &mut self.interaction_pull_line_style.color,
-                                )
-                                .changed();
-                        });
-                        let old = self.interaction_pull_line_style.terminator;
-                        Self::render_terminator_combo(
-                            ui,
-                            "menu_int_pull_term",
-                            "Arrow",
-                            &mut self.interaction_pull_line_style.terminator,
-                        );
-                        c |= old != self.interaction_pull_line_style.terminator;
-                        let old = self.interaction_pull_line_style.pattern;
-                        Self::render_pattern_combo(
-                            ui,
-                            "menu_int_pull_pat",
-                            "Pattern",
-                            &mut self.interaction_pull_line_style.pattern,
-                        );
-                        c |= old != self.interaction_pull_line_style.pattern;
-                        if c {
-                            self.settings_dirty = true;
-                        }
-                    });
-
-                    ui.menu_button("Push", |ui| {
-                        let mut c = false;
-                        ui.horizontal(|ui| {
-                            ui.label("Color");
-                            c |= ui
-                                .color_edit_button_srgba(
-                                    &mut self.interaction_push_line_style.color,
-                                )
-                                .changed();
-                        });
-                        let old = self.interaction_push_line_style.terminator;
-                        Self::render_terminator_combo(
-                            ui,
-                            "menu_int_push_term",
-                            "Arrow",
-                            &mut self.interaction_push_line_style.terminator,
-                        );
-                        c |= old != self.interaction_push_line_style.terminator;
-                        let old = self.interaction_push_line_style.pattern;
-                        Self::render_pattern_combo(
-                            ui,
-                            "menu_int_push_pat",
-                            "Pattern",
-                            &mut self.interaction_push_line_style.pattern,
-                        );
-                        c |= old != self.interaction_push_line_style.pattern;
-                        if c {
-                            self.settings_dirty = true;
-                        }
-                    });
-
-                    ui.menu_button("Bidirectional", |ui| {
-                        let mut c = false;
-                        ui.horizontal(|ui| {
-                            ui.label("Color");
-                            c |= ui
-                                .color_edit_button_srgba(
-                                    &mut self.interaction_bidirectional_line_style.color,
-                                )
-                                .changed();
-                        });
-                        let old = self.interaction_bidirectional_line_style.terminator;
-                        Self::render_terminator_combo(
-                            ui,
-                            "menu_int_bidir_term",
-                            "Arrow",
-                            &mut self.interaction_bidirectional_line_style.terminator,
-                        );
-                        c |= old != self.interaction_bidirectional_line_style.terminator;
-                        let old = self.interaction_bidirectional_line_style.pattern;
-                        Self::render_pattern_combo(
-                            ui,
-                            "menu_int_bidir_pat",
-                            "Pattern",
-                            &mut self.interaction_bidirectional_line_style.pattern,
-                        );
-                        c |= old != self.interaction_bidirectional_line_style.pattern;
-                        if c {
-                            self.settings_dirty = true;
-                        }
-                    });
+                    ui.label("Type styles");
+                    if ui.button("Standard...").clicked() {
+                        self.interaction_style_modal_kind = InteractionKind::Standard;
+                        self.open_modal(AppModal::InteractionStyle);
+                        ui.close_menu();
+                    }
+                    if ui.button("Pull...").clicked() {
+                        self.interaction_style_modal_kind = InteractionKind::Pull;
+                        self.open_modal(AppModal::InteractionStyle);
+                        ui.close_menu();
+                    }
+                    if ui.button("Push...").clicked() {
+                        self.interaction_style_modal_kind = InteractionKind::Push;
+                        self.open_modal(AppModal::InteractionStyle);
+                        ui.close_menu();
+                    }
+                    if ui.button("Bidirectional...").clicked() {
+                        self.interaction_style_modal_kind = InteractionKind::Bidirectional;
+                        self.open_modal(AppModal::InteractionStyle);
+                        ui.close_menu();
+                    }
 
                     if changed {
                         self.settings_dirty = true;
@@ -2601,7 +2636,7 @@ impl SystemsCatalogApp {
         }
 
         ui.separator();
-        ui.label("Cumulative child tech stack (deduped)");
+        ui.label("Cumulative child tech stack");
         if self.selected_cumulative_child_tech.is_empty() {
             ui.label("No child-system technologies found.");
         } else {
@@ -2664,68 +2699,163 @@ impl SystemsCatalogApp {
                 self.delete_selected_note();
             }
         });
+    }
 
-        ui.separator();
-        ui.label("Focused flow inspector");
-
-        let from_label = self
-            .flow_inspector_from_system_id
-            .map(|id| self.system_name_by_id(id))
-            .unwrap_or_else(|| "Select source system".to_owned());
-        let to_label = self
-            .flow_inspector_to_system_id
-            .map(|id| self.system_name_by_id(id))
-            .unwrap_or_else(|| "Select target system".to_owned());
-
-        egui::ComboBox::from_label("From")
-            .selected_text(from_label)
-            .show_ui(ui, |ui| {
-                for (candidate_id, candidate_name) in self.zone_filtered_system_candidates(None) {
-                    ui.selectable_value(
-                        &mut self.flow_inspector_from_system_id,
-                        Some(candidate_id),
-                        candidate_name.as_str(),
-                    );
-                }
-            });
-
-        egui::ComboBox::from_label("To")
-            .selected_text(to_label)
-            .show_ui(ui, |ui| {
-                for (candidate_id, candidate_name) in self.zone_filtered_system_candidates(None) {
-                    ui.selectable_value(
-                        &mut self.flow_inspector_to_system_id,
-                        Some(candidate_id),
-                        candidate_name.as_str(),
-                    );
-                }
-            });
-
-        if let (Some(from_id), Some(to_id)) =
-            (self.flow_inspector_from_system_id, self.flow_inspector_to_system_id)
-        {
-            if from_id == to_id {
-                ui.label("Select two different systems.");
-            } else if let Some(path) = self.focused_flow_shortest_path(from_id, to_id) {
-                if path.is_empty() {
-                    ui.label("Source and target are the same system.");
-                } else {
-                    ui.label("Shortest data-flow path");
-                    for (from, kind, to) in path {
-                        ui.label(format!(
-                            "{} -[{}]-> {}",
-                            self.system_name_by_id(from),
-                            Self::interaction_kind_label(kind),
-                            self.system_name_by_id(to)
-                        ));
-                    }
-                }
-            } else {
-                ui.label("No directed data-flow path found with current interactions.");
-            }
-        } else {
-            ui.label("Pick source and target to inspect data flow.");
+    fn process_flow_inspector_pick_from_selection(&mut self) {
+        if !self.show_flow_inspector_modal {
+            self.flow_inspector_pick_target = None;
+            self.flow_inspector_last_seen_selected_system_id = self.selected_system_id;
+            return;
         }
+
+        let selected = self.selected_system_id;
+        if selected == self.flow_inspector_last_seen_selected_system_id {
+            return;
+        }
+
+        self.flow_inspector_last_seen_selected_system_id = selected;
+
+        let Some(system_id) = selected else {
+            return;
+        };
+
+        let Some(pick_target) = self.flow_inspector_pick_target else {
+            return;
+        };
+
+        match pick_target {
+            FlowInspectorPickTarget::Start => {
+                self.flow_inspector_from_system_id = Some(system_id);
+                self.status_message =
+                    format!("Flow Inspector start set to {}", self.system_name_by_id(system_id));
+            }
+            FlowInspectorPickTarget::Stop => {
+                self.flow_inspector_to_system_id = Some(system_id);
+                self.status_message =
+                    format!("Flow Inspector stop set to {}", self.system_name_by_id(system_id));
+            }
+        }
+
+        self.flow_inspector_pick_target = None;
+    }
+
+    fn render_flow_inspector_modal(&mut self, ctx: &egui::Context) {
+        if !self.show_flow_inspector_modal {
+            return;
+        }
+
+        let mut open = self.show_flow_inspector_modal;
+        egui::Window::new("Flow Inspector")
+            .collapsible(false)
+            .resizable(true)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.label("Click Pick Start or Pick Stop, then click a system in the map or sidebar.");
+
+                ui.separator();
+
+                let start_name = self
+                    .flow_inspector_from_system_id
+                    .map(|id| self.system_name_by_id(id))
+                    .unwrap_or_else(|| "(none)".to_owned());
+                let stop_name = self
+                    .flow_inspector_to_system_id
+                    .map(|id| self.system_name_by_id(id))
+                    .unwrap_or_else(|| "(none)".to_owned());
+
+                ui.horizontal(|ui| {
+                    ui.label("Start:");
+                    ui.monospace(start_name);
+
+                    let picking_start =
+                        self.flow_inspector_pick_target == Some(FlowInspectorPickTarget::Start);
+                    let pick_label = if picking_start {
+                        "Picking start..."
+                    } else {
+                        "Pick Start"
+                    };
+                    if ui.button(pick_label).clicked() {
+                        self.flow_inspector_pick_target = Some(FlowInspectorPickTarget::Start);
+                        self.flow_inspector_last_seen_selected_system_id = self.selected_system_id;
+                    }
+
+                    if ui.small_button("Use selected").clicked() {
+                        if let Some(selected_id) = self.selected_system_id {
+                            self.flow_inspector_from_system_id = Some(selected_id);
+                            self.flow_inspector_pick_target = None;
+                        }
+                    }
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("Stop:");
+                    ui.monospace(stop_name);
+
+                    let picking_stop =
+                        self.flow_inspector_pick_target == Some(FlowInspectorPickTarget::Stop);
+                    let pick_label = if picking_stop {
+                        "Picking stop..."
+                    } else {
+                        "Pick Stop"
+                    };
+                    if ui.button(pick_label).clicked() {
+                        self.flow_inspector_pick_target = Some(FlowInspectorPickTarget::Stop);
+                        self.flow_inspector_last_seen_selected_system_id = self.selected_system_id;
+                    }
+
+                    if ui.small_button("Use selected").clicked() {
+                        if let Some(selected_id) = self.selected_system_id {
+                            self.flow_inspector_to_system_id = Some(selected_id);
+                            self.flow_inspector_pick_target = None;
+                        }
+                    }
+                });
+
+                ui.horizontal(|ui| {
+                    if ui.button("Swap").clicked() {
+                        std::mem::swap(
+                            &mut self.flow_inspector_from_system_id,
+                            &mut self.flow_inspector_to_system_id,
+                        );
+                    }
+                    if ui.button("Clear").clicked() {
+                        self.flow_inspector_from_system_id = None;
+                        self.flow_inspector_to_system_id = None;
+                        self.flow_inspector_pick_target = None;
+                    }
+                });
+
+                ui.separator();
+                ui.label("Flow result");
+
+                if let (Some(from_id), Some(to_id)) =
+                    (self.flow_inspector_from_system_id, self.flow_inspector_to_system_id)
+                {
+                    if from_id == to_id {
+                        ui.label("Select two different systems.");
+                    } else if let Some(path) = self.focused_flow_shortest_path(from_id, to_id) {
+                        if path.is_empty() {
+                            ui.label("Source and target are the same system.");
+                        } else {
+                            ui.label("Shortest data-flow path");
+                            for (from, kind, to) in path {
+                                ui.label(format!(
+                                    "{} -[{}]-> {}",
+                                    self.system_name_by_id(from),
+                                    Self::interaction_kind_label(kind),
+                                    self.system_name_by_id(to)
+                                ));
+                            }
+                        }
+                    } else {
+                        ui.label("No directed data-flow path found with current interactions.");
+                    }
+                } else {
+                    ui.label("Pick start and stop systems to inspect data flow.");
+                }
+            });
+
+        self.show_flow_inspector_modal = open;
     }
 
     fn apply_map_zoom_anchored_to_view_center(&mut self, map_rect: Rect, target_zoom: f32) {
@@ -4320,6 +4450,12 @@ impl eframe::App for SystemsCatalogApp {
                         self.focus_add_tech_name_on_open = true;
                         ui.close_menu();
                     }
+                    if ui.button("Flow Inspector").clicked() {
+                        self.open_modal(AppModal::FlowInspector);
+                        self.flow_inspector_pick_target = None;
+                        self.flow_inspector_last_seen_selected_system_id = self.selected_system_id;
+                        ui.close_menu();
+                    }
                 });
 
                 self.render_connection_style_menu(ui);
@@ -4365,6 +4501,8 @@ impl eframe::App for SystemsCatalogApp {
             self.render_map_canvas(ui);
         });
 
+        self.process_flow_inspector_pick_from_selection();
+
         self.render_add_system_modal(ctx);
         self.render_bulk_add_systems_modal(ctx);
         self.render_add_tech_modal(ctx);
@@ -4372,6 +4510,8 @@ impl eframe::App for SystemsCatalogApp {
         self.render_load_catalog_modal(ctx);
         self.render_new_catalog_confirm_modal(ctx);
         self.render_hotkeys_modal(ctx);
+        self.render_interaction_style_modal(ctx);
+        self.render_flow_inspector_modal(ctx);
         self.save_ui_settings_if_dirty();
     }
 }

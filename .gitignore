@@ -1,1 +1,6 @@
 /target
+.idea/copilot.data.migration.ask2agent.xml
+.idea/modules.xml
+mono_v3.db
+.idea/systems_catalog.iml
+.idea/vcs.xml
