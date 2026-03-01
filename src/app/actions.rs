@@ -12,6 +12,8 @@ impl SystemsCatalogApp {
     ) {
         let clamped_width = width.max(24.0);
         let clamped_height = height.max(24.0);
+        let parent_zone_id =
+            self.zone_parent_for_rect(x, y, clamped_width, clamped_height, None);
 
         let zone_name = format!("Zone {}", self.zones.len() + 1);
         let color_value = Some(Self::color_to_setting_value(self.selected_zone_color));
@@ -26,6 +28,9 @@ impl SystemsCatalogApp {
                 clamped_height,
                 color_value.as_deref(),
                 self.selected_zone_render_priority,
+                parent_zone_id,
+                false,
+                None,
             )
             .and_then(|new_zone_id| {
                 self.refresh_systems()?;
@@ -67,6 +72,9 @@ impl SystemsCatalogApp {
                 existing.height,
                 color_value.as_deref(),
                 self.selected_zone_render_priority,
+                self.selected_zone_parent_zone_id,
+                self.selected_zone_minimized,
+                self.selected_zone_representative_system_id,
             )
             .and_then(|_| self.refresh_systems());
 
@@ -86,7 +94,7 @@ impl SystemsCatalogApp {
             return;
         };
 
-        let Some(_) = self.zones.iter().find(|zone| zone.id == zone_id) else {
+        let Some(existing) = self.zones.iter().find(|zone| zone.id == zone_id).cloned() else {
             return;
         };
 
@@ -113,6 +121,9 @@ impl SystemsCatalogApp {
                 clamped_height,
                 color_value.as_deref(),
                 self.selected_zone_render_priority,
+                existing.parent_zone_id,
+                self.selected_zone_minimized,
+                self.selected_zone_representative_system_id,
             )
             .and_then(|_| self.refresh_systems())
             .and_then(|_| {
@@ -125,10 +136,127 @@ impl SystemsCatalogApp {
         }
     }
 
+    pub(super) fn toggle_zone_minimized(&mut self, zone_id: i64) {
+        let Some(existing) = self.zones.iter().find(|zone| zone.id == zone_id).cloned() else {
+            return;
+        };
+
+        let representative = self.zone_resolved_representative_system_id(zone_id);
+        let next_minimized = !existing.minimized;
+        let next_representative = representative.or(existing.representative_system_id);
+
+        if !existing.minimized && next_representative.is_none() {
+            self.status_message =
+                "Cannot minimize zone: choose a representative ancestor system".to_owned();
+            return;
+        }
+
+        let nested_child_ids = self.zone_nested_child_ids(zone_id);
+        let nested_children = self
+            .zones
+            .iter()
+            .filter(|zone| nested_child_ids.contains(&zone.id))
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut affected_representative_ids = HashSet::new();
+        if let Some(representative_id) = self.zone_resolved_representative_system_id(zone_id) {
+            affected_representative_ids.insert(representative_id);
+        }
+        for child in &nested_children {
+            if let Some(representative_id) = self.zone_resolved_representative_system_id(child.id) {
+                affected_representative_ids.insert(representative_id);
+            }
+        }
+
+        let result = self
+            .repo
+            .update_zone(
+                zone_id,
+                existing.name.as_str(),
+                existing.x,
+                existing.y,
+                existing.width,
+                existing.height,
+                existing.color.as_deref(),
+                existing.render_priority,
+                existing.parent_zone_id,
+                next_minimized,
+                next_representative,
+            )
+            .and_then(|_| {
+                for child in &nested_children {
+                    self.repo.update_zone(
+                        child.id,
+                        child.name.as_str(),
+                        child.x,
+                        child.y,
+                        child.width,
+                        child.height,
+                        child.color.as_deref(),
+                        child.render_priority,
+                        child.parent_zone_id,
+                        next_minimized,
+                        child.representative_system_id,
+                    )?;
+                }
+                Ok(())
+            })
+            .and_then(|_| self.refresh_systems())
+            .and_then(|_| {
+                if !next_minimized {
+                    for representative_id in &affected_representative_ids {
+                        self.auto_collapsed_zone_representative_ids
+                            .remove(representative_id);
+
+                        if self.collapsed_system_ids.contains(representative_id) {
+                            self.on_disclosure_click(*representative_id);
+                        }
+                    }
+                }
+                self.select_zone(zone_id);
+                Ok(())
+            });
+
+        match result {
+            Ok(_) => {
+                self.status_message = if next_minimized {
+                    "Zone minimized".to_owned()
+                } else {
+                    "Zone expanded".to_owned()
+                };
+            }
+            Err(error) => {
+                self.status_message = format!("Failed to toggle zone state: {error}");
+            }
+        }
+    }
+
     pub(super) fn delete_selected_zone(&mut self) {
         let Some(zone_id) = self.selected_zone_id else {
             return;
         };
+
+        let zone = self.zones.iter().find(|zone| zone.id == zone_id).cloned();
+
+        if let Some(zone) = zone {
+            let bound_system_ids = self
+                .zone_offsets_by_system
+                .iter()
+                .filter_map(|(system_id, (bound_zone_id, offset))| {
+                    if *bound_zone_id != zone_id {
+                        return None;
+                    }
+
+                    let absolute = eframe::egui::Pos2::new(zone.x + offset.x, zone.y + offset.y);
+                    Some((*system_id, absolute))
+                })
+                .collect::<Vec<_>>();
+
+            for (system_id, absolute) in bound_system_ids {
+                self.map_positions.insert(system_id, absolute);
+                self.persist_map_position(system_id, absolute);
+            }
+        }
 
         let result = self.repo.delete_zone(zone_id).and_then(|_| self.refresh_systems());
 
@@ -137,6 +265,9 @@ impl SystemsCatalogApp {
                 self.selected_zone_id = None;
                 self.selected_zone_name.clear();
                 self.selected_zone_render_priority = 1;
+                self.selected_zone_parent_zone_id = None;
+                self.selected_zone_minimized = false;
+                self.selected_zone_representative_system_id = None;
                 self.status_message = "Zone deleted".to_owned();
             }
             Err(error) => {
@@ -1125,6 +1256,57 @@ impl SystemsCatalogApp {
             }
             Err(error) => {
                 self.status_message = format!("Failed to fast-assign technology: {error}");
+            }
+        }
+    }
+
+    pub(super) fn fast_add_selected_catalog_tech_to_subtree(&mut self, parent_system_id: i64) {
+        let Some(tech_id) = self.selected_catalog_tech_id_for_edit else {
+            return;
+        };
+
+        let subtree_ids = self.system_and_descendant_ids(parent_system_id);
+        if subtree_ids.is_empty() {
+            return;
+        }
+
+        let mut added_count = 0usize;
+        let result = (|| -> anyhow::Result<()> {
+            for system_id in &subtree_ids {
+                let already_assigned = self
+                    .system_tech_ids_by_system
+                    .get(system_id)
+                    .map(|tech_ids| tech_ids.contains(&tech_id))
+                    .unwrap_or(false);
+
+                if already_assigned {
+                    continue;
+                }
+
+                self.repo.add_tech_to_system(*system_id, tech_id)?;
+                added_count += 1;
+            }
+
+            self.refresh_systems()?;
+            if let Some(selected_system_id) = self.selected_system_id {
+                self.load_selected_data(selected_system_id)?;
+            }
+
+            Ok(())
+        })();
+
+        match result {
+            Ok(_) => {
+                if added_count > 0 {
+                    self.status_message = format!(
+                        "Added '{}' to {} system(s) in subtree",
+                        self.tech_name_by_id(tech_id),
+                        added_count
+                    );
+                }
+            }
+            Err(error) => {
+                self.status_message = format!("Failed to apply tech to subtree: {error}");
             }
         }
     }

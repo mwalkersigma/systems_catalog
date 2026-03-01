@@ -56,4 +56,15 @@ pub struct ZoneRecord {
     pub height: f32,
     pub color: Option<String>,
     pub render_priority: i64,
+    pub parent_zone_id: Option<i64>,
+    pub minimized: bool,
+    pub representative_system_id: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ZoneSystemOffset {
+    pub zone_id: i64,
+    pub system_id: i64,
+    pub offset_x: f32,
+    pub offset_y: f32,
 }

@@ -29,6 +29,7 @@ The code is split into small modules with clear responsibilities:
 
 - Dark theme by default
 - Create systems with optional parent system
+- Classify systems by kind (`service`, `database`, `api_route`)
 - Browse systems in hierarchy view
 - Select a system and view details
 - Create directed interactions (links) between systems
@@ -41,6 +42,8 @@ The code is split into small modules with clear responsibilities:
 - Two-way sync: map and list view reflect the same underlying systems and links
 - Create and manage multiple notes per system
 - Save catalog snapshots to a database file and load them back
+- Export/import catalog structure as YAML
+- YAML import supports both add/update mode and full replace mode
 - Restore previous window size/position on startup
 
 ## Data model
@@ -50,6 +53,7 @@ SQLite tables:
 - `systems`
   - `id` (PK)
   - `name` (unique)
+  - `kind` (`service` by default)
   - `description`
   - `parent_id` (nullable FK to `systems.id`)
 - `links`
@@ -111,3 +115,7 @@ Windows note:
 cargo check
 cargo fmt --check
 ```
+
+## Scope Note
+
+See [PROJECT_SCOPE.md](PROJECT_SCOPE.md) for implementation scope details, including explicit exclusions for temporary tooling instruction files.

@@ -14,7 +14,7 @@ fn main() -> eframe::Result<()> {
     let database_path = PathBuf::from("systems_catalog.db");
 
     // not recommended practice:
-    // docs say to prefer explictily handling errors instead of using `expect` or `unwrap` in production code
+    // docs say to prefer explicitly handling errors instead of using `expect` or `unwrap` in production code
     // docs also specify that the error message for `expect`, should be the reason it 'should' succeed, " env variable `IMPORTANT_PATH` should be set by `wrapper_script.sh "
     let repository = Repository::open(&database_path)
         .expect("failed to open SQLite database for Systems Catalog");

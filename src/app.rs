@@ -83,7 +83,6 @@ pub enum AppModal {
     BulkAddSystems,
     AddTech,
     Hotkeys,
-    LineStyle,
     SaveCatalog,
     LoadCatalog,
     NewCatalogConfirm,
@@ -171,11 +170,15 @@ pub struct SystemsCatalogApp {
     fast_add_selected_catalog_tech_on_map: bool,
 
     map_positions: HashMap<i64, Pos2>,
+    zone_offsets_by_system: HashMap<i64, (i64, Pos2)>,
     zones: Vec<ZoneRecord>,
     selected_zone_id: Option<i64>,
     selected_zone_name: String,
     selected_zone_color: Color32,
     selected_zone_render_priority: i64,
+    selected_zone_parent_zone_id: Option<i64>,
+    selected_zone_minimized: bool,
+    selected_zone_representative_system_id: Option<i64>,
     zone_draw_mode: bool,
     zone_draw_start_screen: Option<Pos2>,
     zone_draw_end_screen: Option<Pos2>,
@@ -185,6 +188,9 @@ pub struct SystemsCatalogApp {
     zone_drag_initial_y: f32,
     zone_drag_initial_width: f32,
     zone_drag_initial_height: f32,
+    zone_drag_captured_system_positions: HashMap<i64, Pos2>,
+    zone_drag_descendant_initial_positions: HashMap<i64, Pos2>,
+    zone_drag_moves_captured_systems: bool,
     map_link_drag_from: Option<i64>,
     map_interaction_drag_from: Option<i64>,
     map_interaction_drag_kind: InteractionKind,
@@ -206,6 +212,8 @@ pub struct SystemsCatalogApp {
     flow_inspector_from_system_id: Option<i64>,
     flow_inspector_to_system_id: Option<i64>,
     collapsed_system_ids: HashSet<i64>,
+    auto_collapsed_zone_representative_ids: HashSet<i64>,
+    zone_representative_to_zone_ids: HashMap<i64, Vec<i64>>,
 
     show_add_system_modal: bool,
     show_bulk_add_systems_modal: bool,
@@ -214,7 +222,6 @@ pub struct SystemsCatalogApp {
     focus_add_tech_name_on_open: bool,
     show_add_tech_modal: bool,
     show_hotkeys_modal: bool,
-    show_line_style_modal: bool,
     show_save_catalog_modal: bool,
     show_load_catalog_modal: bool,
     show_new_catalog_confirm_modal: bool,
@@ -294,11 +301,15 @@ impl SystemsCatalogApp {
             system_tech_ids_by_system: HashMap::new(),
             fast_add_selected_catalog_tech_on_map: false,
             map_positions: HashMap::new(),
+            zone_offsets_by_system: HashMap::new(),
             zones: Vec::new(),
             selected_zone_id: None,
             selected_zone_name: String::new(),
             selected_zone_color: Color32::from_rgba_unmultiplied(96, 140, 255, 48),
             selected_zone_render_priority: 1,
+            selected_zone_parent_zone_id: None,
+            selected_zone_minimized: false,
+            selected_zone_representative_system_id: None,
             zone_draw_mode: false,
             zone_draw_start_screen: None,
             zone_draw_end_screen: None,
@@ -308,6 +319,9 @@ impl SystemsCatalogApp {
             zone_drag_initial_y: 0.0,
             zone_drag_initial_width: 0.0,
             zone_drag_initial_height: 0.0,
+            zone_drag_captured_system_positions: HashMap::new(),
+            zone_drag_descendant_initial_positions: HashMap::new(),
+            zone_drag_moves_captured_systems: true,
             map_link_drag_from: None,
             map_interaction_drag_from: None,
             map_interaction_drag_kind: InteractionKind::Standard,
@@ -329,6 +343,8 @@ impl SystemsCatalogApp {
             flow_inspector_from_system_id: None,
             flow_inspector_to_system_id: None,
             collapsed_system_ids: HashSet::new(),
+            auto_collapsed_zone_representative_ids: HashSet::new(),
+            zone_representative_to_zone_ids: HashMap::new(),
             show_add_system_modal: false,
             show_bulk_add_systems_modal: false,
             focus_bulk_add_system_names_on_open: false,
@@ -336,7 +352,6 @@ impl SystemsCatalogApp {
             focus_add_tech_name_on_open: false,
             show_add_tech_modal: false,
             show_hotkeys_modal: false,
-            show_line_style_modal: false,
             show_save_catalog_modal: false,
             show_load_catalog_modal: false,
             show_new_catalog_confirm_modal: false,
@@ -405,7 +420,6 @@ impl SystemsCatalogApp {
             AppModal::BulkAddSystems => self.show_bulk_add_systems_modal,
             AppModal::AddTech => self.show_add_tech_modal,
             AppModal::Hotkeys => self.show_hotkeys_modal,
-            AppModal::LineStyle => self.show_line_style_modal,
             AppModal::SaveCatalog => self.show_save_catalog_modal,
             AppModal::LoadCatalog => self.show_load_catalog_modal,
             AppModal::NewCatalogConfirm => self.show_new_catalog_confirm_modal,
@@ -418,7 +432,6 @@ impl SystemsCatalogApp {
             AppModal::BulkAddSystems => self.show_bulk_add_systems_modal = is_open,
             AppModal::AddTech => self.show_add_tech_modal = is_open,
             AppModal::Hotkeys => self.show_hotkeys_modal = is_open,
-            AppModal::LineStyle => self.show_line_style_modal = is_open,
             AppModal::SaveCatalog => self.show_save_catalog_modal = is_open,
             AppModal::LoadCatalog => self.show_load_catalog_modal = is_open,
             AppModal::NewCatalogConfirm => self.show_new_catalog_confirm_modal = is_open,
@@ -466,6 +479,13 @@ impl SystemsCatalogApp {
         self.all_links = self.repo.list_links()?;
         self.tech_catalog = self.repo.list_tech_catalog()?;
         self.zones = self.repo.list_zones()?;
+        self.zone_offsets_by_system.clear();
+        for offset in self.repo.list_zone_system_offsets()? {
+            self.zone_offsets_by_system.insert(
+                offset.system_id,
+                (offset.zone_id, Pos2::new(offset.offset_x, offset.offset_y)),
+            );
+        }
         let assignments = self.repo.list_system_tech_assignments()?;
         self.system_tech_ids_by_system.clear();
         for (system_id, tech_id) in assignments {
@@ -487,8 +507,18 @@ impl SystemsCatalogApp {
         self.map_positions
             .retain(|system_id, _| self.systems.iter().any(|system| system.id == *system_id));
 
+        self.zone_offsets_by_system.retain(|system_id, (zone_id, _)| {
+            let system_exists = self.systems.iter().any(|system| system.id == *system_id);
+            let zone_exists = self.zones.iter().any(|zone| zone.id == *zone_id);
+            system_exists && zone_exists
+        });
+
         self.collapsed_system_ids
             .retain(|system_id| self.systems.iter().any(|system| system.id == *system_id));
+        self.auto_collapsed_zone_representative_ids
+            .retain(|system_id| self.systems.iter().any(|system| system.id == *system_id));
+
+        self.sync_zone_representative_collapsed_state();
 
         for system in &self.systems {
             if let (Some(map_x), Some(map_y)) = (system.map_x, system.map_y) {
@@ -522,8 +552,14 @@ impl SystemsCatalogApp {
                 self.selected_zone_id = None;
                 self.selected_zone_name.clear();
                 self.selected_zone_render_priority = 1;
+                self.selected_zone_parent_zone_id = None;
+                self.selected_zone_minimized = false;
+                self.selected_zone_representative_system_id = None;
                 self.zone_drag_kind = None;
                 self.zone_drag_start_local = None;
+                self.zone_drag_captured_system_positions.clear();
+                self.zone_drag_descendant_initial_positions.clear();
+                self.zone_drag_moves_captured_systems = true;
             }
         }
 
@@ -541,6 +577,9 @@ impl SystemsCatalogApp {
                 .and_then(Self::color_from_setting_value)
                 .unwrap_or(Color32::from_rgba_unmultiplied(96, 140, 255, 48));
             self.selected_zone_render_priority = zone.render_priority;
+            self.selected_zone_parent_zone_id = zone.parent_zone_id;
+            self.selected_zone_minimized = zone.minimized;
+            self.selected_zone_representative_system_id = zone.representative_system_id;
         }
     }
 
@@ -826,6 +865,42 @@ impl SystemsCatalogApp {
             }
         }
 
+        let mut minimized_hidden_zone_ids = HashSet::new();
+        for zone in &self.zones {
+            if !zone.minimized {
+                continue;
+            }
+
+            let has_representative = self.zone_resolved_representative_system_id(zone.id).is_some();
+            if !has_representative {
+                continue;
+            }
+
+            minimized_hidden_zone_ids.extend(self.zone_nested_child_ids(zone.id));
+        }
+
+        for zone in &self.zones {
+            if !zone.minimized {
+                continue;
+            }
+
+            if minimized_hidden_zone_ids.contains(&zone.id) {
+                continue;
+            }
+
+            let Some(representative_id) = self.zone_resolved_representative_system_id(zone.id) else {
+                continue;
+            };
+
+            let Some(zone_system_ids) = self.zone_system_ids(zone.id) else {
+                continue;
+            };
+
+            for system_id in zone_system_ids {
+                representative_by_system.insert(system_id, representative_id);
+            }
+        }
+
         representative_by_system
     }
 
@@ -895,7 +970,44 @@ impl SystemsCatalogApp {
     }
 
     fn clear_subset_visibility(&mut self) {
+        self.auto_collapsed_zone_representative_ids.clear();
         self.collapsed_system_ids.clear();
+    }
+
+    fn sync_zone_representative_collapsed_state(&mut self) {
+        for system_id in self.auto_collapsed_zone_representative_ids.drain() {
+            self.collapsed_system_ids.remove(&system_id);
+        }
+
+        let mut required = HashSet::new();
+        let mut reverse_map: HashMap<i64, Vec<i64>> = HashMap::new();
+
+        let hidden_zone_ids = self.minimized_hidden_zone_ids();
+
+        for zone in &self.zones {
+            if !zone.minimized {
+                continue;
+            }
+
+            if hidden_zone_ids.contains(&zone.id) {
+                continue;
+            }
+
+            if let Some(representative_id) = self.zone_resolved_representative_system_id(zone.id) {
+                required.insert(representative_id);
+                reverse_map
+                    .entry(representative_id)
+                    .or_default()
+                    .push(zone.id);
+            }
+        }
+
+        for system_id in &required {
+            self.collapsed_system_ids.insert(*system_id);
+        }
+
+        self.auto_collapsed_zone_representative_ids = required;
+        self.zone_representative_to_zone_ids = reverse_map;
     }
 
     fn clear_selection(&mut self) {
@@ -1828,6 +1940,296 @@ impl SystemsCatalogApp {
         let mut selected = descendant_ids.into_iter().collect::<HashSet<_>>();
         selected.insert(system_id);
         selected
+    }
+
+    fn selected_zone_system_ids(&self) -> Option<HashSet<i64>> {
+        let selected_zone_id = self.selected_zone_id?;
+        self.zone_system_ids(selected_zone_id)
+    }
+
+    fn zone_contains_rect(outer: &ZoneRecord, x: f32, y: f32, width: f32, height: f32) -> bool {
+        let outer_right = outer.x + outer.width;
+        let outer_bottom = outer.y + outer.height;
+        let right = x + width;
+        let bottom = y + height;
+
+        outer.x <= x && outer.y <= y && outer_right >= right && outer_bottom >= bottom
+    }
+
+    fn zone_parent_for_rect(
+        &self,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        exclude_zone_id: Option<i64>,
+    ) -> Option<i64> {
+        let mut candidates = self
+            .zones
+            .iter()
+            .filter(|zone| Some(zone.id) != exclude_zone_id)
+            .filter(|zone| Self::zone_contains_rect(zone, x, y, width, height))
+            .collect::<Vec<_>>();
+
+        candidates.sort_by(|left, right| {
+            let left_area = left.width * left.height;
+            let right_area = right.width * right.height;
+            left_area
+                .total_cmp(&right_area)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+
+        candidates.first().map(|zone| zone.id)
+    }
+
+    fn zone_descendant_ids(&self, zone_id: i64) -> HashSet<i64> {
+        let mut descendants = HashSet::new();
+        let mut stack = vec![zone_id];
+
+        while let Some(current_id) = stack.pop() {
+            for child in self
+                .zones
+                .iter()
+                .filter(|zone| zone.parent_zone_id == Some(current_id))
+            {
+                if descendants.insert(child.id) {
+                    stack.push(child.id);
+                }
+            }
+        }
+
+        descendants
+    }
+
+    fn zone_contained_zone_ids(&self, zone_id: i64) -> HashSet<i64> {
+        let Some(parent_zone) = self.zones.iter().find(|zone| zone.id == zone_id) else {
+            return HashSet::new();
+        };
+
+        self.zones
+            .iter()
+            .filter(|zone| zone.id != zone_id)
+            .filter(|zone| {
+                Self::zone_contains_rect(parent_zone, zone.x, zone.y, zone.width, zone.height)
+            })
+            .map(|zone| zone.id)
+            .collect::<HashSet<_>>()
+    }
+
+    fn zone_nested_child_ids(&self, zone_id: i64) -> HashSet<i64> {
+        let mut ids = self.zone_descendant_ids(zone_id);
+        ids.extend(self.zone_contained_zone_ids(zone_id));
+        ids
+    }
+
+    fn minimized_hidden_zone_ids(&self) -> HashSet<i64> {
+        let mut hidden = HashSet::new();
+        for zone in &self.zones {
+            if !zone.minimized {
+                continue;
+            }
+
+            if self.zone_resolved_representative_system_id(zone.id).is_none() {
+                continue;
+            }
+
+            hidden.extend(self.zone_nested_child_ids(zone.id));
+        }
+
+        hidden
+    }
+
+    fn visible_minimized_zone_ids_for_disclosure_system(&self, system_id: i64) -> Vec<i64> {
+        let hidden_zone_ids = self.minimized_hidden_zone_ids();
+
+        let mut matching = self
+            .zones
+            .iter()
+            .filter(|zone| zone.minimized)
+            .filter(|zone| !hidden_zone_ids.contains(&zone.id))
+            .filter_map(|zone| {
+                self.zone_resolved_representative_system_id(zone.id)
+                    .map(|representative_id| (zone.id, representative_id, zone.render_priority))
+            })
+            .filter(|(_, representative_id, _)| {
+                self.system_is_ancestor_or_self(system_id, *representative_id)
+            })
+            .map(|(zone_id, _, render_priority)| (zone_id, render_priority))
+            .collect::<Vec<_>>();
+
+        matching.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+        matching.into_iter().map(|(zone_id, _)| zone_id).collect()
+    }
+
+    fn would_create_zone_parent_cycle(&self, zone_id: i64, candidate_parent_zone_id: i64) -> bool {
+        if zone_id == candidate_parent_zone_id {
+            return true;
+        }
+
+        self.zone_descendant_ids(zone_id)
+            .contains(&candidate_parent_zone_id)
+    }
+
+    fn zone_parent_candidates(&self, zone_id: i64) -> Vec<(i64, String)> {
+        let mut candidates = self
+            .zones
+            .iter()
+            .filter(|zone| zone.id != zone_id)
+            .filter(|zone| !self.would_create_zone_parent_cycle(zone_id, zone.id))
+            .map(|zone| (zone.id, zone.name.clone()))
+            .collect::<Vec<_>>();
+
+        candidates.sort_by(|left, right| {
+            left.1
+                .to_lowercase()
+                .cmp(&right.1.to_lowercase())
+                .then_with(|| left.0.cmp(&right.0))
+        });
+
+        candidates
+    }
+
+    fn zone_system_ids(&self, zone_id: i64) -> Option<HashSet<i64>> {
+        let zone = self.zones.iter().find(|candidate| candidate.id == zone_id)?;
+
+        let zone_rect = Rect::from_min_size(
+            Pos2::new(zone.x, zone.y),
+            Vec2::new(zone.width.max(0.0), zone.height.max(0.0)),
+        );
+
+        let mut ids = HashSet::new();
+        for system in &self.systems {
+            let Some(position) = self.effective_map_position(system.id) else {
+                continue;
+            };
+
+            let center = Pos2::new(
+                position.x + (MAP_NODE_SIZE.x * 0.5),
+                position.y + (MAP_NODE_SIZE.y * 0.5),
+            );
+
+            if zone_rect.contains(center) {
+                ids.insert(system.id);
+            }
+        }
+
+        Some(ids)
+    }
+
+    fn system_is_ancestor_or_self(&self, ancestor_id: i64, system_id: i64) -> bool {
+        if ancestor_id == system_id {
+            return true;
+        }
+
+        let mut current = self
+            .systems
+            .iter()
+            .find(|system| system.id == system_id)
+            .and_then(|system| system.parent_id);
+
+        while let Some(parent_id) = current {
+            if parent_id == ancestor_id {
+                return true;
+            }
+
+            current = self
+                .systems
+                .iter()
+                .find(|system| system.id == parent_id)
+                .and_then(|system| system.parent_id);
+        }
+
+        false
+    }
+
+    fn zone_representative_candidates(&self, zone_id: i64) -> Vec<i64> {
+        let Some(zone_ids) = self.zone_system_ids(zone_id) else {
+            return Vec::new();
+        };
+
+        let mut candidates = zone_ids
+            .iter()
+            .copied()
+            .filter(|candidate_id| {
+                zone_ids
+                    .iter()
+                    .all(|system_id| self.system_is_ancestor_or_self(*candidate_id, *system_id))
+            })
+            .collect::<Vec<_>>();
+
+        candidates.sort_unstable();
+        candidates
+    }
+
+    fn zone_unique_common_ancestor_system_id(&self, zone_id: i64) -> Option<i64> {
+        let candidates = self.zone_representative_candidates(zone_id);
+        if candidates.len() == 1 {
+            Some(candidates[0])
+        } else {
+            None
+        }
+    }
+
+    fn zone_resolved_representative_system_id(&self, zone_id: i64) -> Option<i64> {
+        if let Some(unique) = self.zone_unique_common_ancestor_system_id(zone_id) {
+            return Some(unique);
+        }
+
+        let selected = self
+            .zones
+            .iter()
+            .find(|zone| zone.id == zone_id)
+            .and_then(|zone| zone.representative_system_id)?;
+
+        let candidates = self.zone_representative_candidates(zone_id);
+        if candidates.contains(&selected) {
+            Some(selected)
+        } else {
+            None
+        }
+    }
+
+    fn effective_map_position(&self, system_id: i64) -> Option<Pos2> {
+        if let Some((zone_id, offset)) = self.zone_offsets_by_system.get(&system_id) {
+            if let Some(zone) = self.zones.iter().find(|zone| zone.id == *zone_id) {
+                return Some(Pos2::new(zone.x + offset.x, zone.y + offset.y));
+            }
+        }
+
+        self.map_positions.get(&system_id).copied()
+    }
+
+    fn assign_system_to_zone_offset(&mut self, system_id: i64, zone_id: i64, offset: Pos2) {
+        self.zone_offsets_by_system.insert(system_id, (zone_id, offset));
+    }
+
+    fn persist_system_zone_offset(&mut self, system_id: i64, zone_id: i64, offset: Pos2) {
+        if let Err(error) =
+            self.repo
+                .upsert_zone_system_offset(zone_id, system_id, offset.x, offset.y)
+        {
+            self.status_message = format!("Failed to persist zone offset: {error}");
+        }
+    }
+
+    fn zone_filtered_system_candidates(&self, exclude_id: Option<i64>) -> Vec<(i64, String)> {
+        let zone_ids = self.selected_zone_system_ids();
+
+        let mut candidates = self
+            .systems
+            .iter()
+            .filter(|system| exclude_id != Some(system.id))
+            .filter(|system| {
+                zone_ids
+                    .as_ref()
+                    .map(|ids| ids.contains(&system.id))
+                    .unwrap_or(true)
+            })
+            .map(|system| (system.id, system.name.clone()))
+            .collect::<Vec<_>>();
+
+        candidates.sort_by_key(|(_, name)| name.to_lowercase());
+        candidates
     }
 
     fn ensure_map_positions(&mut self) {

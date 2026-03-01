@@ -3,7 +3,7 @@ use std::path::Path;
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
 
-use crate::models::{SystemLink, SystemNote, SystemRecord, TechItem, ZoneRecord};
+use crate::models::{SystemLink, SystemNote, SystemRecord, TechItem, ZoneRecord, ZoneSystemOffset};
 
 /// Data access layer that owns the SQLite connection.
 ///
@@ -91,7 +91,22 @@ impl Repository {
                 width REAL NOT NULL,
                 height REAL NOT NULL,
                 color TEXT NULL,
-                render_priority INTEGER NOT NULL DEFAULT 1
+                render_priority INTEGER NOT NULL DEFAULT 1,
+                parent_zone_id INTEGER NULL,
+                minimized INTEGER NOT NULL DEFAULT 0,
+                representative_system_id INTEGER NULL,
+                FOREIGN KEY(parent_zone_id) REFERENCES zones(id) ON DELETE SET NULL,
+                FOREIGN KEY(representative_system_id) REFERENCES systems(id) ON DELETE SET NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS zone_system_offsets (
+                zone_id INTEGER NOT NULL,
+                system_id INTEGER NOT NULL,
+                offset_x REAL NOT NULL,
+                offset_y REAL NOT NULL,
+                PRIMARY KEY(system_id),
+                FOREIGN KEY(zone_id) REFERENCES zones(id) ON DELETE CASCADE,
+                FOREIGN KEY(system_id) REFERENCES systems(id) ON DELETE CASCADE
             );
             "#,
         )?;
@@ -248,6 +263,25 @@ impl Repository {
         if !self.table_has_column("zones", "render_priority")? {
             self.conn.execute(
                 "ALTER TABLE zones ADD COLUMN render_priority INTEGER NOT NULL DEFAULT 1",
+                [],
+            )?;
+        }
+
+        if !self.table_has_column("zones", "parent_zone_id")? {
+            self.conn
+                .execute("ALTER TABLE zones ADD COLUMN parent_zone_id INTEGER NULL", [])?;
+        }
+
+        if !self.table_has_column("zones", "minimized")? {
+            self.conn.execute(
+                "ALTER TABLE zones ADD COLUMN minimized INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
+
+        if !self.table_has_column("zones", "representative_system_id")? {
+            self.conn.execute(
+                "ALTER TABLE zones ADD COLUMN representative_system_id INTEGER NULL",
                 [],
             )?;
         }
@@ -623,6 +657,7 @@ impl Repository {
             self.conn.execute("DELETE FROM tech_catalog", [])?;
             self.conn.execute("DELETE FROM app_settings", [])?;
             self.conn.execute("DELETE FROM zones", [])?;
+            self.conn.execute("DELETE FROM zone_system_offsets", [])?;
 
             self.conn.execute(
                 "INSERT INTO systems (id, name, description, parent_id, map_x, map_y, line_color_override) SELECT id, name, description, parent_id, map_x, map_y, line_color_override FROM imported.systems",
@@ -661,17 +696,61 @@ impl Repository {
                 let imported_has_zone_priority: i64 =
                     imported_zone_priority_column_stmt.query_row([], |row| row.get(0))?;
 
-                if imported_has_zone_priority > 0 {
-                    self.conn.execute(
-                        "INSERT INTO zones (id, name, x, y, width, height, color, render_priority) SELECT id, name, x, y, width, height, color, render_priority FROM imported.zones",
-                        [],
-                    )?;
+                let mut imported_zone_minimized_column_stmt = self.conn.prepare(
+                    "SELECT COUNT(*) FROM imported.pragma_table_info('zones') WHERE name = 'minimized'",
+                )?;
+                let imported_has_zone_minimized: i64 =
+                    imported_zone_minimized_column_stmt.query_row([], |row| row.get(0))?;
+
+                let mut imported_zone_parent_column_stmt = self.conn.prepare(
+                    "SELECT COUNT(*) FROM imported.pragma_table_info('zones') WHERE name = 'parent_zone_id'",
+                )?;
+                let imported_has_zone_parent: i64 =
+                    imported_zone_parent_column_stmt.query_row([], |row| row.get(0))?;
+
+                let mut imported_zone_representative_column_stmt = self.conn.prepare(
+                    "SELECT COUNT(*) FROM imported.pragma_table_info('zones') WHERE name = 'representative_system_id'",
+                )?;
+                let imported_has_zone_representative: i64 =
+                    imported_zone_representative_column_stmt.query_row([], |row| row.get(0))?;
+
+                let render_priority_select = if imported_has_zone_priority > 0 {
+                    "render_priority"
                 } else {
-                    self.conn.execute(
-                        "INSERT INTO zones (id, name, x, y, width, height, color, render_priority) SELECT id, name, x, y, width, height, color, 1 FROM imported.zones",
-                        [],
-                    )?;
-                }
+                    "1"
+                };
+                let minimized_select = if imported_has_zone_minimized > 0 {
+                    "minimized"
+                } else {
+                    "0"
+                };
+                let parent_select = if imported_has_zone_parent > 0 {
+                    "parent_zone_id"
+                } else {
+                    "NULL"
+                };
+                let representative_select = if imported_has_zone_representative > 0 {
+                    "representative_system_id"
+                } else {
+                    "NULL"
+                };
+
+                let zone_insert_sql = format!(
+                    "INSERT INTO zones (id, name, x, y, width, height, color, render_priority, parent_zone_id, minimized, representative_system_id) SELECT id, name, x, y, width, height, color, {render_priority_select}, {parent_select}, {minimized_select}, {representative_select} FROM imported.zones"
+                );
+                self.conn.execute(zone_insert_sql.as_str(), [])?;
+            }
+
+            let mut zone_offsets_table_stmt = self
+                .conn
+                .prepare("SELECT COUNT(*) FROM imported.sqlite_master WHERE type = 'table' AND name = 'zone_system_offsets'")?;
+            let imported_has_zone_offsets: i64 = zone_offsets_table_stmt.query_row([], |row| row.get(0))?;
+
+            if imported_has_zone_offsets > 0 {
+                self.conn.execute(
+                    "INSERT INTO zone_system_offsets (zone_id, system_id, offset_x, offset_y) SELECT zone_id, system_id, offset_x, offset_y FROM imported.zone_system_offsets",
+                    [],
+                )?;
             }
 
             self.conn.execute("DETACH DATABASE imported", [])?;
@@ -689,13 +768,59 @@ impl Repository {
         self.conn.execute("DELETE FROM systems", [])?;
         self.conn.execute("DELETE FROM tech_catalog", [])?;
         self.conn.execute("DELETE FROM zones", [])?;
+        self.conn.execute("DELETE FROM zone_system_offsets", [])?;
+        Ok(())
+    }
+
+    pub fn list_zone_system_offsets(&self) -> Result<Vec<ZoneSystemOffset>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT zone_id, system_id, offset_x, offset_y
+            FROM zone_system_offsets
+            ORDER BY zone_id ASC, system_id ASC
+            "#,
+        )?;
+
+        let offsets = stmt
+            .query_map([], |row| {
+                Ok(ZoneSystemOffset {
+                    zone_id: row.get(0)?,
+                    system_id: row.get(1)?,
+                    offset_x: row.get(2)?,
+                    offset_y: row.get(3)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        Ok(offsets)
+    }
+
+    pub fn upsert_zone_system_offset(
+        &self,
+        zone_id: i64,
+        system_id: i64,
+        offset_x: f32,
+        offset_y: f32,
+    ) -> Result<()> {
+        self.conn.execute(
+            r#"
+            INSERT INTO zone_system_offsets (zone_id, system_id, offset_x, offset_y)
+            VALUES (?1, ?2, ?3, ?4)
+            ON CONFLICT(system_id) DO UPDATE SET
+                zone_id = excluded.zone_id,
+                offset_x = excluded.offset_x,
+                offset_y = excluded.offset_y
+            "#,
+            params![zone_id, system_id, offset_x, offset_y],
+        )?;
+
         Ok(())
     }
 
     pub fn list_zones(&self) -> Result<Vec<ZoneRecord>> {
         let mut stmt = self.conn.prepare(
             r#"
-            SELECT id, name, x, y, width, height, color, render_priority
+            SELECT id, name, x, y, width, height, color, render_priority, parent_zone_id, minimized, representative_system_id
             FROM zones
             ORDER BY render_priority ASC, id ASC
             "#,
@@ -712,6 +837,9 @@ impl Repository {
                     height: row.get(5)?,
                     color: row.get(6)?,
                     render_priority: row.get(7)?,
+                    parent_zone_id: row.get(8)?,
+                    minimized: row.get::<_, i64>(9)? != 0,
+                    representative_system_id: row.get(10)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -728,13 +856,16 @@ impl Repository {
         height: f32,
         color: Option<&str>,
         render_priority: i64,
+        parent_zone_id: Option<i64>,
+        minimized: bool,
+        representative_system_id: Option<i64>,
     ) -> Result<i64> {
         self.conn.execute(
             r#"
-            INSERT INTO zones (name, x, y, width, height, color, render_priority)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            INSERT INTO zones (name, x, y, width, height, color, render_priority, parent_zone_id, minimized, representative_system_id)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
             "#,
-            params![name, x, y, width, height, color, render_priority],
+            params![name, x, y, width, height, color, render_priority, parent_zone_id, if minimized { 1 } else { 0 }, representative_system_id],
         )?;
 
         Ok(self.conn.last_insert_rowid())
@@ -750,6 +881,9 @@ impl Repository {
         height: f32,
         color: Option<&str>,
         render_priority: i64,
+        parent_zone_id: Option<i64>,
+        minimized: bool,
+        representative_system_id: Option<i64>,
     ) -> Result<()> {
         self.conn.execute(
             r#"
@@ -760,10 +894,13 @@ impl Repository {
                 width = ?5,
                 height = ?6,
                 color = ?7,
-                render_priority = ?8
+                render_priority = ?8,
+                parent_zone_id = ?9,
+                minimized = ?10,
+                representative_system_id = ?11
             WHERE id = ?1
             "#,
-            params![zone_id, name, x, y, width, height, color, render_priority],
+            params![zone_id, name, x, y, width, height, color, render_priority, parent_zone_id, if minimized { 1 } else { 0 }, representative_system_id],
         )?;
 
         Ok(())
