@@ -3,7 +3,10 @@ use std::path::Path;
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
 
-use crate::models::{SystemLink, SystemNote, SystemRecord, TechItem, ZoneRecord, ZoneSystemOffset};
+use crate::models::{
+    DatabaseColumnInput, DatabaseColumnRecord, SystemLink, SystemNote, SystemRecord, TechItem,
+    ZoneRecord, ZoneSystemOffset,
+};
 
 /// Data access layer that owns the SQLite connection.
 ///
@@ -80,6 +83,16 @@ impl Repository {
                 FOREIGN KEY(tech_id) REFERENCES tech_catalog(id) ON DELETE CASCADE
             );
 
+            CREATE TABLE IF NOT EXISTS database_columns (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                system_id INTEGER NOT NULL,
+                position INTEGER NOT NULL DEFAULT 0,
+                column_name TEXT NOT NULL,
+                column_type TEXT NOT NULL,
+                constraints TEXT NULL,
+                FOREIGN KEY(system_id) REFERENCES systems(id) ON DELETE CASCADE
+            );
+
             CREATE TABLE IF NOT EXISTS app_settings (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
@@ -121,6 +134,7 @@ impl Repository {
         self.ensure_links_kind_column()?;
         self.ensure_tech_catalog_columns()?;
         self.ensure_tech_catalog_visual_columns()?;
+        self.ensure_default_tech_catalog()?;
         self.ensure_notes_table_shape()?;
         self.ensure_zones_columns()?;
 
@@ -244,6 +258,163 @@ impl Repository {
             self.conn.execute(
                 "ALTER TABLE tech_catalog ADD COLUMN display_priority INTEGER NOT NULL DEFAULT 0",
                 [],
+            )?;
+        }
+
+        Ok(())
+    }
+
+    fn ensure_default_tech_catalog(&self) -> Result<()> {
+        let defaults = [
+            (
+                "JavaScript",
+                "Core web scripting language used across frontend and backend runtimes.",
+                "https://developer.mozilla.org/en-US/docs/Web/JavaScript",
+                "247,223,30,255",
+                12,
+            ),
+            (
+                "TypeScript",
+                "Typed superset of JavaScript for safer large-scale application development.",
+                "https://www.typescriptlang.org/docs/",
+                "49,120,198,255",
+                12,
+            ),
+            (
+                "TSX",
+                "TypeScript syntax extension for authoring typed React UI components.",
+                "https://www.typescriptlang.org/docs/handbook/jsx.html",
+                "49,120,198,255",
+                10,
+            ),
+            (
+                "JSX",
+                "JavaScript syntax extension commonly used to compose React component trees.",
+                "https://react.dev/learn/writing-markup-with-jsx",
+                "97,218,251,255",
+                10,
+            ),
+            (
+                "React",
+                "Component-driven UI library for building interactive frontend applications.",
+                "https://react.dev/",
+                "97,218,251,255",
+                11,
+            ),
+            (
+                "GoLand",
+                "JetBrains IDE tailored for Go development, debugging, and refactoring.",
+                "https://www.jetbrains.com/go/",
+                "0,189,165,255",
+                7,
+            ),
+            (
+                "Postgres",
+                "Robust relational database with strong SQL support and JSON capabilities.",
+                "https://www.postgresql.org/docs/",
+                "51,103,145,255",
+                11,
+            ),
+            (
+                "Rust",
+                "Systems programming language focused on memory safety and high performance.",
+                "https://www.rust-lang.org/learn",
+                "222,165,132,255",
+                10,
+            ),
+            (
+                "Go",
+                "Compiled language optimized for backend services, tooling, and concurrency.",
+                "https://go.dev/doc/",
+                "0,173,216,255",
+                10,
+            ),
+            (
+                "Python",
+                "General-purpose language popular for automation, APIs, and data workflows.",
+                "https://docs.python.org/3/",
+                "55,118,171,255",
+                10,
+            ),
+            (
+                "Node.js",
+                "JavaScript runtime for server-side development and tooling ecosystems.",
+                "https://nodejs.org/docs/latest/api/",
+                "104,160,99,255",
+                10,
+            ),
+            (
+                "Bun",
+                "Fast JavaScript and TypeScript runtime with integrated bundling and tooling.",
+                "https://bun.sh/docs",
+                "251,248,232,255",
+                8,
+            ),
+            (
+                "Deno",
+                "Secure JavaScript and TypeScript runtime with modern built-in web APIs.",
+                "https://docs.deno.com/runtime/manual/",
+                "0,0,0,255",
+                8,
+            ),
+            (
+                "C#",
+                "Modern language on .NET for APIs, desktop apps, and cloud services.",
+                "https://learn.microsoft.com/dotnet/csharp/",
+                "104,33,122,255",
+                9,
+            ),
+            (
+                "Java",
+                "Widely used JVM language for enterprise services and Android foundations.",
+                "https://docs.oracle.com/en/java/",
+                "237,139,0,255",
+                9,
+            ),
+            (
+                "Kotlin",
+                "Concise JVM language used for Android and server-side applications.",
+                "https://kotlinlang.org/docs/home.html",
+                "127,82,255,255",
+                8,
+            ),
+            (
+                "Swift",
+                "Primary language for Apple platform application development.",
+                "https://docs.swift.org/swift-book/",
+                "250,105,45,255",
+                8,
+            ),
+            (
+                "SQL",
+                "Declarative query language for relational data modeling and retrieval.",
+                "https://www.postgresql.org/docs/current/sql.html",
+                "51,103,145,255",
+                9,
+            ),
+            (
+                "GraphQL",
+                "API query language for flexible, client-driven data fetching.",
+                "https://graphql.org/learn/",
+                "225,0,152,255",
+                8,
+            ),
+            (
+                "REST",
+                "HTTP architectural style for resource-oriented service communication.",
+                "https://restfulapi.net/",
+                "0,122,204,255",
+                8,
+            ),
+        ];
+
+        for (name, description, documentation_link, color, display_priority) in defaults {
+            self.conn.execute(
+                r#"
+                INSERT OR IGNORE INTO tech_catalog (name, description, documentation_link, color, display_priority)
+                VALUES (?1, ?2, ?3, ?4, ?5)
+                "#,
+                params![name, description, documentation_link, color, display_priority],
             )?;
         }
 
@@ -459,6 +630,92 @@ impl Repository {
             ],
         )?;
 
+        Ok(())
+    }
+
+    pub fn list_database_columns_for_system(
+        &self,
+        system_id: i64,
+    ) -> Result<Vec<DatabaseColumnRecord>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT id, system_id, position, column_name, column_type, constraints
+            FROM database_columns
+            WHERE system_id = ?1
+            ORDER BY position ASC, id ASC
+            "#,
+        )?;
+
+        let columns = stmt
+            .query_map(params![system_id], |row| {
+                Ok(DatabaseColumnRecord {
+                    id: row.get(0)?,
+                    system_id: row.get(1)?,
+                    position: row.get(2)?,
+                    column_name: row.get(3)?,
+                    column_type: row.get(4)?,
+                    constraints: row.get(5)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        Ok(columns)
+    }
+
+    pub fn list_database_columns(&self) -> Result<Vec<DatabaseColumnRecord>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT id, system_id, position, column_name, column_type, constraints
+            FROM database_columns
+            ORDER BY system_id ASC, position ASC, id ASC
+            "#,
+        )?;
+
+        let columns = stmt
+            .query_map([], |row| {
+                Ok(DatabaseColumnRecord {
+                    id: row.get(0)?,
+                    system_id: row.get(1)?,
+                    position: row.get(2)?,
+                    column_name: row.get(3)?,
+                    column_type: row.get(4)?,
+                    constraints: row.get(5)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        Ok(columns)
+    }
+
+    pub fn replace_database_columns_for_system(
+        &mut self,
+        system_id: i64,
+        columns: &[DatabaseColumnInput],
+    ) -> Result<()> {
+        let tx = self.conn.transaction()?;
+
+        tx.execute(
+            "DELETE FROM database_columns WHERE system_id = ?1",
+            params![system_id],
+        )?;
+
+        for column in columns {
+            tx.execute(
+                r#"
+                INSERT INTO database_columns (system_id, position, column_name, column_type, constraints)
+                VALUES (?1, ?2, ?3, ?4, ?5)
+                "#,
+                params![
+                    system_id,
+                    column.position,
+                    column.column_name,
+                    column.column_type,
+                    column.constraints,
+                ],
+            )?;
+        }
+
+        tx.commit()?;
         Ok(())
     }
 
@@ -693,6 +950,7 @@ impl Repository {
             self.conn.execute("DELETE FROM system_tech", [])?;
             self.conn.execute("DELETE FROM links", [])?;
             self.conn.execute("DELETE FROM notes", [])?;
+            self.conn.execute("DELETE FROM database_columns", [])?;
             self.conn.execute("DELETE FROM systems", [])?;
             self.conn.execute("DELETE FROM tech_catalog", [])?;
             self.conn.execute("DELETE FROM app_settings", [])?;
@@ -811,6 +1069,20 @@ impl Repository {
                 "INSERT INTO system_tech (system_id, tech_id) SELECT system_id, tech_id FROM imported.system_tech",
                 [],
             )?;
+
+            let mut database_columns_table_stmt = self.conn.prepare(
+                "SELECT COUNT(*) FROM imported.sqlite_master WHERE type = 'table' AND name = 'database_columns'",
+            )?;
+            let imported_has_database_columns: i64 =
+                database_columns_table_stmt.query_row([], |row| row.get(0))?;
+
+            if imported_has_database_columns > 0 {
+                self.conn.execute(
+                    "INSERT INTO database_columns (id, system_id, position, column_name, column_type, constraints) SELECT id, system_id, position, column_name, column_type, constraints FROM imported.database_columns",
+                    [],
+                )?;
+            }
+
             self.conn.execute(
                 "INSERT INTO app_settings (key, value) SELECT key, value FROM imported.app_settings",
                 [],
@@ -897,6 +1169,7 @@ impl Repository {
         self.conn.execute("DELETE FROM system_tech", [])?;
         self.conn.execute("DELETE FROM links", [])?;
         self.conn.execute("DELETE FROM notes", [])?;
+        self.conn.execute("DELETE FROM database_columns", [])?;
         self.conn.execute("DELETE FROM systems", [])?;
         self.conn.execute("DELETE FROM tech_catalog", [])?;
         self.conn.execute("DELETE FROM zones", [])?;

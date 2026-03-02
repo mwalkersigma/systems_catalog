@@ -8,7 +8,10 @@ use anyhow::{anyhow, Result};
 use eframe::egui::{Color32, Pos2, Rect, Vec2};
 
 use crate::db::Repository;
-use crate::models::{SystemLink, SystemNote, SystemRecord, TechItem, ZoneRecord};
+use crate::models::{
+    DatabaseColumnInput, DatabaseColumnRecord, SystemLink, SystemNote, SystemRecord, TechItem,
+    ZoneRecord,
+};
 
 pub(crate) const MAP_NODE_SIZE: Vec2 = Vec2::new(170.0, 64.0);
 pub(crate) const MAP_WORLD_SIZE: Vec2 = Vec2::new(12000.0, 12000.0);
@@ -141,6 +144,7 @@ pub struct SystemsCatalogApp {
     selected_system_id: Option<i64>,
     selected_links: Vec<SystemLink>,
     selected_system_tech: Vec<TechItem>,
+    selected_database_columns: Vec<DatabaseColumnInput>,
     selected_cumulative_child_tech: Vec<String>,
     selected_notes: Vec<SystemNote>,
     selected_note_id_for_edit: Option<i64>,
@@ -187,6 +191,7 @@ pub struct SystemsCatalogApp {
     new_tech_color: Option<Color32>,
     new_tech_display_priority: i64,
     system_tech_ids_by_system: HashMap<i64, Vec<i64>>,
+    database_columns_by_system: HashMap<i64, Vec<DatabaseColumnRecord>>,
     fast_add_selected_catalog_tech_on_map: bool,
 
     map_positions: HashMap<i64, Pos2>,
@@ -293,6 +298,7 @@ impl SystemsCatalogApp {
             selected_system_id: None,
             selected_links: Vec::new(),
             selected_system_tech: Vec::new(),
+            selected_database_columns: Vec::new(),
             selected_cumulative_child_tech: Vec::new(),
             selected_notes: Vec::new(),
             selected_note_id_for_edit: None,
@@ -336,6 +342,7 @@ impl SystemsCatalogApp {
             new_tech_color: None,
             new_tech_display_priority: 0,
             system_tech_ids_by_system: HashMap::new(),
+            database_columns_by_system: HashMap::new(),
             fast_add_selected_catalog_tech_on_map: false,
             map_positions: HashMap::new(),
             zone_offsets_by_system: HashMap::new(),
@@ -555,12 +562,20 @@ impl SystemsCatalogApp {
             );
         }
         let assignments = self.repo.list_system_tech_assignments()?;
+        let database_columns = self.repo.list_database_columns()?;
         self.system_tech_ids_by_system.clear();
+        self.database_columns_by_system.clear();
         for (system_id, tech_id) in assignments {
             self.system_tech_ids_by_system
                 .entry(system_id)
                 .or_default()
                 .push(tech_id);
+        }
+        for column in database_columns {
+            self.database_columns_by_system
+                .entry(column.system_id)
+                .or_default()
+                .push(column);
         }
         self.new_system_assigned_tech_ids
             .retain(|tech_id| self.tech_catalog.iter().any(|tech| tech.id == *tech_id));
@@ -655,6 +670,19 @@ impl SystemsCatalogApp {
         self.selected_links = self.repo.list_links_for_system(system_id)?;
         self.selected_system_tech = self.repo.list_tech_for_system(system_id)?;
         self.selected_notes = self.repo.list_notes_for_system(system_id)?;
+        self.selected_database_columns = self
+            .database_columns_by_system
+            .get(&system_id)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|column| DatabaseColumnInput {
+                position: column.position,
+                column_name: column.column_name,
+                column_type: column.column_type,
+                constraints: column.constraints,
+            })
+            .collect();
 
         if let Some(selected_link_id) = self.selected_link_id_for_edit {
             let still_exists = self
@@ -1090,6 +1118,7 @@ impl SystemsCatalogApp {
         self.selected_map_system_ids.clear();
         self.selected_links.clear();
         self.selected_system_tech.clear();
+        self.selected_database_columns.clear();
         self.selected_cumulative_child_tech.clear();
         self.selected_notes.clear();
         self.selected_note_id_for_edit = None;

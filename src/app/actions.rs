@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::app::{CopiedSystemEntry, InteractionKind, SystemsCatalogApp, MAP_GRID_SPACING, MAP_NODE_SIZE};
+use crate::models::DatabaseColumnInput;
 
 impl SystemsCatalogApp {
     fn spawn_route_method_systems(
@@ -803,6 +804,37 @@ impl SystemsCatalogApp {
             None
         };
 
+        let database_columns_for_save = if system_type == "database" {
+            self.selected_database_columns
+                .iter()
+                .filter_map(|column| {
+                    let column_name = column.column_name.trim();
+                    let column_type = column.column_type.trim();
+                    if column_name.is_empty() || column_type.is_empty() {
+                        return None;
+                    }
+
+                    let constraints = column
+                        .constraints
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(ToOwned::to_owned);
+
+                    Some((column_name.to_owned(), column_type.to_owned(), constraints))
+                })
+                .enumerate()
+                .map(|(position, (column_name, column_type, constraints))| DatabaseColumnInput {
+                    position: position as i64,
+                    column_name,
+                    column_type,
+                    constraints,
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+
         let result = self
             .repo
             .update_system_details(
@@ -814,6 +846,14 @@ impl SystemsCatalogApp {
                 system_type.as_str(),
                 route_methods.as_deref(),
             )
+            .and_then(|_| {
+                if system_type == "database" {
+                    self.repo
+                        .replace_database_columns_for_system(system_id, &database_columns_for_save)
+                } else {
+                    Ok(())
+                }
+            })
             .and_then(|_| self.refresh_systems())
             .and_then(|_| self.load_selected_data(system_id))
             .and_then(|_| self.spawn_route_method_systems(system_id, &route_methods_set_for_spawn))

@@ -70,3 +70,21 @@ pub struct ZoneSystemOffset {
     pub offset_x: f32,
     pub offset_y: f32,
 }
+
+#[derive(Debug, Clone)]
+pub struct DatabaseColumnRecord {
+    pub id: i64,
+    pub system_id: i64,
+    pub position: i64,
+    pub column_name: String,
+    pub column_type: String,
+    pub constraints: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DatabaseColumnInput {
+    pub position: i64,
+    pub column_name: String,
+    pub column_type: String,
+    pub constraints: Option<String>,
+}

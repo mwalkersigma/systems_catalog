@@ -190,9 +190,13 @@ impl SystemsCatalogApp {
     }
 
     fn map_node_size_for(&self, label: &str) -> Vec2 {
-        let char_count = label.chars().count() as f32;
+        let max_line_char_count = label
+            .lines()
+            .map(|line| line.chars().count())
+            .max()
+            .unwrap_or(0) as f32;
         let minimum_required_width =
-            (char_count * MAP_CARD_CHAR_WIDTH_ESTIMATE) + MAP_CARD_HORIZONTAL_PADDING;
+            (max_line_char_count * MAP_CARD_CHAR_WIDTH_ESTIMATE) + MAP_CARD_HORIZONTAL_PADDING;
         let mut width = minimum_required_width.clamp(MAP_CARD_MIN_WIDTH, MAP_CARD_MAX_WIDTH);
 
         if self.snap_to_grid {
@@ -214,6 +218,49 @@ impl SystemsCatalogApp {
         Vec2::new(width, height)
     }
 
+    fn map_card_label_for_system(&self, system: &SystemRecord) -> String {
+        let prefix = match system.system_type.as_str() {
+            "route" | "api" => ICON_ROUTE,
+            "database" => ICON_DATABASE,
+            _ => "",
+        };
+
+        let title = if prefix.is_empty() {
+            system.name.clone()
+        } else {
+            format!("{prefix} {}", system.name)
+        };
+
+        if system.system_type != "database" {
+            return title;
+        }
+
+        let Some(columns) = self.database_columns_by_system.get(&system.id) else {
+            return title;
+        };
+
+        if columns.is_empty() {
+            return title;
+        }
+
+        let mut rows = Vec::with_capacity(columns.len() + 2);
+        rows.push(title);
+        rows.push("------------".to_owned());
+        for column in columns {
+            let mut line = format!("{} {}", column.column_name, column.column_type);
+            if let Some(constraints) = column.constraints.as_deref() {
+                let trimmed = constraints.trim();
+                if !trimmed.is_empty() {
+                    line.push(' ');
+                    line.push_str(trimmed);
+                }
+            }
+            rows.push(line);
+        }
+
+        rows.join("\n")
+    }
+
     fn max_chars_per_line_for_width(&self, width: f32) -> usize {
         let usable_width = (width - MAP_CARD_HORIZONTAL_PADDING).max(MAP_CARD_CHAR_WIDTH_ESTIMATE);
         (usable_width / MAP_CARD_CHAR_WIDTH_ESTIMATE)
@@ -222,65 +269,73 @@ impl SystemsCatalogApp {
     }
 
     fn wrap_label_for_width(&self, label: &str, width: f32) -> String {
-        let max_chars_per_line = self.max_chars_per_line_for_width(width);
-        if label.chars().count() <= max_chars_per_line {
-            return label.to_owned();
-        }
+        fn wrap_single_line(line: &str, max_chars_per_line: usize) -> String {
+            if line.chars().count() <= max_chars_per_line {
+                return line.to_owned();
+            }
 
-        let mut lines: Vec<String> = Vec::new();
-        let mut current_line = String::new();
+            let mut lines: Vec<String> = Vec::new();
+            let mut current_line = String::new();
 
-        for word in label.split_whitespace() {
-            let word_len = word.chars().count();
+            for word in line.split_whitespace() {
+                let word_len = word.chars().count();
 
-            if current_line.is_empty() {
-                if word_len <= max_chars_per_line {
+                if current_line.is_empty() {
+                    if word_len <= max_chars_per_line {
+                        current_line.push_str(word);
+                    } else {
+                        let mut chunk = String::new();
+                        for character in word.chars() {
+                            chunk.push(character);
+                            if chunk.chars().count() >= max_chars_per_line {
+                                lines.push(chunk);
+                                chunk = String::new();
+                            }
+                        }
+                        current_line = chunk;
+                    }
+                    continue;
+                }
+
+                let current_len = current_line.chars().count();
+                if current_len + 1 + word_len <= max_chars_per_line {
+                    current_line.push(' ');
                     current_line.push_str(word);
                 } else {
-                    let mut chunk = String::new();
-                    for character in word.chars() {
-                        chunk.push(character);
-                        if chunk.chars().count() >= max_chars_per_line {
-                            lines.push(chunk);
-                            chunk = String::new();
+                    lines.push(current_line);
+                    if word_len <= max_chars_per_line {
+                        current_line = word.to_owned();
+                    } else {
+                        let mut chunk = String::new();
+                        for character in word.chars() {
+                            chunk.push(character);
+                            if chunk.chars().count() >= max_chars_per_line {
+                                lines.push(chunk);
+                                chunk = String::new();
+                            }
                         }
+                        current_line = chunk;
                     }
-                    current_line = chunk;
                 }
-                continue;
             }
 
-            let current_len = current_line.chars().count();
-            if current_len + 1 + word_len <= max_chars_per_line {
-                current_line.push(' ');
-                current_line.push_str(word);
-            } else {
+            if !current_line.is_empty() {
                 lines.push(current_line);
-                if word_len <= max_chars_per_line {
-                    current_line = word.to_owned();
-                } else {
-                    let mut chunk = String::new();
-                    for character in word.chars() {
-                        chunk.push(character);
-                        if chunk.chars().count() >= max_chars_per_line {
-                            lines.push(chunk);
-                            chunk = String::new();
-                        }
-                    }
-                    current_line = chunk;
-                }
+            }
+
+            if lines.is_empty() {
+                line.to_owned()
+            } else {
+                lines.join("\n")
             }
         }
 
-        if !current_line.is_empty() {
-            lines.push(current_line);
-        }
-
-        if lines.is_empty() {
-            label.to_owned()
-        } else {
-            lines.join("\n")
-        }
+        let max_chars_per_line = self.max_chars_per_line_for_width(width);
+        label
+            .lines()
+            .map(|line| wrap_single_line(line, max_chars_per_line))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     fn estimate_wrapped_line_count(&self, label: &str, width: f32) -> usize {
@@ -318,7 +373,7 @@ impl SystemsCatalogApp {
                 continue;
             };
 
-            let other_size = self.map_node_size_for(other.name.as_str());
+            let other_size = self.map_node_size_for(self.map_card_label_for_system(other).as_str());
             let other_rect = Rect::from_min_size(other_position, other_size);
 
             if candidate_rect.intersects(other_rect) {
@@ -419,7 +474,6 @@ impl SystemsCatalogApp {
             InteractionKind::Push => self.interaction_push_line_style,
             InteractionKind::Bidirectional => self.interaction_bidirectional_line_style,
         };
-
         style.width = self.interaction_line_style.width;
 
         if let Some(override_color) = self.system_line_override_color(source_system_id) {
@@ -2648,6 +2702,78 @@ impl SystemsCatalogApp {
             });
         }
 
+        if self.selected_system_type == "database" {
+            ui.separator();
+            ui.label("Table columns");
+            ui.small("Format: name type constraints (optional)");
+
+            let mut row_to_remove: Option<usize> = None;
+            for (index, column) in self.selected_database_columns.iter_mut().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut column.column_name)
+                            .hint_text("column name")
+                            .desired_width(120.0),
+                    );
+                    ui.add(
+                        egui::TextEdit::singleline(&mut column.column_type)
+                            .hint_text("type")
+                            .desired_width(90.0),
+                    );
+
+                    let constraints = column.constraints.get_or_insert_with(String::new);
+                    ui.add(
+                        egui::TextEdit::singleline(constraints)
+                            .hint_text("constraints")
+                            .desired_width(140.0),
+                    );
+
+                    if ui.button("Remove").clicked() {
+                        row_to_remove = Some(index);
+                    }
+                });
+            }
+
+            if let Some(index) = row_to_remove {
+                self.selected_database_columns.remove(index);
+            }
+
+            ui.horizontal(|ui| {
+                if ui.button("Add column").clicked() {
+                    self.selected_database_columns
+                        .push(crate::models::DatabaseColumnInput {
+                            position: self.selected_database_columns.len() as i64,
+                            column_name: String::new(),
+                            column_type: "string".to_owned(),
+                            constraints: None,
+                        });
+                }
+
+                if self.selected_database_columns.is_empty() && ui.button("Add common starter").clicked() {
+                    self.selected_database_columns = vec![
+                        crate::models::DatabaseColumnInput {
+                            position: 0,
+                            column_name: "id".to_owned(),
+                            column_type: "string".to_owned(),
+                            constraints: Some("primary".to_owned()),
+                        },
+                        crate::models::DatabaseColumnInput {
+                            position: 1,
+                            column_name: "name".to_owned(),
+                            column_type: "string".to_owned(),
+                            constraints: None,
+                        },
+                        crate::models::DatabaseColumnInput {
+                            position: 2,
+                            column_name: "title".to_owned(),
+                            column_type: "string".to_owned(),
+                            constraints: None,
+                        },
+                    ];
+                }
+            });
+        }
+
         ui.horizontal(|ui| {
             if ui.button("Save details").clicked() {
                 self.update_selected_system_details();
@@ -3531,7 +3657,8 @@ impl SystemsCatalogApp {
         for system in &visible_systems {
             // This is where rendering the system cards happens.
             if let Some(local_position) = self.effective_map_position(system.id) {
-                let node_size_screen = self.map_node_size_for(system.name.as_str()) * zoom;
+                let node_size_screen =
+                    self.map_node_size_for(self.map_card_label_for_system(system).as_str()) * zoom;
                 let rect = Rect::from_min_size(to_screen(local_position), node_size_screen);
                 node_rects.insert(system.id, rect);
             }
@@ -3652,8 +3779,9 @@ impl SystemsCatalogApp {
                                             continue;
                                         };
 
-                                        let node_size =
-                                            self.map_node_size_for(system.name.as_str());
+                                        let node_size = self.map_node_size_for(
+                                            self.map_card_label_for_system(system).as_str(),
+                                        );
                                         let node_center = Pos2::new(
                                             system_position.x + (node_size.x * 0.5),
                                             system_position.y + (node_size.y * 0.5),
@@ -4054,7 +4182,7 @@ impl SystemsCatalogApp {
                 continue;
             };
 
-            let node_size = self.map_node_size_for(system.name.as_str());
+            let node_size = self.map_node_size_for(self.map_card_label_for_system(&system).as_str());
             let node_size_screen = node_size * zoom;
 
             let node_rect =
@@ -4182,7 +4310,11 @@ impl SystemsCatalogApp {
                                 .systems
                                 .iter()
                                 .find(|candidate| candidate.id == *move_id)
-                                .map(|candidate| self.map_node_size_for(candidate.name.as_str()))
+                                .map(|candidate| {
+                                    self.map_node_size_for(
+                                        self.map_card_label_for_system(candidate).as_str(),
+                                    )
+                                })
                                 .unwrap_or(node_size);
                             let clamped =
                                 self.clamp_node_position(map_rect, next_position, move_node_size);
@@ -4237,7 +4369,11 @@ impl SystemsCatalogApp {
                             .systems
                             .iter()
                             .find(|candidate| candidate.id == *persist_id)
-                            .map(|candidate| self.map_node_size_for(candidate.name.as_str()))
+                            .map(|candidate| {
+                                self.map_node_size_for(
+                                    self.map_card_label_for_system(candidate).as_str(),
+                                )
+                            })
                             .unwrap_or(MAP_NODE_SIZE);
                         let snapped = self.snap_to_open_grid_position(
                             *persist_id,
@@ -4331,18 +4467,7 @@ impl SystemsCatalogApp {
             let text_wrap_width =
                 (node_rect.width() - (MAP_CARD_HORIZONTAL_PADDING * self.map_zoom)).max(24.0);
             let wrapped_text = painter.layout(
-                {
-                    let prefix = match system.system_type.as_str() {
-                        "route" | "api" => ICON_ROUTE,
-                        "database" => ICON_DATABASE,
-                        _ => "",
-                    };
-                    if prefix.is_empty() {
-                        system.name.clone()
-                    } else {
-                        format!("{prefix} {}", system.name)
-                    }
-                },
+                self.map_card_label_for_system(&system),
                 font_id,
                 text_color,
                 text_wrap_width,
@@ -4470,7 +4595,9 @@ impl SystemsCatalogApp {
                     .systems
                     .iter()
                     .find(|candidate| candidate.id == *system_id)
-                    .map(|candidate| self.map_node_size_for(candidate.name.as_str()))
+                    .map(|candidate| {
+                        self.map_node_size_for(self.map_card_label_for_system(candidate).as_str())
+                    })
                     .unwrap_or(MAP_NODE_SIZE);
 
                 let preview_rect =
