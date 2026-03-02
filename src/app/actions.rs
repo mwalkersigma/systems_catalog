@@ -83,7 +83,48 @@ impl SystemsCatalogApp {
         let parent_zone_id =
             self.zone_parent_for_rect(x, y, clamped_width, clamped_height, None);
 
-        let zone_name = format!("Zone {}", self.zones.len() + 1);
+        // Create a temporary zone record to determine representative system
+        let temp_zone = crate::models::ZoneRecord {
+            id: 0, // Temporary ID
+            name: String::new(),
+            x,
+            y,
+            width: clamped_width,
+            height: clamped_height,
+            color: None,
+            render_priority: self.selected_zone_render_priority,
+            parent_zone_id,
+            minimized: false,
+            representative_system_id: None,
+        };
+
+        // Temporarily add to zones list to calculate system IDs
+        self.zones.push(temp_zone);
+        let zone_system_ids = self.zone_system_ids(0);
+        self.zones.pop(); // Remove temporary zone
+
+        // Determine default zone name based on representative system
+        let zone_name = if let Some(system_ids) = zone_system_ids {
+            // Find if there's a common ancestor (representative)
+            let mut candidates: Vec<i64> = system_ids
+                .iter()
+                .copied()
+                .filter(|candidate_id| {
+                    system_ids
+                        .iter()
+                        .all(|system_id| self.system_is_ancestor_or_self(*candidate_id, *system_id))
+                })
+                .collect();
+            candidates.sort_unstable();
+
+            if let Some(&representative_id) = candidates.first() {
+                self.system_name_by_id(representative_id)
+            } else {
+                format!("Zone {}", self.zones.len() + 1)
+            }
+        } else {
+            format!("Zone {}", self.zones.len() + 1)
+        };
         let color_value = Some(Self::color_to_setting_value(self.selected_zone_color));
 
         let result = self

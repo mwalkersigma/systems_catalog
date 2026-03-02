@@ -820,6 +820,14 @@ impl SystemsCatalogApp {
         let mut closest_hovered_interaction: Option<(crate::app::InteractionPopupState, f32)> =
             None;
 
+        // Check if we have a selected interaction link from the details panel
+        let selected_interaction_match = self.selected_link_id_for_edit.and_then(|link_id| {
+            self.selected_links
+                .iter()
+                .find(|link| link.id == link_id)
+                .map(|link| (link.source_system_id, link.target_system_id))
+        });
+
         for interaction in self.deduped_visible_interactions() {
             let source_system_id = interaction.source_system_id;
             let target_system_id = interaction.target_system_id;
@@ -838,8 +846,11 @@ impl SystemsCatalogApp {
                 || self.selected_map_system_ids.contains(&target_system_id);
             let has_any_selection =
                 selected_id.is_some() || !self.selected_map_system_ids.is_empty();
+            let is_selected_interaction = selected_interaction_match
+                .map(|(src, tgt)| src == source_system_id && tgt == target_system_id)
+                .unwrap_or(false);
 
-            let dimmed = has_any_selection && !(in_primary_selection || in_selection_set);
+            let dimmed = has_any_selection && !(in_primary_selection || in_selection_set || is_selected_interaction);
             let dimmed_for_tech = selected_id.is_some()
                 && tech_filter_active
                 && (!self
@@ -848,7 +859,7 @@ impl SystemsCatalogApp {
                     || !self
                         .systems_using_selected_catalog_tech
                         .contains(&target_system_id));
-            let boosted = in_primary_selection || in_selection_set;
+            let boosted = in_primary_selection || in_selection_set || is_selected_interaction;
             let in_focused_flow_path = match interaction.kind {
                 InteractionKind::Standard | InteractionKind::Push => {
                     focused_flow_edges.contains(&(source_system_id, target_system_id))
@@ -1449,6 +1460,95 @@ impl SystemsCatalogApp {
         self.show_hotkeys_modal = open;
     }
 
+    fn render_help_modal(&mut self, ctx: &egui::Context, title: &str, content: &str, modal: crate::app::AppModal) {
+        if !self.is_modal_open(modal) {
+            return;
+        }
+
+        let mut open = self.is_modal_open(modal);
+        egui::Window::new(title)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(700.0)
+            .default_height(500.0)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    ui.monospace(content);
+                });
+                ui.separator();
+                if ui.button("Close").clicked() {
+                    self.set_modal_open(modal, false);
+                }
+            });
+
+        self.set_modal_open(modal, open);
+    }
+
+    fn render_help_getting_started_modal(&mut self, ctx: &egui::Context) {
+        self.render_help_modal(
+            ctx,
+            "Getting Started",
+            crate::app::help_text::HelpText::getting_started(),
+            crate::app::AppModal::HelpGettingStarted,
+        );
+    }
+
+    fn render_help_creating_interactions_modal(&mut self, ctx: &egui::Context) {
+        self.render_help_modal(
+            ctx,
+            "Creating & Managing Interactions",
+            crate::app::help_text::HelpText::creating_interactions(),
+            crate::app::AppModal::HelpCreatingInteractions,
+        );
+    }
+
+    fn render_help_managing_technology_modal(&mut self, ctx: &egui::Context) {
+        self.render_help_modal(
+            ctx,
+            "Managing Your Tech Catalog",
+            crate::app::help_text::HelpText::managing_technology(),
+            crate::app::AppModal::HelpManagingTechnology,
+        );
+    }
+
+    fn render_help_understanding_map_modal(&mut self, ctx: &egui::Context) {
+        self.render_help_modal(
+            ctx,
+            "Understanding the Visual Map",
+            crate::app::help_text::HelpText::understanding_the_map(),
+            crate::app::AppModal::HelpUnderstandingMap,
+        );
+    }
+
+    fn render_help_zones_modal(&mut self, ctx: &egui::Context) {
+        self.render_help_modal(
+            ctx,
+            "Zones & Organization",
+            crate::app::help_text::HelpText::zones_and_organization(),
+            crate::app::AppModal::HelpZones,
+        );
+    }
+
+    fn render_help_keyboard_shortcuts_modal(&mut self, ctx: &egui::Context) {
+        self.render_help_modal(
+            ctx,
+            "Keyboard Shortcuts",
+            crate::app::help_text::HelpText::keyboard_shortcuts(),
+            crate::app::AppModal::HelpKeyboardShortcuts,
+        );
+    }
+
+    fn render_help_troubleshooting_modal(&mut self, ctx: &egui::Context) {
+        self.render_help_modal(
+            ctx,
+            "Troubleshooting & FAQ",
+            crate::app::help_text::HelpText::troubleshooting(),
+            crate::app::AppModal::HelpTroubleshooting,
+        );
+    }
+
+
     fn render_interaction_style_modal(&mut self, ctx: &egui::Context) {
         if !self.show_interaction_style_modal {
             return;
@@ -1948,10 +2048,10 @@ impl SystemsCatalogApp {
         ui.separator();
 
         ui.label("Name");
-        if ui
-            .text_edit_singleline(&mut self.selected_zone_name)
-            .changed()
-        {
+        let name_response = ui.text_edit_singleline(&mut self.selected_zone_name);
+        
+        // Save zone name when user presses Enter or loses focus
+        if name_response.lost_focus() {
             self.update_selected_zone_properties();
         }
 
@@ -4679,8 +4779,38 @@ impl eframe::App for SystemsCatalogApp {
                 self.render_stats_menu(ui);
 
                 ui.menu_button("Help", |ui| {
+                    if ui.button("Getting Started").clicked() {
+                        self.open_modal(AppModal::HelpGettingStarted);
+                        ui.close_menu();
+                    }
+                    if ui.button("Creating Interactions").clicked() {
+                        self.open_modal(AppModal::HelpCreatingInteractions);
+                        ui.close_menu();
+                    }
+                    if ui.button("Managing Technology").clicked() {
+                        self.open_modal(AppModal::HelpManagingTechnology);
+                        ui.close_menu();
+                    }
+                    if ui.button("Understanding the Map").clicked() {
+                        self.open_modal(AppModal::HelpUnderstandingMap);
+                        ui.close_menu();
+                    }
+                    if ui.button("Zones & Organization").clicked() {
+                        self.open_modal(AppModal::HelpZones);
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui.button("Keyboard Shortcuts").clicked() {
+                        self.open_modal(AppModal::HelpKeyboardShortcuts);
+                        ui.close_menu();
+                    }
                     if ui.button("Hotkeys              F1").clicked() {
                         self.open_modal(AppModal::Hotkeys);
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui.button("Troubleshooting & FAQ").clicked() {
+                        self.open_modal(AppModal::HelpTroubleshooting);
                         ui.close_menu();
                     }
                 });
@@ -4751,6 +4881,13 @@ impl eframe::App for SystemsCatalogApp {
         self.render_hotkeys_modal(ctx);
         self.render_interaction_style_modal(ctx);
         self.render_flow_inspector_modal(ctx);
+        self.render_help_getting_started_modal(ctx);
+        self.render_help_creating_interactions_modal(ctx);
+        self.render_help_managing_technology_modal(ctx);
+        self.render_help_understanding_map_modal(ctx);
+        self.render_help_zones_modal(ctx);
+        self.render_help_keyboard_shortcuts_modal(ctx);
+        self.render_help_troubleshooting_modal(ctx);
         self.save_ui_settings_if_dirty();
     }
 }

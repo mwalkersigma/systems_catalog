@@ -1,4 +1,5 @@
 mod actions;
+mod help_text;
 mod ui;
 
 use std::collections::{HashMap, HashSet};
@@ -88,6 +89,13 @@ pub enum AppModal {
     SaveCatalog,
     LoadCatalog,
     NewCatalogConfirm,
+    HelpGettingStarted,
+    HelpCreatingInteractions,
+    HelpManagingTechnology,
+    HelpUnderstandingMap,
+    HelpZones,
+    HelpKeyboardShortcuts,
+    HelpTroubleshooting,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -242,6 +250,13 @@ pub struct SystemsCatalogApp {
     show_save_catalog_modal: bool,
     show_load_catalog_modal: bool,
     show_new_catalog_confirm_modal: bool,
+    show_help_getting_started_modal: bool,
+    show_help_creating_interactions_modal: bool,
+    show_help_managing_technology_modal: bool,
+    show_help_understanding_map_modal: bool,
+    show_help_zones_modal: bool,
+    show_help_keyboard_shortcuts_modal: bool,
+    show_help_troubleshooting_modal: bool,
     modal_open_stack: Vec<AppModal>,
     save_catalog_path: String,
     load_catalog_path: String,
@@ -382,6 +397,13 @@ impl SystemsCatalogApp {
             show_save_catalog_modal: false,
             show_load_catalog_modal: false,
             show_new_catalog_confirm_modal: false,
+            show_help_getting_started_modal: false,
+            show_help_creating_interactions_modal: false,
+            show_help_managing_technology_modal: false,
+            show_help_understanding_map_modal: false,
+            show_help_zones_modal: false,
+            show_help_keyboard_shortcuts_modal: false,
+            show_help_troubleshooting_modal: false,
             modal_open_stack: Vec::new(),
             save_catalog_path: "systems_catalog_export.db".to_owned(),
             load_catalog_path: "systems_catalog_export.db".to_owned(),
@@ -453,6 +475,13 @@ impl SystemsCatalogApp {
             AppModal::SaveCatalog => self.show_save_catalog_modal,
             AppModal::LoadCatalog => self.show_load_catalog_modal,
             AppModal::NewCatalogConfirm => self.show_new_catalog_confirm_modal,
+            AppModal::HelpGettingStarted => self.show_help_getting_started_modal,
+            AppModal::HelpCreatingInteractions => self.show_help_creating_interactions_modal,
+            AppModal::HelpManagingTechnology => self.show_help_managing_technology_modal,
+            AppModal::HelpUnderstandingMap => self.show_help_understanding_map_modal,
+            AppModal::HelpZones => self.show_help_zones_modal,
+            AppModal::HelpKeyboardShortcuts => self.show_help_keyboard_shortcuts_modal,
+            AppModal::HelpTroubleshooting => self.show_help_troubleshooting_modal,
         }
     }
 
@@ -467,6 +496,13 @@ impl SystemsCatalogApp {
             AppModal::SaveCatalog => self.show_save_catalog_modal = is_open,
             AppModal::LoadCatalog => self.show_load_catalog_modal = is_open,
             AppModal::NewCatalogConfirm => self.show_new_catalog_confirm_modal = is_open,
+            AppModal::HelpGettingStarted => self.show_help_getting_started_modal = is_open,
+            AppModal::HelpCreatingInteractions => self.show_help_creating_interactions_modal = is_open,
+            AppModal::HelpManagingTechnology => self.show_help_managing_technology_modal = is_open,
+            AppModal::HelpUnderstandingMap => self.show_help_understanding_map_modal = is_open,
+            AppModal::HelpZones => self.show_help_zones_modal = is_open,
+            AppModal::HelpKeyboardShortcuts => self.show_help_keyboard_shortcuts_modal = is_open,
+            AppModal::HelpTroubleshooting => self.show_help_troubleshooting_modal = is_open,
         }
     }
 
