@@ -246,6 +246,7 @@ pub struct SystemsCatalogApp {
     save_catalog_path: String,
     load_catalog_path: String,
     recent_catalog_paths: Vec<String>,
+    show_left_sidebar: bool,
     active_sidebar_tab: SidebarTab,
 
     parent_line_style: LineStyle,
@@ -385,6 +386,7 @@ impl SystemsCatalogApp {
             save_catalog_path: "systems_catalog_export.db".to_owned(),
             load_catalog_path: "systems_catalog_export.db".to_owned(),
             recent_catalog_paths: Vec::new(),
+            show_left_sidebar: true,
             active_sidebar_tab: SidebarTab::Systems,
             parent_line_style: LineStyle {
                 width: 1.0,
