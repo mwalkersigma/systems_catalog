@@ -176,6 +176,8 @@ pub struct SystemsCatalogApp {
     edited_link_label: String,
     edited_link_note: String,
     edited_link_kind: InteractionKind,
+    edited_link_source_column_name: Option<String>,
+    edited_link_target_column_name: Option<String>,
 
     new_tech_name: String,
     new_tech_description: String,
@@ -328,6 +330,8 @@ impl SystemsCatalogApp {
             edited_link_label: String::new(),
             edited_link_note: String::new(),
             edited_link_kind: InteractionKind::Standard,
+            edited_link_source_column_name: None,
+            edited_link_target_column_name: None,
             new_tech_name: String::new(),
             new_tech_description: String::new(),
             new_tech_documentation_link: String::new(),
@@ -694,6 +698,8 @@ impl SystemsCatalogApp {
                 self.edited_link_label.clear();
                 self.edited_link_note.clear();
                 self.edited_link_kind = InteractionKind::Standard;
+                self.edited_link_source_column_name = None;
+                self.edited_link_target_column_name = None;
             }
         }
 
@@ -704,6 +710,8 @@ impl SystemsCatalogApp {
                 self.edited_link_note = first_link.note.clone();
                 self.edited_link_kind =
                     Self::interaction_kind_from_setting_value(first_link.kind.as_str());
+                self.edited_link_source_column_name = first_link.source_column_name.clone();
+                self.edited_link_target_column_name = first_link.target_column_name.clone();
             }
         }
 
@@ -1135,6 +1143,8 @@ impl SystemsCatalogApp {
         self.edited_link_label.clear();
         self.edited_link_note.clear();
         self.edited_link_kind = InteractionKind::Standard;
+        self.edited_link_source_column_name = None;
+        self.edited_link_target_column_name = None;
         self.map_link_drag_from = None;
         self.map_interaction_drag_from = None;
         self.map_interaction_drag_kind = InteractionKind::Standard;
@@ -1984,6 +1994,8 @@ impl SystemsCatalogApp {
                 self.edited_link_label.clear();
                 self.edited_link_note.clear();
                 self.edited_link_kind = InteractionKind::Standard;
+                self.edited_link_source_column_name = None;
+                self.edited_link_target_column_name = None;
             }
         }
     }

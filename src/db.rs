@@ -53,6 +53,8 @@ impl Repository {
                 label TEXT NOT NULL DEFAULT '',
                 note TEXT NOT NULL DEFAULT '',
                 kind TEXT NOT NULL DEFAULT 'standard',
+                source_column_name TEXT NULL,
+                target_column_name TEXT NULL,
                 UNIQUE(source_system_id, target_system_id),
                 FOREIGN KEY(source_system_id) REFERENCES systems(id) ON DELETE CASCADE,
                 FOREIGN KEY(target_system_id) REFERENCES systems(id) ON DELETE CASCADE
@@ -132,6 +134,7 @@ impl Repository {
         self.ensure_system_type_columns()?;
         self.ensure_links_note_column()?;
         self.ensure_links_kind_column()?;
+        self.ensure_links_column_reference_columns()?;
         self.ensure_tech_catalog_columns()?;
         self.ensure_tech_catalog_visual_columns()?;
         self.ensure_default_tech_catalog()?;
@@ -225,6 +228,20 @@ impl Repository {
                 "ALTER TABLE links ADD COLUMN kind TEXT NOT NULL DEFAULT 'standard'",
                 [],
             )?;
+        }
+
+        Ok(())
+    }
+
+    fn ensure_links_column_reference_columns(&self) -> Result<()> {
+        if !self.table_has_column("links", "source_column_name")? {
+            self.conn
+                .execute("ALTER TABLE links ADD COLUMN source_column_name TEXT NULL", [])?;
+        }
+
+        if !self.table_has_column("links", "target_column_name")? {
+            self.conn
+                .execute("ALTER TABLE links ADD COLUMN target_column_name TEXT NULL", [])?;
         }
 
         Ok(())
@@ -776,7 +793,7 @@ impl Repository {
     pub fn list_links_for_system(&self, system_id: i64) -> Result<Vec<SystemLink>> {
         let mut stmt = self.conn.prepare(
             r#"
-            SELECT id, source_system_id, target_system_id, label, note, kind
+            SELECT id, source_system_id, target_system_id, label, note, kind, source_column_name, target_column_name
             FROM links
             WHERE source_system_id = ?1 OR target_system_id = ?1
             ORDER BY id DESC
@@ -792,6 +809,8 @@ impl Repository {
                     label: row.get(3)?,
                     note: row.get(4)?,
                     kind: row.get(5)?,
+                    source_column_name: row.get(6)?,
+                    target_column_name: row.get(7)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -805,13 +824,22 @@ impl Repository {
         target_system_id: i64,
         label: &str,
         kind: &str,
+        source_column_name: Option<&str>,
+        target_column_name: Option<&str>,
     ) -> Result<()> {
         self.conn.execute(
             r#"
-            INSERT INTO links (source_system_id, target_system_id, label, note, kind)
-            VALUES (?1, ?2, ?3, '', ?4)
+            INSERT INTO links (source_system_id, target_system_id, label, note, kind, source_column_name, target_column_name)
+            VALUES (?1, ?2, ?3, '', ?4, ?5, ?6)
             "#,
-            params![source_system_id, target_system_id, label, kind],
+            params![
+                source_system_id,
+                target_system_id,
+                label,
+                kind,
+                source_column_name,
+                target_column_name
+            ],
         )?;
         Ok(())
     }
@@ -822,16 +850,27 @@ impl Repository {
         label: &str,
         note: &str,
         kind: &str,
+        source_column_name: Option<&str>,
+        target_column_name: Option<&str>,
     ) -> Result<()> {
         self.conn.execute(
             r#"
             UPDATE links
             SET label = ?2,
                 note = ?3,
-                kind = ?4
+                kind = ?4,
+                source_column_name = ?5,
+                target_column_name = ?6
             WHERE id = ?1
             "#,
-            params![link_id, label, note, kind],
+            params![
+                link_id,
+                label,
+                note,
+                kind,
+                source_column_name,
+                target_column_name
+            ],
         )?;
 
         Ok(())
@@ -852,7 +891,7 @@ impl Repository {
     pub fn list_links(&self) -> Result<Vec<SystemLink>> {
         let mut stmt = self.conn.prepare(
             r#"
-            SELECT id, source_system_id, target_system_id, label, note, kind
+            SELECT id, source_system_id, target_system_id, label, note, kind, source_column_name, target_column_name
             FROM links
             ORDER BY id DESC
             "#,
@@ -867,6 +906,8 @@ impl Repository {
                     label: row.get(3)?,
                     note: row.get(4)?,
                     kind: row.get(5)?,
+                    source_column_name: row.get(6)?,
+                    target_column_name: row.get(7)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1046,15 +1087,35 @@ impl Repository {
                 [],
                 |row| row.get(0),
             )?;
+            let imported_has_links_source_column_name: i64 = self.conn.query_row(
+                "SELECT COUNT(*) FROM imported.pragma_table_info('links') WHERE name = 'source_column_name'",
+                [],
+                |row| row.get(0),
+            )?;
+            let imported_has_links_target_column_name: i64 = self.conn.query_row(
+                "SELECT COUNT(*) FROM imported.pragma_table_info('links') WHERE name = 'target_column_name'",
+                [],
+                |row| row.get(0),
+            )?;
             let note_select = if imported_has_links_note > 0 { "note" } else { "''" };
             let kind_select = if imported_has_links_kind > 0 {
                 "kind"
             } else {
                 "'standard'"
             };
+            let source_column_select = if imported_has_links_source_column_name > 0 {
+                "source_column_name"
+            } else {
+                "NULL"
+            };
+            let target_column_select = if imported_has_links_target_column_name > 0 {
+                "target_column_name"
+            } else {
+                "NULL"
+            };
 
             let links_insert_sql = format!(
-                "INSERT INTO links (id, source_system_id, target_system_id, label, note, kind) SELECT id, source_system_id, target_system_id, label, {note_select}, {kind_select} FROM imported.links"
+                "INSERT INTO links (id, source_system_id, target_system_id, label, note, kind, source_column_name, target_column_name) SELECT id, source_system_id, target_system_id, label, {note_select}, {kind_select}, {source_column_select}, {target_column_select} FROM imported.links"
             );
             self.conn.execute(links_insert_sql.as_str(), [])?;
             self.conn.execute(

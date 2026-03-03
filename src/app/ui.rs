@@ -245,13 +245,13 @@ impl SystemsCatalogApp {
 
         let mut rows = Vec::with_capacity(columns.len() + 2);
         rows.push(title);
-        rows.push("------------".to_owned());
+        rows.push("column | type | constraints".to_owned());
         for column in columns {
-            let mut line = format!("{} {}", column.column_name, column.column_type);
+            let mut line = format!("{} | {}", column.column_name, column.column_type);
             if let Some(constraints) = column.constraints.as_deref() {
                 let trimmed = constraints.trim();
                 if !trimmed.is_empty() {
-                    line.push(' ');
+                    line.push_str(" | ");
                     line.push_str(trimmed);
                 }
             }
@@ -259,6 +259,23 @@ impl SystemsCatalogApp {
         }
 
         rows.join("\n")
+    }
+
+    fn database_column_names_for_system(&self, system_id: i64) -> Vec<String> {
+        self.database_columns_by_system
+            .get(&system_id)
+            .map(|columns| {
+                let mut names = columns
+                    .iter()
+                    .map(|column| column.column_name.trim())
+                    .filter(|value| !value.is_empty())
+                    .map(|value| value.to_owned())
+                    .collect::<Vec<_>>();
+                names.sort();
+                names.dedup();
+                names
+            })
+            .unwrap_or_default()
     }
 
     fn max_chars_per_line_for_width(&self, width: f32) -> usize {
@@ -2928,6 +2945,10 @@ impl SystemsCatalogApp {
                             self.edited_link_note = link.note.clone();
                             self.edited_link_kind =
                                 Self::interaction_kind_from_setting_value(link.kind.as_str());
+                            self.edited_link_source_column_name =
+                                link.source_column_name.clone();
+                            self.edited_link_target_column_name =
+                                link.target_column_name.clone();
                         }
                     }
                 });
@@ -2960,6 +2981,61 @@ impl SystemsCatalogApp {
                 });
             ui.label("Interaction note");
             ui.add(egui::TextEdit::multiline(&mut self.edited_link_note).desired_rows(3));
+
+            if let Some(link_id) = self.selected_link_id_for_edit {
+                if let Some(link) = self.selected_links.iter().find(|link| link.id == link_id) {
+                    let source_columns = self.database_column_names_for_system(link.source_system_id);
+                    let target_columns = self.database_column_names_for_system(link.target_system_id);
+
+                    if !source_columns.is_empty() || !target_columns.is_empty() {
+                        ui.separator();
+                        ui.label("Column-level mapping (FK style)");
+
+                        let source_label = self
+                            .edited_link_source_column_name
+                            .clone()
+                            .unwrap_or_else(|| "(none)".to_owned());
+                        egui::ComboBox::from_label("Source column")
+                            .selected_text(source_label)
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(
+                                    &mut self.edited_link_source_column_name,
+                                    None,
+                                    "(none)",
+                                );
+                                for column_name in &source_columns {
+                                    ui.selectable_value(
+                                        &mut self.edited_link_source_column_name,
+                                        Some(column_name.clone()),
+                                        column_name,
+                                    );
+                                }
+                            });
+
+                        let target_label = self
+                            .edited_link_target_column_name
+                            .clone()
+                            .unwrap_or_else(|| "(none)".to_owned());
+                        egui::ComboBox::from_label("Target column")
+                            .selected_text(target_label)
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(
+                                    &mut self.edited_link_target_column_name,
+                                    None,
+                                    "(none)",
+                                );
+                                for column_name in &target_columns {
+                                    ui.selectable_value(
+                                        &mut self.edited_link_target_column_name,
+                                        Some(column_name.clone()),
+                                        column_name,
+                                    );
+                                }
+                            });
+                    }
+                }
+            }
+
             ui.horizontal(|ui| {
                 if ui.button("Update interaction").clicked() {
                     self.update_selected_link();
@@ -3704,6 +3780,23 @@ impl SystemsCatalogApp {
                             Sense::click_and_drag(),
                         ))
                     };
+
+                    if move_response.clicked() {
+                        if let Some(pointer_pos) = ui.input(|input| input.pointer.interact_pos()) {
+                            let clicked_zone_id = zone_render_items
+                                .iter()
+                                .rev()
+                                .find(|zone| zone.rect.contains(pointer_pos))
+                                .map(|zone| zone.id);
+
+                            if let Some(clicked_zone_id) = clicked_zone_id {
+                                if clicked_zone_id != selected_zone_id {
+                                    self.select_zone(clicked_zone_id);
+                                    self.status_message = "Zone selected".to_owned();
+                                }
+                            }
+                        }
+                    }
 
                     if resize_response
                         .as_ref()
@@ -4463,24 +4556,93 @@ impl SystemsCatalogApp {
             let text_scale_multiplier = self.map_text_scale_multiplier();
             let font_size =
                 ((15.0 * self.map_zoom).clamp(8.0, 22.0) * text_scale_multiplier).clamp(6.0, 22.0);
-            let font_id = FontId::proportional(font_size);
-            let text_wrap_width =
-                (node_rect.width() - (MAP_CARD_HORIZONTAL_PADDING * self.map_zoom)).max(24.0);
-            let wrapped_text = painter.layout(
-                self.map_card_label_for_system(&system),
-                font_id,
-                text_color,
-                text_wrap_width,
-            );
-            let text_pos = Pos2::new(
-                node_rect.center().x - (wrapped_text.size().x * 0.5),
-                node_rect.center().y - (wrapped_text.size().y * 0.5),
-            );
-            painter.with_clip_rect(node_rect.shrink(1.0)).galley(
-                text_pos,
-                wrapped_text,
-                text_color,
-            );
+
+            let database_columns = self
+                .database_columns_by_system
+                .get(&system.id)
+                .cloned()
+                .unwrap_or_default();
+
+            if system.system_type == "database" && !database_columns.is_empty() {
+                let header_font = FontId::proportional(font_size);
+                let row_font = FontId::monospace((font_size * 0.86).clamp(6.0, 18.0));
+
+                let title = format!("{} {}", ICON_DATABASE, system.name);
+                let top_padding = (8.0 * self.map_zoom).clamp(4.0, 10.0);
+                let left_padding = (8.0 * self.map_zoom).clamp(4.0, 10.0);
+                let row_height = (16.0 * self.map_zoom).clamp(10.0, 22.0);
+                let separator_y = node_rect.top() + top_padding + row_height;
+
+                painter.text(
+                    Pos2::new(node_rect.center().x, node_rect.top() + top_padding),
+                    egui::Align2::CENTER_TOP,
+                    title,
+                    header_font,
+                    text_color,
+                );
+
+                painter.line_segment(
+                    [
+                        Pos2::new(node_rect.left() + 4.0, separator_y),
+                        Pos2::new(node_rect.right() - 4.0, separator_y),
+                    ],
+                    Stroke::new(1.0, Color32::from_gray(96)),
+                );
+
+                let mut row_y = separator_y + 4.0;
+                for column in database_columns {
+                    if row_y + row_height > node_rect.bottom() - 2.0 {
+                        break;
+                    }
+
+                    let mut row_text = format!("{} | {}", column.column_name, column.column_type);
+                    if let Some(constraints) = column.constraints.as_deref() {
+                        let trimmed = constraints.trim();
+                        if !trimmed.is_empty() {
+                            row_text.push_str(" | ");
+                            row_text.push_str(trimmed);
+                        }
+                    }
+
+                    painter.text(
+                        Pos2::new(node_rect.left() + left_padding, row_y),
+                        egui::Align2::LEFT_TOP,
+                        row_text,
+                        row_font.clone(),
+                        text_color,
+                    );
+
+                    let line_y = row_y + row_height - 2.0;
+                    painter.line_segment(
+                        [
+                            Pos2::new(node_rect.left() + 4.0, line_y),
+                            Pos2::new(node_rect.right() - 4.0, line_y),
+                        ],
+                        Stroke::new(1.0, Color32::from_gray(72)),
+                    );
+
+                    row_y += row_height;
+                }
+            } else {
+                let font_id = FontId::proportional(font_size);
+                let text_wrap_width =
+                    (node_rect.width() - (MAP_CARD_HORIZONTAL_PADDING * self.map_zoom)).max(24.0);
+                let wrapped_text = painter.layout(
+                    self.map_card_label_for_system(&system),
+                    font_id,
+                    text_color,
+                    text_wrap_width,
+                );
+                let text_pos = Pos2::new(
+                    node_rect.center().x - (wrapped_text.size().x * 0.5),
+                    node_rect.center().y - (wrapped_text.size().y * 0.5),
+                );
+                painter.with_clip_rect(node_rect.shrink(1.0)).galley(
+                    text_pos,
+                    wrapped_text,
+                    text_color,
+                );
+            }
 
             let has_children = self
                 .systems

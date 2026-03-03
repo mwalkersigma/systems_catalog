@@ -1045,7 +1045,14 @@ impl SystemsCatalogApp {
 
         let result = self
             .repo
-            .update_link_details(link_id, label, note, kind)
+            .update_link_details(
+                link_id,
+                label,
+                note,
+                kind,
+                self.edited_link_source_column_name.as_deref(),
+                self.edited_link_target_column_name.as_deref(),
+            )
             .and_then(|_| self.refresh_systems())
             .and_then(|_| self.load_selected_data(system_id));
 
@@ -1544,6 +1551,8 @@ impl SystemsCatalogApp {
                 target_id,
                 label,
                 Self::interaction_kind_to_setting_value(kind),
+                None,
+                None,
             )
             .and_then(|_| self.refresh_systems())
             .and_then(|_| self.load_selected_data(source_id));

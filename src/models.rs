@@ -25,6 +25,8 @@ pub struct SystemLink {
     pub label: String,
     pub note: String,
     pub kind: String,
+    pub source_column_name: Option<String>,
+    pub target_column_name: Option<String>,
 }
 
 /// Notes attached to one system.
