@@ -506,6 +506,21 @@ impl Repository {
         Ok(columns.iter().any(|column| column == column_name))
     }
 
+    fn attached_table_has_column(
+        &self,
+        schema_name: &str,
+        table_name: &str,
+        column_name: &str,
+    ) -> Result<bool> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info(?1, ?2) WHERE name = ?3",
+            params![table_name, schema_name, column_name],
+            |row| row.get(0),
+        )?;
+
+        Ok(count > 0)
+    }
+
     pub fn list_systems(&self) -> Result<Vec<SystemRecord>> {
         let mut stmt = self.conn.prepare(
             r#"
@@ -968,75 +983,51 @@ impl Repository {
             self.conn.execute("DELETE FROM zones", [])?;
             self.conn.execute("DELETE FROM zone_system_offsets", [])?;
 
-            let imported_has_systems_display_name: i64 = self.conn.query_row(
-                "SELECT COUNT(*) FROM imported.pragma_table_info('systems') WHERE name = 'display_name'",
-                [],
-                |row| row.get(0),
-            )?;
-            let imported_has_systems_map_x: i64 = self.conn.query_row(
-                "SELECT COUNT(*) FROM imported.pragma_table_info('systems') WHERE name = 'map_x'",
-                [],
-                |row| row.get(0),
-            )?;
-            let imported_has_systems_map_y: i64 = self.conn.query_row(
-                "SELECT COUNT(*) FROM imported.pragma_table_info('systems') WHERE name = 'map_y'",
-                [],
-                |row| row.get(0),
-            )?;
-            let imported_has_systems_line_color_override: i64 = self.conn.query_row(
-                "SELECT COUNT(*) FROM imported.pragma_table_info('systems') WHERE name = 'line_color_override'",
-                [],
-                |row| row.get(0),
-            )?;
-            let imported_has_systems_naming_root: i64 = self.conn.query_row(
-                "SELECT COUNT(*) FROM imported.pragma_table_info('systems') WHERE name = 'naming_root'",
-                [],
-                |row| row.get(0),
-            )?;
-            let imported_has_systems_naming_delimiter: i64 = self.conn.query_row(
-                "SELECT COUNT(*) FROM imported.pragma_table_info('systems') WHERE name = 'naming_delimiter'",
-                [],
-                |row| row.get(0),
-            )?;
-            let imported_has_systems_system_type: i64 = self.conn.query_row(
-                "SELECT COUNT(*) FROM imported.pragma_table_info('systems') WHERE name = 'system_type'",
-                [],
-                |row| row.get(0),
-            )?;
-            let imported_has_systems_route_methods: i64 = self.conn.query_row(
-                "SELECT COUNT(*) FROM imported.pragma_table_info('systems') WHERE name = 'route_methods'",
-                [],
-                |row| row.get(0),
-            )?;
+            let imported_has_systems_display_name =
+                self.attached_table_has_column("imported", "systems", "display_name")?;
+            let imported_has_systems_map_x =
+                self.attached_table_has_column("imported", "systems", "map_x")?;
+            let imported_has_systems_map_y =
+                self.attached_table_has_column("imported", "systems", "map_y")?;
+            let imported_has_systems_line_color_override =
+                self.attached_table_has_column("imported", "systems", "line_color_override")?;
+            let imported_has_systems_naming_root =
+                self.attached_table_has_column("imported", "systems", "naming_root")?;
+            let imported_has_systems_naming_delimiter =
+                self.attached_table_has_column("imported", "systems", "naming_delimiter")?;
+            let imported_has_systems_system_type =
+                self.attached_table_has_column("imported", "systems", "system_type")?;
+            let imported_has_systems_route_methods =
+                self.attached_table_has_column("imported", "systems", "route_methods")?;
 
-            let display_name_select = if imported_has_systems_display_name > 0 {
+            let display_name_select = if imported_has_systems_display_name {
                 "display_name"
             } else {
                 "name"
             };
-            let map_x_select = if imported_has_systems_map_x > 0 { "map_x" } else { "NULL" };
-            let map_y_select = if imported_has_systems_map_y > 0 { "map_y" } else { "NULL" };
-            let line_color_override_select = if imported_has_systems_line_color_override > 0 {
+            let map_x_select = if imported_has_systems_map_x { "map_x" } else { "NULL" };
+            let map_y_select = if imported_has_systems_map_y { "map_y" } else { "NULL" };
+            let line_color_override_select = if imported_has_systems_line_color_override {
                 "line_color_override"
             } else {
                 "NULL"
             };
-            let naming_root_select = if imported_has_systems_naming_root > 0 {
+            let naming_root_select = if imported_has_systems_naming_root {
                 "naming_root"
             } else {
                 "0"
             };
-            let naming_delimiter_select = if imported_has_systems_naming_delimiter > 0 {
+            let naming_delimiter_select = if imported_has_systems_naming_delimiter {
                 "naming_delimiter"
             } else {
                 "'/'"
             };
-            let system_type_select = if imported_has_systems_system_type > 0 {
+            let system_type_select = if imported_has_systems_system_type {
                 "system_type"
             } else {
                 "'service'"
             };
-            let route_methods_select = if imported_has_systems_route_methods > 0 {
+            let route_methods_select = if imported_has_systems_route_methods {
                 "route_methods"
             } else {
                 "NULL"
@@ -1047,38 +1038,26 @@ impl Repository {
             );
             self.conn.execute(systems_insert_sql.as_str(), [])?;
 
-            let imported_has_links_note: i64 = self.conn.query_row(
-                "SELECT COUNT(*) FROM imported.pragma_table_info('links') WHERE name = 'note'",
-                [],
-                |row| row.get(0),
-            )?;
-            let imported_has_links_kind: i64 = self.conn.query_row(
-                "SELECT COUNT(*) FROM imported.pragma_table_info('links') WHERE name = 'kind'",
-                [],
-                |row| row.get(0),
-            )?;
-            let imported_has_links_source_column_name: i64 = self.conn.query_row(
-                "SELECT COUNT(*) FROM imported.pragma_table_info('links') WHERE name = 'source_column_name'",
-                [],
-                |row| row.get(0),
-            )?;
-            let imported_has_links_target_column_name: i64 = self.conn.query_row(
-                "SELECT COUNT(*) FROM imported.pragma_table_info('links') WHERE name = 'target_column_name'",
-                [],
-                |row| row.get(0),
-            )?;
-            let note_select = if imported_has_links_note > 0 { "note" } else { "''" };
-            let kind_select = if imported_has_links_kind > 0 {
+            let imported_has_links_note =
+                self.attached_table_has_column("imported", "links", "note")?;
+            let imported_has_links_kind =
+                self.attached_table_has_column("imported", "links", "kind")?;
+            let imported_has_links_source_column_name =
+                self.attached_table_has_column("imported", "links", "source_column_name")?;
+            let imported_has_links_target_column_name =
+                self.attached_table_has_column("imported", "links", "target_column_name")?;
+            let note_select = if imported_has_links_note { "note" } else { "''" };
+            let kind_select = if imported_has_links_kind {
                 "kind"
             } else {
                 "'standard'"
             };
-            let source_column_select = if imported_has_links_source_column_name > 0 {
+            let source_column_select = if imported_has_links_source_column_name {
                 "source_column_name"
             } else {
                 "NULL"
             };
-            let target_column_select = if imported_has_links_target_column_name > 0 {
+            let target_column_select = if imported_has_links_target_column_name {
                 "target_column_name"
             } else {
                 "NULL"
@@ -1125,46 +1104,34 @@ impl Repository {
             let imported_has_zones: i64 = zone_table_stmt.query_row([], |row| row.get(0))?;
 
             if imported_has_zones > 0 {
-                let mut imported_zone_priority_column_stmt = self.conn.prepare(
-                    "SELECT COUNT(*) FROM imported.pragma_table_info('zones') WHERE name = 'render_priority'",
+                let imported_has_zone_priority =
+                    self.attached_table_has_column("imported", "zones", "render_priority")?;
+                let imported_has_zone_minimized =
+                    self.attached_table_has_column("imported", "zones", "minimized")?;
+                let imported_has_zone_parent =
+                    self.attached_table_has_column("imported", "zones", "parent_zone_id")?;
+                let imported_has_zone_representative = self.attached_table_has_column(
+                    "imported",
+                    "zones",
+                    "representative_system_id",
                 )?;
-                let imported_has_zone_priority: i64 =
-                    imported_zone_priority_column_stmt.query_row([], |row| row.get(0))?;
 
-                let mut imported_zone_minimized_column_stmt = self.conn.prepare(
-                    "SELECT COUNT(*) FROM imported.pragma_table_info('zones') WHERE name = 'minimized'",
-                )?;
-                let imported_has_zone_minimized: i64 =
-                    imported_zone_minimized_column_stmt.query_row([], |row| row.get(0))?;
-
-                let mut imported_zone_parent_column_stmt = self.conn.prepare(
-                    "SELECT COUNT(*) FROM imported.pragma_table_info('zones') WHERE name = 'parent_zone_id'",
-                )?;
-                let imported_has_zone_parent: i64 =
-                    imported_zone_parent_column_stmt.query_row([], |row| row.get(0))?;
-
-                let mut imported_zone_representative_column_stmt = self.conn.prepare(
-                    "SELECT COUNT(*) FROM imported.pragma_table_info('zones') WHERE name = 'representative_system_id'",
-                )?;
-                let imported_has_zone_representative: i64 =
-                    imported_zone_representative_column_stmt.query_row([], |row| row.get(0))?;
-
-                let render_priority_select = if imported_has_zone_priority > 0 {
+                let render_priority_select = if imported_has_zone_priority {
                     "render_priority"
                 } else {
                     "1"
                 };
-                let minimized_select = if imported_has_zone_minimized > 0 {
+                let minimized_select = if imported_has_zone_minimized {
                     "minimized"
                 } else {
                     "0"
                 };
-                let parent_select = if imported_has_zone_parent > 0 {
+                let parent_select = if imported_has_zone_parent {
                     "parent_zone_id"
                 } else {
                     "NULL"
                 };
-                let representative_select = if imported_has_zone_representative > 0 {
+                let representative_select = if imported_has_zone_representative {
                     "representative_system_id"
                 } else {
                     "NULL"
@@ -1188,10 +1155,10 @@ impl Repository {
                 )?;
             }
 
-            self.conn.execute("DETACH DATABASE imported", [])?;
             Ok(())
         })();
 
+        let _ = self.conn.execute("DETACH DATABASE imported", []);
         self.conn.execute_batch("PRAGMA foreign_keys = ON;")?;
         result
     }

@@ -197,6 +197,16 @@ pub struct SystemsCatalogApp {
     fast_add_selected_catalog_tech_on_map: bool,
 
     map_positions: HashMap<i64, Pos2>,
+    map_card_label_cache: HashMap<i64, String>,
+    map_node_size_cache: HashMap<i64, Vec2>,
+    /// Per-frame cache: set of all system IDs for quick existence checks.
+    system_id_set: HashSet<i64>,
+    /// Per-frame cache: set of IDs that have at least one child.
+    parent_ids_with_children: HashSet<i64>,
+    /// Per-frame cache: system_id → parent_id for O(1) parent chain walks.
+    parent_by_system_id: HashMap<i64, Option<i64>>,
+    /// Per-frame cache: visible system IDs (hierarchy walk result).
+    cached_visible_system_ids: Option<HashSet<i64>>,
     zone_offsets_by_system: HashMap<i64, (i64, Pos2)>,
     zones: Vec<ZoneRecord>,
     selected_zone_id: Option<i64>,
@@ -264,10 +274,16 @@ pub struct SystemsCatalogApp {
     show_help_zones_modal: bool,
     show_help_keyboard_shortcuts_modal: bool,
     show_help_troubleshooting_modal: bool,
+    show_debug_inspection_window: bool,
+    show_debug_memory_window: bool,
     modal_open_stack: Vec<AppModal>,
     save_catalog_path: String,
     load_catalog_path: String,
     recent_catalog_paths: Vec<String>,
+    current_catalog_name: String,
+    current_catalog_path: String,
+    new_catalog_name: String,
+    new_catalog_directory: String,
     show_left_sidebar: bool,
     active_sidebar_tab: SidebarTab,
 
@@ -349,6 +365,12 @@ impl SystemsCatalogApp {
             database_columns_by_system: HashMap::new(),
             fast_add_selected_catalog_tech_on_map: false,
             map_positions: HashMap::new(),
+            map_card_label_cache: HashMap::new(),
+            map_node_size_cache: HashMap::new(),
+            system_id_set: HashSet::new(),
+            parent_ids_with_children: HashSet::new(),
+            parent_by_system_id: HashMap::new(),
+            cached_visible_system_ids: None,
             zone_offsets_by_system: HashMap::new(),
             zones: Vec::new(),
             selected_zone_id: None,
@@ -415,10 +437,16 @@ impl SystemsCatalogApp {
             show_help_zones_modal: false,
             show_help_keyboard_shortcuts_modal: false,
             show_help_troubleshooting_modal: false,
+            show_debug_inspection_window: false,
+            show_debug_memory_window: false,
             modal_open_stack: Vec::new(),
             save_catalog_path: "systems_catalog_export.db".to_owned(),
             load_catalog_path: "systems_catalog_export.db".to_owned(),
             recent_catalog_paths: Vec::new(),
+            current_catalog_name: "Working Catalog".to_owned(),
+            current_catalog_path: String::new(),
+            new_catalog_name: String::new(),
+            new_catalog_directory: String::new(),
             show_left_sidebar: true,
             active_sidebar_tab: SidebarTab::Systems,
             parent_line_style: LineStyle {
@@ -581,6 +609,9 @@ impl SystemsCatalogApp {
                 .or_default()
                 .push(column);
         }
+        self.map_card_label_cache.clear();
+        self.map_node_size_cache.clear();
+        self.rebuild_system_index_caches();
         self.new_system_assigned_tech_ids
             .retain(|tech_id| self.tech_catalog.iter().any(|tech| tech.id == *tech_id));
         if let Some(tech_id) = self.new_system_tech_id_for_assignment {
@@ -591,19 +622,19 @@ impl SystemsCatalogApp {
         }
         self.refresh_selected_tech_highlight();
 
+        let zone_id_set: HashSet<i64> = self.zones.iter().map(|zone| zone.id).collect();
+
         self.map_positions
-            .retain(|system_id, _| self.systems.iter().any(|system| system.id == *system_id));
+            .retain(|system_id, _| self.system_id_set.contains(system_id));
 
         self.zone_offsets_by_system.retain(|system_id, (zone_id, _)| {
-            let system_exists = self.systems.iter().any(|system| system.id == *system_id);
-            let zone_exists = self.zones.iter().any(|zone| zone.id == *zone_id);
-            system_exists && zone_exists
+            self.system_id_set.contains(system_id) && zone_id_set.contains(zone_id)
         });
 
         self.collapsed_system_ids
-            .retain(|system_id| self.systems.iter().any(|system| system.id == *system_id));
+            .retain(|system_id| self.system_id_set.contains(system_id));
         self.auto_collapsed_zone_representative_ids
-            .retain(|system_id| self.systems.iter().any(|system| system.id == *system_id));
+            .retain(|system_id| self.system_id_set.contains(system_id));
 
         self.sync_zone_representative_collapsed_state();
 
@@ -615,8 +646,7 @@ impl SystemsCatalogApp {
         }
 
         if let Some(selected) = self.selected_system_id {
-            let still_exists = self.systems.iter().any(|system| system.id == selected);
-            if !still_exists {
+            if !self.system_id_set.contains(&selected) {
                 self.clear_selection();
             }
         }
@@ -633,7 +663,7 @@ impl SystemsCatalogApp {
         }
 
         if let Some(selected_zone_id) = self.selected_zone_id {
-            if self.zones.iter().any(|zone| zone.id == selected_zone_id) {
+            if zone_id_set.contains(&selected_zone_id) {
                 self.select_zone(selected_zone_id);
             } else {
                 self.selected_zone_id = None;
@@ -924,10 +954,47 @@ impl SystemsCatalogApp {
     }
 
     fn visible_system_ids(&self) -> HashSet<i64> {
+        if let Some(ref cached) = self.cached_visible_system_ids {
+            return cached.clone();
+        }
         self.visible_hierarchy_rows()
             .into_iter()
             .map(|(_, system_id, _, _, _)| system_id)
             .collect()
+    }
+
+    /// Call once when `self.systems` changes to rebuild O(1) lookup structures.
+    fn rebuild_system_index_caches(&mut self) {
+        self.system_id_set = self.systems.iter().map(|system| system.id).collect();
+        self.parent_ids_with_children.clear();
+        self.parent_by_system_id.clear();
+        for system in &self.systems {
+            self.parent_by_system_id.insert(system.id, system.parent_id);
+            if let Some(parent_id) = system.parent_id {
+                self.parent_ids_with_children.insert(parent_id);
+            }
+        }
+        self.cached_visible_system_ids = None;
+    }
+
+    /// Compute visible IDs once per frame, then cache for the remainder.
+    fn refresh_visible_system_ids_cache(&mut self) {
+        if self.cached_visible_system_ids.is_none() {
+            let ids = self
+                .visible_hierarchy_rows()
+                .into_iter()
+                .map(|(_, system_id, _, _, _)| system_id)
+                .collect();
+            self.cached_visible_system_ids = Some(ids);
+        }
+    }
+
+    fn system_exists(&self, system_id: i64) -> bool {
+        self.system_id_set.contains(&system_id)
+    }
+
+    fn system_has_children(&self, system_id: i64) -> bool {
+        self.parent_ids_with_children.contains(&system_id)
     }
 
     fn representative_visible_system_id(
@@ -960,17 +1027,12 @@ impl SystemsCatalogApp {
 
     fn visible_representative_system_map(&self) -> HashMap<i64, i64> {
         let visible_ids = self.visible_system_ids();
-        let parent_by_id = self
-            .systems
-            .iter()
-            .map(|system| (system.id, system.parent_id))
-            .collect::<HashMap<_, _>>();
 
         let mut representative_by_system = HashMap::new();
 
         for system in &self.systems {
             if let Some(representative_id) =
-                self.representative_visible_system_id(system.id, &visible_ids, &parent_by_id)
+                self.representative_visible_system_id(system.id, &visible_ids, &self.parent_by_system_id)
             {
                 representative_by_system.insert(system.id, representative_id);
             }
@@ -1072,6 +1134,8 @@ impl SystemsCatalogApp {
             self.collapsed_system_ids.insert(system_id);
         }
 
+        self.cached_visible_system_ids = None;
+
         let visible = self.visible_system_ids();
         if let Some(selected_system_id) = self.selected_system_id {
             if !visible.contains(&selected_system_id) {
@@ -1083,6 +1147,7 @@ impl SystemsCatalogApp {
     fn clear_subset_visibility(&mut self) {
         self.auto_collapsed_zone_representative_ids.clear();
         self.collapsed_system_ids.clear();
+        self.cached_visible_system_ids = None;
     }
 
     fn sync_zone_representative_collapsed_state(&mut self) {
@@ -1593,6 +1658,27 @@ impl SystemsCatalogApp {
                 .collect();
         }
 
+        if let Some(value) = self.repo.get_setting("current_catalog_path")? {
+            self.current_catalog_path = value.trim().to_owned();
+            if !self.current_catalog_path.is_empty() {
+                self.save_catalog_path = self.current_catalog_path.clone();
+                self.load_catalog_path = self.current_catalog_path.clone();
+            }
+        }
+
+        if let Some(value) = self.repo.get_setting("current_catalog_name")? {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                self.current_catalog_name = trimmed.to_owned();
+            }
+        } else if !self.current_catalog_path.is_empty() {
+            self.current_catalog_name = Self::catalog_name_from_path(self.current_catalog_path.as_str());
+        }
+
+        if let Some(value) = self.repo.get_setting("new_catalog_directory")? {
+            self.new_catalog_directory = value.trim().to_owned();
+        }
+
         if let Some(value) = self.repo.get_setting("fast_add_selected_catalog_tech_on_map")? {
             self.fast_add_selected_catalog_tech_on_map = value == "true";
         }
@@ -1774,6 +1860,27 @@ impl SystemsCatalogApp {
                 )?;
             }
 
+            if self.current_catalog_path.trim().is_empty() {
+                self.repo.delete_settings(&["current_catalog_path"])?;
+            } else {
+                self.repo
+                    .set_setting("current_catalog_path", self.current_catalog_path.trim())?;
+            }
+
+            if self.current_catalog_name.trim().is_empty() {
+                self.repo.delete_settings(&["current_catalog_name"])?;
+            } else {
+                self.repo
+                    .set_setting("current_catalog_name", self.current_catalog_name.trim())?;
+            }
+
+            if self.new_catalog_directory.trim().is_empty() {
+                self.repo.delete_settings(&["new_catalog_directory"])?;
+            } else {
+                self.repo
+                    .set_setting("new_catalog_directory", self.new_catalog_directory.trim())?;
+            }
+
             self.repo.set_setting(
                 "fast_add_selected_catalog_tech_on_map",
                 if self.fast_add_selected_catalog_tech_on_map {
@@ -1803,8 +1910,7 @@ impl SystemsCatalogApp {
 
     fn ensure_valid_parent_selection(&mut self) {
         if let Some(parent_id) = self.new_system_parent_id {
-            let exists = self.systems.iter().any(|system| system.id == parent_id);
-            if !exists {
+            if !self.system_exists(parent_id) {
                 self.new_system_parent_id = None;
             }
         }
@@ -1837,8 +1943,7 @@ impl SystemsCatalogApp {
 
     fn ensure_valid_bulk_parent_selection(&mut self) {
         if let Some(parent_id) = self.bulk_new_system_parent_id {
-            let exists = self.systems.iter().any(|system| system.id == parent_id);
-            if !exists {
+            if !self.system_exists(parent_id) {
                 self.bulk_new_system_parent_id = None;
             }
         }
@@ -1846,8 +1951,7 @@ impl SystemsCatalogApp {
 
     fn ensure_valid_selected_parent_selection(&mut self) {
         if let Some(parent_id) = self.selected_system_parent_id {
-            let exists = self.systems.iter().any(|system| system.id == parent_id);
-            if !exists {
+            if !self.system_exists(parent_id) {
                 self.selected_system_parent_id = None;
             }
         }
@@ -1855,15 +1959,13 @@ impl SystemsCatalogApp {
 
     fn ensure_valid_flow_inspector_selection(&mut self) {
         if let Some(system_id) = self.flow_inspector_from_system_id {
-            let exists = self.systems.iter().any(|system| system.id == system_id);
-            if !exists {
+            if !self.system_exists(system_id) {
                 self.flow_inspector_from_system_id = None;
             }
         }
 
         if let Some(system_id) = self.flow_inspector_to_system_id {
-            let exists = self.systems.iter().any(|system| system.id == system_id);
-            if !exists {
+            if !self.system_exists(system_id) {
                 self.flow_inspector_to_system_id = None;
             }
         }
@@ -1970,8 +2072,7 @@ impl SystemsCatalogApp {
 
     fn ensure_valid_link_target_selection(&mut self) {
         if let Some(target_id) = self.new_link_target_id {
-            let exists = self.systems.iter().any(|system| system.id == target_id);
-            if !exists {
+            if !self.system_exists(target_id) {
                 self.new_link_target_id = None;
             }
         }
@@ -2055,6 +2156,21 @@ impl SystemsCatalogApp {
         self.settings_dirty = true;
     }
 
+    fn catalog_name_from_path(path: &str) -> String {
+        let trimmed = path.trim();
+        if trimmed.is_empty() {
+            return "Working Catalog".to_owned();
+        }
+
+        std::path::Path::new(trimmed)
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .unwrap_or("Working Catalog")
+            .to_owned()
+    }
+
     fn cumulative_child_tech_names(&self, parent_system_id: i64) -> Vec<String> {
         let mut children_by_parent: HashMap<Option<i64>, Vec<i64>> = HashMap::new();
         for system in &self.systems {
@@ -2101,10 +2217,10 @@ impl SystemsCatalogApp {
         }
 
         let mut current_parent = self
-            .systems
-            .iter()
-            .find(|system| system.id == candidate_parent_id)
-            .and_then(|system| system.parent_id);
+            .parent_by_system_id
+            .get(&candidate_parent_id)
+            .copied()
+            .flatten();
 
         while let Some(parent_id) = current_parent {
             if parent_id == system_id {
@@ -2112,10 +2228,10 @@ impl SystemsCatalogApp {
             }
 
             current_parent = self
-                .systems
-                .iter()
-                .find(|system| system.id == parent_id)
-                .and_then(|system| system.parent_id);
+                .parent_by_system_id
+                .get(&parent_id)
+                .copied()
+                .flatten();
         }
 
         false
@@ -2131,10 +2247,10 @@ impl SystemsCatalogApp {
             }
 
             current = self
-                .systems
-                .iter()
-                .find(|system| system.id == id)
-                .and_then(|system| system.parent_id);
+                .parent_by_system_id
+                .get(&id)
+                .copied()
+                .flatten();
         }
 
         result
@@ -2337,10 +2453,10 @@ impl SystemsCatalogApp {
         }
 
         let mut current = self
-            .systems
-            .iter()
-            .find(|system| system.id == system_id)
-            .and_then(|system| system.parent_id);
+            .parent_by_system_id
+            .get(&system_id)
+            .copied()
+            .flatten();
 
         while let Some(parent_id) = current {
             if parent_id == ancestor_id {
@@ -2348,10 +2464,10 @@ impl SystemsCatalogApp {
             }
 
             current = self
-                .systems
-                .iter()
-                .find(|system| system.id == parent_id)
-                .and_then(|system| system.parent_id);
+                .parent_by_system_id
+                .get(&parent_id)
+                .copied()
+                .flatten();
         }
 
         false

@@ -261,6 +261,54 @@ impl SystemsCatalogApp {
         rows.join("\n")
     }
 
+    fn refresh_map_card_caches_if_needed(&mut self) {
+        let live_ids: HashSet<i64> = self.systems.iter().map(|system| system.id).collect();
+        self.map_card_label_cache
+            .retain(|system_id, _| live_ids.contains(system_id));
+        self.map_node_size_cache
+            .retain(|system_id, _| live_ids.contains(system_id));
+
+        for system in &self.systems {
+            if self.map_card_label_cache.contains_key(&system.id)
+                && self.map_node_size_cache.contains_key(&system.id)
+            {
+                continue;
+            }
+
+            let label = self.map_card_label_for_system(system);
+            let size = self.map_node_size_for(label.as_str());
+            self.map_card_label_cache.insert(system.id, label);
+            self.map_node_size_cache.insert(system.id, size);
+        }
+    }
+
+    fn map_card_label_cached_for_system(&self, system: &SystemRecord) -> String {
+        self.map_card_label_cache
+            .get(&system.id)
+            .cloned()
+            .unwrap_or_else(|| self.map_card_label_for_system(system))
+    }
+
+    fn map_node_size_cached_for_system(&self, system: &SystemRecord) -> Vec2 {
+        self.map_node_size_cache
+            .get(&system.id)
+            .copied()
+            .unwrap_or_else(|| self.map_node_size_for(self.map_card_label_for_system(system).as_str()))
+    }
+
+    fn map_node_size_cached_by_id(&self, system_id: i64) -> Vec2 {
+        self.map_node_size_cache
+            .get(&system_id)
+            .copied()
+            .or_else(|| {
+                self.systems
+                    .iter()
+                    .find(|system| system.id == system_id)
+                    .map(|system| self.map_node_size_cached_for_system(system))
+            })
+            .unwrap_or(MAP_NODE_SIZE)
+    }
+
     fn database_column_names_for_system(&self, system_id: i64) -> Vec<String> {
         self.database_columns_by_system
             .get(&system_id)
@@ -390,7 +438,7 @@ impl SystemsCatalogApp {
                 continue;
             };
 
-            let other_size = self.map_node_size_for(self.map_card_label_for_system(other).as_str());
+            let other_size = self.map_node_size_cached_for_system(other);
             let other_rect = Rect::from_min_size(other_position, other_size);
 
             if candidate_rect.intersects(other_rect) {
@@ -1511,7 +1559,7 @@ impl SystemsCatalogApp {
                 ui.label("Hold Z + drag  -> Draw zone");
                 ui.label("Alt+C  -> Copy highlighted cards");
                 ui.label("Alt+V  -> Paste copied cards");
-                ui.label("Delete  -> Delete selected system");
+                ui.label("Delete  -> Delete selected system(s)");
                 ui.label("Ctrl+Z  -> Undo map move");
                 ui.label("Esc  -> Close most recently opened modal");
                 ui.separator();
@@ -1760,6 +1808,7 @@ impl SystemsCatalogApp {
         }
 
         let mut open = self.show_save_catalog_modal;
+        let mut close_requested = false;
         egui::Window::new("Save Catalog")
             .collapsible(false)
             .resizable(false)
@@ -1812,12 +1861,20 @@ impl SystemsCatalogApp {
                 ui.horizontal(|ui| {
                     if ui.button("Save").clicked() {
                         self.export_catalog();
+                        if !self.show_save_catalog_modal {
+                            close_requested = true;
+                        }
                     }
                     if ui.button("Cancel").clicked() {
                         self.show_save_catalog_modal = false;
+                        close_requested = true;
                     }
                 });
             });
+
+        if close_requested {
+            open = false;
+        }
 
         self.show_save_catalog_modal = open;
     }
@@ -1828,6 +1885,7 @@ impl SystemsCatalogApp {
         }
 
         let mut open = self.show_load_catalog_modal;
+        let mut close_requested = false;
         egui::Window::new("Load Catalog")
             .collapsible(false)
             .resizable(false)
@@ -1870,12 +1928,20 @@ impl SystemsCatalogApp {
                 ui.horizontal(|ui| {
                     if ui.button("Load").clicked() {
                         self.import_catalog();
+                        if !self.show_load_catalog_modal {
+                            close_requested = true;
+                        }
                     }
                     if ui.button("Cancel").clicked() {
                         self.show_load_catalog_modal = false;
+                        close_requested = true;
                     }
                 });
             });
+
+        if close_requested {
+            open = false;
+        }
 
         self.show_load_catalog_modal = open;
     }
@@ -1886,23 +1952,55 @@ impl SystemsCatalogApp {
         }
 
         let mut open = self.show_new_catalog_confirm_modal;
-        egui::Window::new("New Catalog")
+        let mut close_requested = false;
+        egui::Window::new("New Project Catalog")
             .collapsible(false)
             .resizable(false)
             .open(&mut open)
             .show(ctx, |ui| {
-                ui.label("Create a new empty catalog?");
-                ui.label("This removes all systems, links, notes, and technologies in the current catalog.");
+                ui.label("Create a named catalog project.");
+                ui.label("This resets the current in-app model and saves it as a new project file.");
+
+                ui.separator();
+                ui.label("Project name");
+                ui.text_edit_singleline(&mut self.new_catalog_name);
+
+                ui.label("Project directory");
+                ui.horizontal(|ui| {
+                    ui.text_edit_singleline(&mut self.new_catalog_directory);
+                    if ui.button("Browse...").clicked() {
+                        let mut dialog = FileDialog::new();
+                        if !self.new_catalog_directory.trim().is_empty() {
+                            dialog = dialog.set_directory(self.new_catalog_directory.trim());
+                        }
+
+                        if let Some(path) = dialog.pick_folder() {
+                            self.new_catalog_directory = path.to_string_lossy().to_string();
+                        }
+                    }
+                });
+
+                if self.new_catalog_directory.trim().is_empty() {
+                    ui.label("Directory defaults to current workspace folder.");
+                }
 
                 ui.horizontal(|ui| {
-                    if ui.button("Create New Catalog").clicked() {
-                        self.new_catalog();
+                    if ui.button("Create Project").clicked() {
+                        self.create_named_catalog();
+                        if !self.show_new_catalog_confirm_modal {
+                            close_requested = true;
+                        }
                     }
                     if ui.button("Cancel").clicked() {
                         self.show_new_catalog_confirm_modal = false;
+                        close_requested = true;
                     }
                 });
             });
+
+        if close_requested {
+            open = false;
+        }
 
         self.show_new_catalog_confirm_modal = open;
     }
@@ -3461,6 +3559,7 @@ impl SystemsCatalogApp {
         painter.rect_stroke(map_rect, 6.0, Stroke::new(1.0, Color32::from_gray(60)));
 
         self.ensure_map_positions();
+        self.refresh_map_card_caches_if_needed();
 
         let zoom = self.map_zoom;
         let pan = self.map_pan;
@@ -3507,9 +3606,13 @@ impl SystemsCatalogApp {
         struct ZoneRenderItem {
             id: i64,
             rect: Rect,
+            logical_rect: Rect,
             name: String,
             fill_color: Color32,
             render_priority: i64,
+            parent_zone_id: Option<i64>,
+            ancestry_depth: usize,
+            containment_depth: usize,
             minimized: bool,
         }
 
@@ -3547,19 +3650,19 @@ impl SystemsCatalogApp {
                     }
                 }
 
-                let zone_rect = if effective_minimized {
+                let logical_rect = if effective_minimized {
                     let representative_id = resolved_representative?;
                     let representative_position = self.effective_map_position(representative_id)?;
-                    let representative_name = self.system_name_by_id(representative_id);
-                    let tile_size = self.map_node_size_for(representative_name.as_str()) * zoom;
+                    let tile_size = self.map_node_size_cached_by_id(representative_id) * zoom;
                     Rect::from_min_size(to_screen(representative_position), tile_size)
-                        .intersect(map_rect)
                 } else {
                     let top_left = to_screen(Pos2::new(zone.x, zone.y));
                     let bottom_right =
                         to_screen(Pos2::new(zone.x + zone.width, zone.y + zone.height));
-                    Rect::from_two_pos(top_left, bottom_right).intersect(map_rect)
+                    Rect::from_two_pos(top_left, bottom_right)
                 };
+
+                let zone_rect = logical_rect.intersect(map_rect);
 
                 if zone_rect.width() <= 0.0 || zone_rect.height() <= 0.0 {
                     return None;
@@ -3574,6 +3677,7 @@ impl SystemsCatalogApp {
                 Some(ZoneRenderItem {
                     id: zone.id,
                     rect: zone_rect,
+                    logical_rect,
                     name: if effective_minimized {
                         resolved_representative
                             .map(|id| self.system_name_by_id(id))
@@ -3583,18 +3687,90 @@ impl SystemsCatalogApp {
                     },
                     fill_color,
                     render_priority: zone.render_priority,
+                    parent_zone_id: zone.parent_zone_id,
+                    ancestry_depth: 0,
+                    containment_depth: 0,
                     minimized: effective_minimized,
                 })
             })
             .collect::<Vec<_>>();
 
+        let parent_zone_by_id = self
+            .zones
+            .iter()
+            .map(|zone| (zone.id, zone.parent_zone_id))
+            .collect::<HashMap<_, _>>();
+
+        for item in &mut zone_render_items {
+            let mut depth = 0usize;
+            let mut visited = HashSet::new();
+            let mut current = item.parent_zone_id;
+
+            while let Some(parent_id) = current {
+                if !visited.insert(parent_id) {
+                    break;
+                }
+
+                depth += 1;
+                current = parent_zone_by_id.get(&parent_id).copied().flatten();
+            }
+
+            item.ancestry_depth = depth;
+        }
+
+        let containment_rects = zone_render_items
+            .iter()
+            .map(|item| (item.id, item.logical_rect))
+            .collect::<HashMap<_, _>>();
+
+        for item in &mut zone_render_items {
+            let mut depth = 0usize;
+            let Some(item_rect) = containment_rects.get(&item.id).copied() else {
+                continue;
+            };
+
+            for (other_id, other_rect) in &containment_rects {
+                if *other_id == item.id {
+                    continue;
+                }
+
+                let fully_contains = other_rect.contains(item_rect.min)
+                    && other_rect.contains(item_rect.max);
+
+                if fully_contains {
+                    depth += 1;
+                }
+            }
+
+            item.containment_depth = depth;
+        }
+
         zone_render_items.sort_by(|left, right| {
-            left.render_priority
-                .cmp(&right.render_priority)
+            left
+                .ancestry_depth
+                .max(left.containment_depth)
+                .cmp(&right.ancestry_depth.max(right.containment_depth))
+                .then_with(|| left.render_priority.cmp(&right.render_priority))
                 .then_with(|| left.id.cmp(&right.id))
         });
 
         let mut zone_disclosure_hitboxes: Vec<(i64, Rect)> = Vec::new();
+
+        let zone_id_at_pointer = |pointer_pos: Pos2| -> Option<i64> {
+            zone_render_items
+                .iter()
+                .filter(|zone| zone.rect.contains(pointer_pos))
+                .min_by(|left, right| {
+                    let left_area = left.rect.width() * left.rect.height();
+                    let right_area = right.rect.width() * right.rect.height();
+
+                    left_area
+                        .total_cmp(&right_area)
+                        .then_with(|| right.render_priority.cmp(&left.render_priority))
+                        .then_with(|| right.id.cmp(&left.id))
+                })
+                .map(|zone| zone.id)
+        };
 
         let mut draw_zone_group = |draw_above_grid: bool, painter: &egui::Painter| {
             for zone in &zone_render_items {
@@ -3733,8 +3909,7 @@ impl SystemsCatalogApp {
         for system in &visible_systems {
             // This is where rendering the system cards happens.
             if let Some(local_position) = self.effective_map_position(system.id) {
-                let node_size_screen =
-                    self.map_node_size_for(self.map_card_label_for_system(system).as_str()) * zoom;
+                let node_size_screen = self.map_node_size_cached_for_system(system) * zoom;
                 let rect = Rect::from_min_size(to_screen(local_position), node_size_screen);
                 node_rects.insert(system.id, rect);
             }
@@ -3783,11 +3958,7 @@ impl SystemsCatalogApp {
 
                     if move_response.clicked() {
                         if let Some(pointer_pos) = ui.input(|input| input.pointer.interact_pos()) {
-                            let clicked_zone_id = zone_render_items
-                                .iter()
-                                .rev()
-                                .find(|zone| zone.rect.contains(pointer_pos))
-                                .map(|zone| zone.id);
+                            let clicked_zone_id = zone_id_at_pointer(pointer_pos);
 
                             if let Some(clicked_zone_id) = clicked_zone_id {
                                 if clicked_zone_id != selected_zone_id {
@@ -3872,9 +4043,7 @@ impl SystemsCatalogApp {
                                             continue;
                                         };
 
-                                        let node_size = self.map_node_size_for(
-                                            self.map_card_label_for_system(system).as_str(),
-                                        );
+                                        let node_size = self.map_node_size_cached_for_system(system);
                                         let node_center = Pos2::new(
                                             system_position.x + (node_size.x * 0.5),
                                             system_position.y + (node_size.y * 0.5),
@@ -4275,7 +4444,7 @@ impl SystemsCatalogApp {
                 continue;
             };
 
-            let node_size = self.map_node_size_for(self.map_card_label_for_system(&system).as_str());
+            let node_size = self.map_node_size_cached_for_system(&system);
             let node_size_screen = node_size * zoom;
 
             let node_rect =
@@ -4403,11 +4572,7 @@ impl SystemsCatalogApp {
                                 .systems
                                 .iter()
                                 .find(|candidate| candidate.id == *move_id)
-                                .map(|candidate| {
-                                    self.map_node_size_for(
-                                        self.map_card_label_for_system(candidate).as_str(),
-                                    )
-                                })
+                                .map(|candidate| self.map_node_size_cached_for_system(candidate))
                                 .unwrap_or(node_size);
                             let clamped =
                                 self.clamp_node_position(map_rect, next_position, move_node_size);
@@ -4462,11 +4627,7 @@ impl SystemsCatalogApp {
                             .systems
                             .iter()
                             .find(|candidate| candidate.id == *persist_id)
-                            .map(|candidate| {
-                                self.map_node_size_for(
-                                    self.map_card_label_for_system(candidate).as_str(),
-                                )
-                            })
+                            .map(|candidate| self.map_node_size_cached_for_system(candidate))
                             .unwrap_or(MAP_NODE_SIZE);
                         let snapped = self.snap_to_open_grid_position(
                             *persist_id,
@@ -4559,11 +4720,13 @@ impl SystemsCatalogApp {
 
             let database_columns = self
                 .database_columns_by_system
-                .get(&system.id)
-                .cloned()
-                .unwrap_or_default();
+                .get(&system.id);
+            let has_database_columns = database_columns
+                .map(|cols| !cols.is_empty())
+                .unwrap_or(false);
 
-            if system.system_type == "database" && !database_columns.is_empty() {
+            if system.system_type == "database" && has_database_columns {
+                let database_columns = database_columns.unwrap();
                 let header_font = FontId::proportional(font_size);
                 let row_font = FontId::monospace((font_size * 0.86).clamp(6.0, 18.0));
                 let constraints_font = FontId::proportional((font_size * 0.68).clamp(6.0, 14.0));
@@ -4648,7 +4811,7 @@ impl SystemsCatalogApp {
                 let text_wrap_width =
                     (node_rect.width() - (MAP_CARD_HORIZONTAL_PADDING * self.map_zoom)).max(24.0);
                 let wrapped_text = painter.layout(
-                    self.map_card_label_for_system(&system),
+                    self.map_card_label_cached_for_system(&system),
                     font_id,
                     text_color,
                     text_wrap_width,
@@ -4664,10 +4827,7 @@ impl SystemsCatalogApp {
                 );
             }
 
-            let has_children = self
-                .systems
-                .iter()
-                .any(|candidate| candidate.parent_id == Some(system.id));
+            let has_children = self.system_has_children(system.id);
             if has_children {
                 let disclosure_radius = (9.0 * self.map_zoom).clamp(7.0, 15.0);
                 let disclosure_center = Pos2::new(
@@ -4777,9 +4937,7 @@ impl SystemsCatalogApp {
                     .systems
                     .iter()
                     .find(|candidate| candidate.id == *system_id)
-                    .map(|candidate| {
-                        self.map_node_size_for(self.map_card_label_for_system(candidate).as_str())
-                    })
+                    .map(|candidate| self.map_node_size_cached_for_system(candidate))
                     .unwrap_or(MAP_NODE_SIZE);
 
                 let preview_rect =
@@ -4842,13 +5000,7 @@ impl SystemsCatalogApp {
 
             let clicked_zone_id =
                 ui.input(|input| input.pointer.interact_pos())
-                    .and_then(|pointer_pos| {
-                        zone_render_items
-                            .iter()
-                            .rev()
-                            .find(|zone| zone.rect.contains(pointer_pos))
-                            .map(|zone| zone.id)
-                    });
+                    .and_then(|pointer_pos| zone_id_at_pointer(pointer_pos));
 
             if let Some(zone_id) = clicked_zone_id {
                 self.select_zone(zone_id);
@@ -4882,6 +5034,7 @@ impl SystemsCatalogApp {
 
 impl eframe::App for SystemsCatalogApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.refresh_visible_system_ids_cache();
         self.prune_closed_modals_from_stack();
 
         let close_recent_modal =
@@ -4956,18 +5109,43 @@ impl eframe::App for SystemsCatalogApp {
         egui::TopBottomPanel::top("header_panel").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
-                    if ui.button("New Catalog").clicked() {
+                    if ui.button("New Project Catalog").clicked() {
+                        if self.new_catalog_name.trim().is_empty() {
+                            self.new_catalog_name = "new_catalog".to_owned();
+                        }
+                        if self.new_catalog_directory.trim().is_empty() {
+                            self.new_catalog_directory = self
+                                .recent_catalog_paths
+                                .first()
+                                .and_then(|path| Path::new(path).parent())
+                                .map(|path| path.to_string_lossy().to_string())
+                                .unwrap_or_else(|| ".".to_owned());
+                        }
                         self.open_modal(AppModal::NewCatalogConfirm);
                         ui.close_menu();
                     }
                     ui.separator();
-                    if ui.button("Save Catalog").clicked() {
+                    if ui.button("Save Project").clicked() {
                         self.open_modal(AppModal::SaveCatalog);
                         ui.close_menu();
                     }
-                    if ui.button("Load Catalog").clicked() {
+                    if ui.button("Load Project").clicked() {
                         self.open_modal(AppModal::LoadCatalog);
                         ui.close_menu();
+                    }
+
+                    if !self.recent_catalog_paths.is_empty() {
+                        ui.separator();
+                        ui.label("Recent projects");
+                        let recent_paths = self.recent_catalog_paths.clone();
+                        for path in recent_paths {
+                            let project_name = SystemsCatalogApp::catalog_name_from_path(path.as_str());
+                            let label = format!("{} ({})", project_name, path);
+                            if ui.button(label).clicked() {
+                                self.switch_to_recent_catalog(path.as_str());
+                                ui.close_menu();
+                            }
+                        }
                     }
                 });
 
@@ -5084,6 +5262,11 @@ impl eframe::App for SystemsCatalogApp {
                     }
                 });
 
+                ui.menu_button("Debug", |ui| {
+                    ui.checkbox(&mut self.show_debug_inspection_window, "🔍 Inspection");
+                    ui.checkbox(&mut self.show_debug_memory_window, "📝 Memory");
+                });
+
                 self.render_connection_style_menu(ui);
                 self.render_stats_menu(ui);
 
@@ -5137,6 +5320,39 @@ impl eframe::App for SystemsCatalogApp {
                 }
 
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let selected_recent_path = self
+                        .recent_catalog_paths
+                        .iter()
+                        .find(|path| path.as_str() == self.current_catalog_path.as_str())
+                        .cloned()
+                        .or_else(|| self.recent_catalog_paths.first().cloned());
+
+                    if let Some(selected_path) = selected_recent_path {
+                        egui::ComboBox::from_id_source("header_recent_projects")
+                            .selected_text(format!(
+                                "Project: {}",
+                                Self::catalog_name_from_path(selected_path.as_str())
+                            ))
+                            .show_ui(ui, |ui| {
+                                let recent_paths = self.recent_catalog_paths.clone();
+                                for path in recent_paths {
+                                    let project_name = Self::catalog_name_from_path(path.as_str());
+                                    let selected = path == self.current_catalog_path;
+                                    let label = format!("{} ({})", project_name, path);
+                                    if ui.selectable_label(selected, label).clicked() {
+                                        self.switch_to_recent_catalog(path.as_str());
+                                    }
+                                }
+                            });
+                        ui.separator();
+                    }
+
+                    ui.label(
+                        RichText::new(format!("Catalog: {}", self.current_catalog_name))
+                            .small()
+                            .strong(),
+                    );
+                    ui.separator();
                     ui.label(
                         RichText::new(format!("{:.0}%", self.map_zoom * 100.0))
                             .weak()
@@ -5197,6 +5413,21 @@ impl eframe::App for SystemsCatalogApp {
         self.render_help_zones_modal(ctx);
         self.render_help_keyboard_shortcuts_modal(ctx);
         self.render_help_troubleshooting_modal(ctx);
+
+        egui::Window::new("🔍 Inspection")
+            .open(&mut self.show_debug_inspection_window)
+            .vscroll(true)
+            .show(ctx, |ui| {
+                ctx.inspection_ui(ui);
+            });
+
+        egui::Window::new("📝 Memory")
+            .open(&mut self.show_debug_memory_window)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ctx.memory_ui(ui);
+            });
+
         self.save_ui_settings_if_dirty();
     }
 }

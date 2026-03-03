@@ -1,9 +1,38 @@
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
 use crate::app::{CopiedSystemEntry, InteractionKind, SystemsCatalogApp, MAP_GRID_SPACING, MAP_NODE_SIZE};
 use crate::models::DatabaseColumnInput;
 
 impl SystemsCatalogApp {
+    fn load_catalog_from_path(&mut self, path: &str) -> anyhow::Result<()> {
+        self.repo.import_catalog_from_path(path)?;
+        self.refresh_systems()?;
+        self.load_ui_settings()?;
+        self.clear_selection();
+        Ok(())
+    }
+
+    fn catalog_file_name_from_project_name(name: &str) -> String {
+        let mut slug = String::new();
+        for character in name.chars() {
+            if character.is_ascii_alphanumeric() {
+                slug.push(character.to_ascii_lowercase());
+            } else if character == ' ' || character == '-' || character == '_' {
+                if !slug.ends_with('_') {
+                    slug.push('_');
+                }
+            }
+        }
+
+        let slug = slug.trim_matches('_');
+        if slug.is_empty() {
+            "catalog".to_owned()
+        } else {
+            format!("{slug}.db")
+        }
+    }
+
     fn spawn_route_method_systems(
         &mut self,
         route_system_id: i64,
@@ -952,6 +981,11 @@ impl SystemsCatalogApp {
             Ok(_) => {
                 self.push_recent_catalog_path(path.as_str());
                 self.load_catalog_path = path.clone();
+                self.current_catalog_path = path.clone();
+                if self.current_catalog_name.trim().is_empty() {
+                    self.current_catalog_name = Self::catalog_name_from_path(path.as_str());
+                }
+                self.settings_dirty = true;
                 self.show_save_catalog_modal = false;
                 self.status_message = format!("Catalog saved to {}", path);
             }
@@ -966,42 +1000,98 @@ impl SystemsCatalogApp {
             return;
         }
 
-        let result = self
-            .repo
-            .import_catalog_from_path(path.as_str())
-            .and_then(|_| self.refresh_systems())
-            .and_then(|_| self.load_ui_settings());
+        let result = self.load_catalog_from_path(path.as_str());
 
         match result {
             Ok(_) => {
                 self.push_recent_catalog_path(path.as_str());
                 self.save_catalog_path = path.clone();
+                self.current_catalog_path = path.clone();
+                self.current_catalog_name = Self::catalog_name_from_path(path.as_str());
+                self.settings_dirty = true;
                 self.show_load_catalog_modal = false;
-                self.clear_selection();
                 self.status_message = format!("Catalog loaded from {}", path);
             }
             Err(error) => self.status_message = format!("Failed to load catalog: {error}"),
         }
     }
 
-    pub(super) fn new_catalog(&mut self) {
+    pub(super) fn switch_to_recent_catalog(&mut self, path: &str) {
+        let trimmed = path.trim();
+        if trimmed.is_empty() {
+            self.status_message = "Select a project path first".to_owned();
+            return;
+        }
+
+        match self.load_catalog_from_path(trimmed) {
+            Ok(_) => {
+                self.push_recent_catalog_path(trimmed);
+                self.save_catalog_path = trimmed.to_owned();
+                self.load_catalog_path = trimmed.to_owned();
+                self.current_catalog_path = trimmed.to_owned();
+                self.current_catalog_name = Self::catalog_name_from_path(trimmed);
+                self.settings_dirty = true;
+                self.status_message = format!("Switched to project '{}'", self.current_catalog_name);
+            }
+            Err(error) => {
+                self.status_message = format!("Failed to switch project: {error}");
+            }
+        }
+    }
+
+    pub(super) fn create_named_catalog(&mut self) {
+        let project_name = self.new_catalog_name.trim().to_owned();
+        if project_name.is_empty() {
+            self.status_message = "Project name is required".to_owned();
+            return;
+        }
+
+        let target_directory = if self.new_catalog_directory.trim().is_empty() {
+            self.recent_catalog_paths
+                .first()
+                .and_then(|path| Path::new(path).parent().map(Path::to_path_buf))
+                .or_else(|| std::env::current_dir().ok())
+                .unwrap_or_else(|| PathBuf::from("."))
+        } else {
+            PathBuf::from(self.new_catalog_directory.trim())
+        };
+
+        if let Err(error) = std::fs::create_dir_all(&target_directory) {
+            self.status_message = format!("Failed to create project directory: {error}");
+            return;
+        }
+
+        let file_name = Self::catalog_file_name_from_project_name(project_name.as_str());
+        let path = target_directory.join(file_name);
+        let path_text = path.to_string_lossy().to_string();
+
         let result = self
             .repo
             .clear_catalog_data()
-            .and_then(|_| self.refresh_systems());
+            .and_then(|_| self.refresh_systems())
+            .and_then(|_| self.repo.export_catalog_to_path(path_text.as_str()));
 
         match result {
             Ok(_) => {
                 self.clear_selection();
                 self.map_positions.clear();
+                self.current_catalog_name = project_name;
+                self.current_catalog_path = path_text.clone();
+                self.new_catalog_directory = target_directory.to_string_lossy().to_string();
+                self.save_catalog_path = path_text.clone();
+                self.load_catalog_path = path_text.clone();
+                self.push_recent_catalog_path(path_text.as_str());
                 self.show_add_system_modal = false;
                 self.show_add_tech_modal = false;
                 self.show_save_catalog_modal = false;
                 self.show_load_catalog_modal = false;
                 self.show_new_catalog_confirm_modal = false;
-                self.status_message = "Created new empty catalog".to_owned();
+                self.settings_dirty = true;
+                self.status_message = format!("Created project '{}'", self.current_catalog_name);
             }
-            Err(error) => self.status_message = format!("Failed to create new catalog: {error}"),
+            Err(error) => {
+                self.status_message = format!("Failed to create new catalog: {error}");
+            }
         }
     }
 
@@ -1194,25 +1284,51 @@ impl SystemsCatalogApp {
     }
 
     pub(super) fn delete_selected_system(&mut self) {
-        let Some(system_id) = self.selected_system_id else {
-            self.status_message = "Select a system first".to_owned();
+        let mut target_ids = self.selected_map_system_ids.clone();
+        if let Some(system_id) = self.selected_system_id {
+            target_ids.insert(system_id);
+        }
+
+        if target_ids.is_empty() {
+            self.status_message = "Select one or more systems first".to_owned();
             return;
+        }
+
+        let mut ordered_ids = target_ids.iter().copied().collect::<Vec<_>>();
+        ordered_ids.sort_unstable();
+
+        let deleted_count = ordered_ids.len();
+        let deleted_name = if deleted_count == 1 {
+            ordered_ids
+                .first()
+                .copied()
+                .map(|system_id| self.system_name_by_id(system_id))
+        } else {
+            None
         };
 
-        let system_name = self.system_name_by_id(system_id);
-        let result = self
-            .repo
-            .delete_system(system_id)
-            .and_then(|_| self.refresh_systems());
+        let result = (|| -> anyhow::Result<()> {
+            for system_id in &ordered_ids {
+                self.repo.delete_system(*system_id)?;
+            }
+            self.refresh_systems()?;
+            Ok(())
+        })();
 
         match result {
             Ok(_) => {
-                self.status_message = format!("Deleted system: {system_name}");
                 self.map_link_click_source = None;
                 self.map_link_drag_from = None;
                 self.map_interaction_drag_from = None;
+                self.selected_map_system_ids.clear();
+
+                if let Some(name) = deleted_name {
+                    self.status_message = format!("Deleted system: {name}");
+                } else {
+                    self.status_message = format!("Deleted {deleted_count} systems");
+                }
             }
-            Err(error) => self.status_message = format!("Failed to delete system: {error}"),
+            Err(error) => self.status_message = format!("Failed to delete systems: {error}"),
         }
     }
 
