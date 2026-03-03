@@ -4566,11 +4566,14 @@ impl SystemsCatalogApp {
             if system.system_type == "database" && !database_columns.is_empty() {
                 let header_font = FontId::proportional(font_size);
                 let row_font = FontId::monospace((font_size * 0.86).clamp(6.0, 18.0));
+                let constraints_font = FontId::proportional((font_size * 0.68).clamp(6.0, 14.0));
 
                 let title = format!("{} {}", ICON_DATABASE, system.name);
                 let top_padding = (8.0 * self.map_zoom).clamp(4.0, 10.0);
                 let left_padding = (8.0 * self.map_zoom).clamp(4.0, 10.0);
-                let row_height = (16.0 * self.map_zoom).clamp(10.0, 22.0);
+                let right_padding = left_padding;
+                let row_height = (22.0 * self.map_zoom).clamp(14.0, 30.0);
+                let row_vertical_padding = (3.0 * self.map_zoom).clamp(2.0, 5.0);
                 let separator_y = node_rect.top() + top_padding + row_height;
 
                 painter.text(
@@ -4595,22 +4598,39 @@ impl SystemsCatalogApp {
                         break;
                     }
 
-                    let mut row_text = format!("{} | {}", column.column_name, column.column_type);
-                    if let Some(constraints) = column.constraints.as_deref() {
-                        let trimmed = constraints.trim();
-                        if !trimmed.is_empty() {
-                            row_text.push_str(" | ");
-                            row_text.push_str(trimmed);
-                        }
-                    }
+                    let row_center_y = row_y + (row_height * 0.5);
+
+                    let column_name = column.column_name.trim();
+                    let column_type = column.column_type.trim();
 
                     painter.text(
-                        Pos2::new(node_rect.left() + left_padding, row_y),
-                        egui::Align2::LEFT_TOP,
-                        row_text,
+                        Pos2::new(node_rect.left() + left_padding, row_center_y),
+                        egui::Align2::LEFT_CENTER,
+                        column_name,
                         row_font.clone(),
                         text_color,
                     );
+
+                    painter.text(
+                        Pos2::new(node_rect.right() - right_padding, row_center_y),
+                        egui::Align2::RIGHT_CENTER,
+                        column_type,
+                        row_font.clone(),
+                        text_color,
+                    );
+
+                    if let Some(constraints) = column.constraints.as_deref() {
+                        let trimmed = constraints.trim();
+                        if !trimmed.is_empty() {
+                            painter.text(
+                                Pos2::new(node_rect.center().x, row_y + row_height - row_vertical_padding),
+                                egui::Align2::CENTER_BOTTOM,
+                                trimmed,
+                                constraints_font.clone(),
+                                Color32::from_gray(176),
+                            );
+                        }
+                    }
 
                     let line_y = row_y + row_height - 2.0;
                     painter.line_segment(

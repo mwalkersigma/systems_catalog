@@ -75,7 +75,6 @@ pub struct ZoneSystemOffset {
 
 #[derive(Debug, Clone)]
 pub struct DatabaseColumnRecord {
-    pub id: i64,
     pub system_id: i64,
     pub position: i64,
     pub column_name: String,

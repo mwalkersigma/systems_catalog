@@ -650,35 +650,6 @@ impl Repository {
         Ok(())
     }
 
-    pub fn list_database_columns_for_system(
-        &self,
-        system_id: i64,
-    ) -> Result<Vec<DatabaseColumnRecord>> {
-        let mut stmt = self.conn.prepare(
-            r#"
-            SELECT id, system_id, position, column_name, column_type, constraints
-            FROM database_columns
-            WHERE system_id = ?1
-            ORDER BY position ASC, id ASC
-            "#,
-        )?;
-
-        let columns = stmt
-            .query_map(params![system_id], |row| {
-                Ok(DatabaseColumnRecord {
-                    id: row.get(0)?,
-                    system_id: row.get(1)?,
-                    position: row.get(2)?,
-                    column_name: row.get(3)?,
-                    column_type: row.get(4)?,
-                    constraints: row.get(5)?,
-                })
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-
-        Ok(columns)
-    }
-
     pub fn list_database_columns(&self) -> Result<Vec<DatabaseColumnRecord>> {
         let mut stmt = self.conn.prepare(
             r#"
@@ -691,7 +662,6 @@ impl Repository {
         let columns = stmt
             .query_map([], |row| {
                 Ok(DatabaseColumnRecord {
-                    id: row.get(0)?,
                     system_id: row.get(1)?,
                     position: row.get(2)?,
                     column_name: row.get(3)?,
