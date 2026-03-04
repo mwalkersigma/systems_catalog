@@ -1555,6 +1555,7 @@ impl SystemsCatalogApp {
             .show(ctx, |ui| {
                 ui.label("Ctrl+N  -> Add System");
                 ui.label("Ctrl+Shift+N  -> Bulk Add Systems");
+                ui.label("Ctrl+S  -> Save Project");
                 ui.label("Alt+N  -> Add Technology");
                 ui.label("Hold Z + drag  -> Draw zone");
                 ui.label("Alt+C  -> Copy highlighted cards");
@@ -1809,12 +1810,12 @@ impl SystemsCatalogApp {
 
         let mut open = self.show_save_catalog_modal;
         let mut close_requested = false;
-        egui::Window::new("Save Catalog")
+        egui::Window::new("Save Project")
             .collapsible(false)
             .resizable(false)
             .open(&mut open)
             .show(ctx, |ui| {
-                ui.label("File path");
+                ui.label("Project folder path");
                 ui.horizontal(|ui| {
                     ui.text_edit_singleline(&mut self.save_catalog_path);
                     if ui.button("Browse...").clicked() {
@@ -1826,24 +1827,18 @@ impl SystemsCatalogApp {
                             }
                         }
 
-                        if let Some(file_name) = Path::new(&self.save_catalog_path)
-                            .file_name()
-                            .and_then(|name| name.to_str())
-                            .filter(|name| !name.trim().is_empty())
-                        {
-                            dialog = dialog.set_file_name(file_name);
-                        } else {
-                            dialog = dialog.set_file_name("systems_catalog_export.db");
-                        }
-
-                        if let Some(path) = dialog
-                            .add_filter("Catalog DB", &["db", "sqlite", "sqlite3"])
-                            .save_file()
-                        {
+                        if let Some(path) = dialog.pick_folder() {
                             self.save_catalog_path = path.to_string_lossy().to_string();
                         }
                     }
                 });
+
+                ui.separator();
+                ui.label(format!(
+                    "Session system changes: {} new, {} dirty",
+                    self.new_system_ids.len(),
+                    self.dirty_system_ids.len()
+                ));
 
                 if !self.recent_catalog_paths.is_empty() {
                     ui.label("Recent paths");
@@ -1886,12 +1881,12 @@ impl SystemsCatalogApp {
 
         let mut open = self.show_load_catalog_modal;
         let mut close_requested = false;
-        egui::Window::new("Load Catalog")
+        egui::Window::new("Load Project")
             .collapsible(false)
             .resizable(false)
             .open(&mut open)
             .show(ctx, |ui| {
-                ui.label("File path");
+                ui.label("Project folder path");
                 ui.horizontal(|ui| {
                     ui.text_edit_singleline(&mut self.load_catalog_path);
                     if ui.button("Browse...").clicked() {
@@ -1903,10 +1898,7 @@ impl SystemsCatalogApp {
                             }
                         }
 
-                        if let Some(path) = dialog
-                            .add_filter("Catalog DB", &["db", "sqlite", "sqlite3"])
-                            .pick_file()
-                        {
+                        if let Some(path) = dialog.pick_folder() {
                             self.load_catalog_path = path.to_string_lossy().to_string();
                         }
                     }
@@ -1953,12 +1945,12 @@ impl SystemsCatalogApp {
 
         let mut open = self.show_new_catalog_confirm_modal;
         let mut close_requested = false;
-        egui::Window::new("New Project Catalog")
+        egui::Window::new("New Project")
             .collapsible(false)
             .resizable(false)
             .open(&mut open)
             .show(ctx, |ui| {
-                ui.label("Create a named catalog project.");
+                ui.label("Create a named project.");
                 ui.label("This resets the current in-app model and saves it as a new project file.");
 
                 ui.separator();
@@ -1984,6 +1976,29 @@ impl SystemsCatalogApp {
                     ui.label("Directory defaults to current workspace folder.");
                 }
 
+                ui.separator();
+                ui.label("Migration source DB (optional, one-time)");
+                ui.horizontal(|ui| {
+                    ui.text_edit_singleline(&mut self.new_catalog_migration_db_path);
+                    if ui.button("Browse DB...").clicked() {
+                        let mut dialog = FileDialog::new();
+                        if let Some(parent) = Path::new(&self.new_catalog_migration_db_path).parent() {
+                            if !parent.as_os_str().is_empty() {
+                                dialog = dialog.set_directory(parent);
+                            }
+                        }
+
+                        if let Some(path) = dialog
+                            .add_filter("Legacy SQLite DB", &["db", "sqlite", "sqlite3"])
+                            .pick_file()
+                        {
+                            self.new_catalog_migration_db_path =
+                                path.to_string_lossy().to_string();
+                        }
+                    }
+                });
+                ui.label("Leave empty to create a blank project.");
+
                 ui.horizontal(|ui| {
                     if ui.button("Create Project").clicked() {
                         self.create_named_catalog();
@@ -2003,6 +2018,99 @@ impl SystemsCatalogApp {
         }
 
         self.show_new_catalog_confirm_modal = open;
+    }
+
+    fn render_ddl_table_mapping_modal(&mut self, ctx: &egui::Context) {
+        if !self.show_ddl_table_mapping_modal {
+            return;
+        }
+
+        let mut open = self.show_ddl_table_mapping_modal;
+        let mut close_requested = false;
+
+        let mut database_candidates = self
+            .systems
+            .iter()
+            .filter(|system| system.system_type.eq_ignore_ascii_case("database"))
+            .map(|system| (system.id, system.name.clone()))
+            .collect::<Vec<_>>();
+        database_candidates.sort_by(|left, right| left.1.to_lowercase().cmp(&right.1.to_lowercase()));
+
+        egui::Window::new("DDL Table Mapping")
+            .collapsible(false)
+            .resizable(true)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.label("Map imported DDL tables to existing database systems.");
+                ui.label("Choose an existing system to update, or keep 'Create new system'.");
+                ui.separator();
+
+                while self.pending_ddl_target_system_ids.len() < self.pending_ddl_drafts.len() {
+                    self.pending_ddl_target_system_ids.push(None);
+                }
+
+                for (index, draft) in self.pending_ddl_drafts.iter().enumerate() {
+                    let selected_target = self
+                        .pending_ddl_target_system_ids
+                        .get(index)
+                        .copied()
+                        .flatten();
+
+                    ui.horizontal(|ui| {
+                        ui.label(format!("{}", draft.name));
+
+                        egui::ComboBox::from_id_source(format!("ddl_mapping_target_{index}"))
+                            .selected_text(
+                                selected_target
+                                    .and_then(|target_id| {
+                                        database_candidates
+                                            .iter()
+                                            .find(|(candidate_id, _)| *candidate_id == target_id)
+                                            .map(|(_, candidate_name)| candidate_name.clone())
+                                    })
+                                    .unwrap_or_else(|| "Create new system".to_owned()),
+                            )
+                            .show_ui(ui, |ui| {
+                                if ui
+                                    .selectable_label(selected_target.is_none(), "Create new system")
+                                    .clicked()
+                                {
+                                    self.pending_ddl_target_system_ids[index] = None;
+                                }
+
+                                for (candidate_id, candidate_name) in &database_candidates {
+                                    if ui
+                                        .selectable_label(
+                                            selected_target == Some(*candidate_id),
+                                            candidate_name,
+                                        )
+                                        .clicked()
+                                    {
+                                        self.pending_ddl_target_system_ids[index] = Some(*candidate_id);
+                                    }
+                                }
+                            });
+                    });
+                }
+
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("Apply Mapping").clicked() {
+                        self.apply_pending_ddl_table_mapping();
+                        close_requested = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.cancel_pending_ddl_table_mapping();
+                        close_requested = true;
+                    }
+                });
+            });
+
+        if close_requested {
+            open = false;
+        }
+
+        self.show_ddl_table_mapping_modal = open;
     }
 
     fn select_system(&mut self, system_id: i64) {
@@ -2800,6 +2908,27 @@ impl SystemsCatalogApp {
                 );
             });
 
+        let selected_count = if self.selected_map_system_ids.is_empty() {
+            usize::from(self.selected_system_id.is_some())
+        } else {
+            self.selected_map_system_ids.len()
+        };
+
+        if selected_count > 1 {
+            ui.horizontal(|ui| {
+                if ui
+                    .button(format!(
+                        "Apply '{}' type to {} selected systems",
+                        selected_type_label, selected_count
+                    ))
+                    .clicked()
+                {
+                    let target_type = self.selected_system_type.clone();
+                    self.bulk_convert_selected_system_types(target_type.as_str());
+                }
+            });
+        }
+
         if self.selected_system_type == "api" {
             ui.label("Route methods handled");
             ui.horizontal_wrapped(|ui| {
@@ -3506,6 +3635,24 @@ impl SystemsCatalogApp {
             .input(|input| input.key_down(egui::Key::Z) && !input.modifiers.ctrl)
             && (pointer_over_map || map_response.has_focus());
 
+        let modal_open = self.show_add_system_modal
+            || self.show_bulk_add_systems_modal
+            || self.show_add_tech_modal
+            || self.show_hotkeys_modal
+            || self.show_interaction_style_modal
+            || self.show_flow_inspector_modal
+            || self.show_save_catalog_modal
+            || self.show_load_catalog_modal
+            || self.show_new_catalog_confirm_modal
+            || self.show_ddl_table_mapping_modal
+            || self.show_help_getting_started_modal
+            || self.show_help_creating_interactions_modal
+            || self.show_help_managing_technology_modal
+            || self.show_help_understanding_map_modal
+            || self.show_help_zones_modal
+            || self.show_help_keyboard_shortcuts_modal
+            || self.show_help_troubleshooting_modal;
+
         if z_down_for_draw != self.zone_draw_mode {
             self.zone_draw_mode = z_down_for_draw;
             self.zone_draw_start_screen = None;
@@ -3517,7 +3664,7 @@ impl SystemsCatalogApp {
             self.zone_drag_moves_captured_systems = true;
         }
 
-        let zoom_active = pointer_over_map || map_response.has_focus();
+        let zoom_active = !modal_open && (pointer_over_map || map_response.has_focus());
         let ctrl_down = ui.input(|input| input.modifiers.ctrl);
         if zoom_active {
             if ctrl_down {
@@ -4152,7 +4299,9 @@ impl SystemsCatalogApp {
                             }
                         }
 
-                        if matches!(drag_kind, ZoneDragKind::Move) {
+                        if matches!(drag_kind, ZoneDragKind::Move)
+                            && self.zone_drag_moves_captured_systems
+                        {
                             let zone_delta = Pos2::new(
                                 next_x - self.zone_drag_initial_x,
                                 next_y - self.zone_drag_initial_y,
@@ -4205,36 +4354,38 @@ impl SystemsCatalogApp {
                                 );
                             }
 
-                            let descendant_ids = self
-                                .zone_drag_descendant_initial_positions
-                                .keys()
-                                .copied()
-                                .collect::<HashSet<_>>();
+                            if self.zone_drag_moves_captured_systems {
+                                let descendant_ids = self
+                                    .zone_drag_descendant_initial_positions
+                                    .keys()
+                                    .copied()
+                                    .collect::<HashSet<_>>();
 
-                            let descendants_to_persist = self
-                                .zones
-                                .iter()
-                                .filter(|zone| descendant_ids.contains(&zone.id))
-                                .cloned()
-                                .collect::<Vec<_>>();
+                                let descendants_to_persist = self
+                                    .zones
+                                    .iter()
+                                    .filter(|zone| descendant_ids.contains(&zone.id))
+                                    .cloned()
+                                    .collect::<Vec<_>>();
 
-                            for descendant_zone in descendants_to_persist {
-                                if let Err(error) = self.repo.update_zone(
-                                    descendant_zone.id,
-                                    descendant_zone.name.as_str(),
-                                    descendant_zone.x,
-                                    descendant_zone.y,
-                                    descendant_zone.width,
-                                    descendant_zone.height,
-                                    descendant_zone.color.as_deref(),
-                                    descendant_zone.render_priority,
-                                    descendant_zone.parent_zone_id,
-                                    descendant_zone.minimized,
-                                    descendant_zone.representative_system_id,
-                                ) {
-                                    self.status_message =
-                                        format!("Failed to update nested zone geometry: {error}");
-                                    break;
+                                for descendant_zone in descendants_to_persist {
+                                    if let Err(error) = self.repo.update_zone(
+                                        descendant_zone.id,
+                                        descendant_zone.name.as_str(),
+                                        descendant_zone.x,
+                                        descendant_zone.y,
+                                        descendant_zone.width,
+                                        descendant_zone.height,
+                                        descendant_zone.color.as_deref(),
+                                        descendant_zone.render_priority,
+                                        descendant_zone.parent_zone_id,
+                                        descendant_zone.minimized,
+                                        descendant_zone.representative_system_id,
+                                    ) {
+                                        self.status_message =
+                                            format!("Failed to update nested zone geometry: {error}");
+                                        break;
+                                    }
                                 }
                             }
                         }
@@ -5059,6 +5210,8 @@ impl eframe::App for SystemsCatalogApp {
             ctx.input_mut(|input| input.consume_key(egui::Modifiers::ALT, egui::Key::V));
         let undo_map_change =
             ctx.input_mut(|input| input.consume_key(egui::Modifiers::CTRL, egui::Key::Z));
+        let save_project =
+            ctx.input_mut(|input| input.consume_key(egui::Modifiers::CTRL, egui::Key::S));
         let delete_selected =
             ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Delete));
         let open_hotkeys =
@@ -5094,6 +5247,18 @@ impl eframe::App for SystemsCatalogApp {
             self.undo_map_positions();
         }
 
+        if save_project {
+            if self.save_catalog_path.trim().is_empty() && !self.current_catalog_path.trim().is_empty() {
+                self.save_catalog_path = self.current_catalog_path.clone();
+            }
+
+            if self.save_catalog_path.trim().is_empty() {
+                self.open_modal(AppModal::SaveCatalog);
+            } else {
+                self.export_catalog();
+            }
+        }
+
         if delete_selected {
             self.delete_selected_system();
         }
@@ -5109,9 +5274,9 @@ impl eframe::App for SystemsCatalogApp {
         egui::TopBottomPanel::top("header_panel").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
-                    if ui.button("New Project Catalog").clicked() {
+                    if ui.button("New Project").clicked() {
                         if self.new_catalog_name.trim().is_empty() {
-                            self.new_catalog_name = "new_catalog".to_owned();
+                            self.new_catalog_name = "new_project".to_owned();
                         }
                         if self.new_catalog_directory.trim().is_empty() {
                             self.new_catalog_directory = self
@@ -5133,6 +5298,33 @@ impl eframe::App for SystemsCatalogApp {
                         self.open_modal(AppModal::LoadCatalog);
                         ui.close_menu();
                     }
+                    if ui.button("Import DDL File").clicked() {
+                        let mut dialog = FileDialog::new().add_filter("DDL", &["sql", "ddl", "txt"]);
+                        if !self.current_catalog_path.trim().is_empty() {
+                            dialog = dialog.set_directory(self.current_catalog_path.as_str());
+                        }
+                        if let Some(path) = dialog.pick_file() {
+                            self.import_database_tables_from_ddl_path(path.as_path());
+                        }
+                        ui.close_menu();
+                    }
+                    if ui.button("Import OpenAPI File").clicked() {
+                        let mut dialog = FileDialog::new().add_filter("OpenAPI", &["yaml", "yml", "json"]);
+                        if !self.current_catalog_path.trim().is_empty() {
+                            dialog = dialog.set_directory(self.current_catalog_path.as_str());
+                        }
+                        if let Some(path) = dialog.pick_file() {
+                            self.import_api_routes_from_openapi_path(path.as_path());
+                        }
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui
+                        .checkbox(&mut self.project_autosave_enabled, "Autosave Project")
+                        .changed()
+                    {
+                        self.project_last_autosave_at_secs = None;
+                    }
 
                     if !self.recent_catalog_paths.is_empty() {
                         ui.separator();
@@ -5142,7 +5334,7 @@ impl eframe::App for SystemsCatalogApp {
                             let project_name = SystemsCatalogApp::catalog_name_from_path(path.as_str());
                             let label = format!("{} ({})", project_name, path);
                             if ui.button(label).clicked() {
-                                self.switch_to_recent_catalog(path.as_str());
+                                self.pending_catalog_switch_path = Some(path.clone());
                                 ui.close_menu();
                             }
                         }
@@ -5340,7 +5532,7 @@ impl eframe::App for SystemsCatalogApp {
                                     let selected = path == self.current_catalog_path;
                                     let label = format!("{} ({})", project_name, path);
                                     if ui.selectable_label(selected, label).clicked() {
-                                        self.switch_to_recent_catalog(path.as_str());
+                                        self.pending_catalog_switch_path = Some(path.clone());
                                     }
                                 }
                             });
@@ -5348,7 +5540,7 @@ impl eframe::App for SystemsCatalogApp {
                     }
 
                     ui.label(
-                        RichText::new(format!("Catalog: {}", self.current_catalog_name))
+                        RichText::new(format!("Project: {}", self.current_catalog_name))
                             .small()
                             .strong(),
                     );
@@ -5376,11 +5568,15 @@ impl eframe::App for SystemsCatalogApp {
                 });
         }
 
+        if let Some(path) = self.pending_catalog_switch_path.take() {
+            self.switch_to_recent_catalog(path.as_str());
+        }
+
         if self.selected_system_id.is_some() || self.selected_zone_id.is_some() {
             egui::SidePanel::right("details_panel")
                 .resizable(true)
                 .min_width(120.0)
-                .default_width(180.0)
+                .default_width(120.0)
                 .max_width(560.0)
                 .show(ctx, |ui| {
                     egui::ScrollArea::vertical().show(ui, |ui| {
@@ -5403,6 +5599,7 @@ impl eframe::App for SystemsCatalogApp {
         self.render_save_catalog_modal(ctx);
         self.render_load_catalog_modal(ctx);
         self.render_new_catalog_confirm_modal(ctx);
+        self.render_ddl_table_mapping_modal(ctx);
         self.render_hotkeys_modal(ctx);
         self.render_interaction_style_modal(ctx);
         self.render_flow_inspector_modal(ctx);
@@ -5427,6 +5624,9 @@ impl eframe::App for SystemsCatalogApp {
             .show(ctx, |ui| {
                 ctx.memory_ui(ui);
             });
+
+        let now_secs = ctx.input(|input| input.time);
+        self.maybe_autosave_project(now_secs);
 
         self.save_ui_settings_if_dirty();
     }

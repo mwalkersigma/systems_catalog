@@ -3,6 +3,8 @@
 mod app;
 mod db;
 mod models;
+mod plugins;
+mod project_store;
 
 use std::path::PathBuf;
 

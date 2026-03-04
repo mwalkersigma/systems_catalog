@@ -617,6 +617,57 @@ impl Repository {
         Ok(self.conn.last_insert_rowid())
     }
 
+    pub fn insert_system_with_id(
+        &self,
+        id: i64,
+        name: &str,
+        description: &str,
+        parent_id: Option<i64>,
+        map_x: Option<f32>,
+        map_y: Option<f32>,
+        line_color_override: Option<&str>,
+        naming_root: bool,
+        naming_delimiter: &str,
+        system_type: &str,
+        route_methods: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            r#"
+            INSERT INTO systems (
+                id,
+                name,
+                display_name,
+                description,
+                parent_id,
+                map_x,
+                map_y,
+                line_color_override,
+                naming_root,
+                naming_delimiter,
+                system_type,
+                route_methods
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+            "#,
+            params![
+                id,
+                name,
+                name,
+                description,
+                parent_id,
+                map_x,
+                map_y,
+                line_color_override,
+                if naming_root { 1 } else { 0 },
+                naming_delimiter,
+                system_type,
+                route_methods
+            ],
+        )?;
+
+        Ok(())
+    }
+
     pub fn update_system_parent(&self, system_id: i64, parent_id: Option<i64>) -> Result<()> {
         self.conn.execute(
             r#"
@@ -829,6 +880,45 @@ impl Repository {
         Ok(())
     }
 
+    pub fn insert_link_with_id(
+        &self,
+        id: i64,
+        source_system_id: i64,
+        target_system_id: i64,
+        label: &str,
+        note: &str,
+        kind: &str,
+        source_column_name: Option<&str>,
+        target_column_name: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            r#"
+            INSERT INTO links (
+                id,
+                source_system_id,
+                target_system_id,
+                label,
+                note,
+                kind,
+                source_column_name,
+                target_column_name
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            "#,
+            params![
+                id,
+                source_system_id,
+                target_system_id,
+                label,
+                note,
+                kind,
+                source_column_name,
+                target_column_name
+            ],
+        )?;
+        Ok(())
+    }
+
     pub fn update_link_details(
         &self,
         link_id: i64,
@@ -935,6 +1025,24 @@ impl Repository {
         Ok(())
     }
 
+    pub fn insert_note_with_id(
+        &self,
+        id: i64,
+        system_id: i64,
+        body: &str,
+        updated_at: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            r#"
+            INSERT INTO notes (id, system_id, body, updated_at)
+            VALUES (?1, ?2, ?3, ?4)
+            "#,
+            params![id, system_id, body, updated_at],
+        )?;
+
+        Ok(())
+    }
+
     pub fn update_note(&self, note_id: i64, body: &str) -> Result<()> {
         self.conn.execute(
             r#"
@@ -958,11 +1066,6 @@ impl Repository {
             params![note_id],
         )?;
 
-        Ok(())
-    }
-
-    pub fn export_catalog_to_path(&self, path: &str) -> Result<()> {
-        self.conn.execute("VACUUM INTO ?1", params![path])?;
         Ok(())
     }
 
@@ -1071,10 +1174,46 @@ impl Repository {
                 "INSERT INTO notes (id, system_id, body, updated_at) SELECT id, system_id, body, updated_at FROM imported.notes",
                 [],
             )?;
-            self.conn.execute(
-                "INSERT INTO tech_catalog (id, name, description, documentation_link) SELECT id, name, description, documentation_link FROM imported.tech_catalog",
-                [],
+            let imported_has_tech_description =
+                self.attached_table_has_column("imported", "tech_catalog", "description")?;
+            let imported_has_tech_documentation_link = self.attached_table_has_column(
+                "imported",
+                "tech_catalog",
+                "documentation_link",
             )?;
+            let imported_has_tech_color =
+                self.attached_table_has_column("imported", "tech_catalog", "color")?;
+            let imported_has_tech_display_priority = self.attached_table_has_column(
+                "imported",
+                "tech_catalog",
+                "display_priority",
+            )?;
+
+            let tech_description_select = if imported_has_tech_description {
+                "description"
+            } else {
+                "NULL"
+            };
+            let tech_documentation_link_select = if imported_has_tech_documentation_link {
+                "documentation_link"
+            } else {
+                "NULL"
+            };
+            let tech_color_select = if imported_has_tech_color {
+                "color"
+            } else {
+                "NULL"
+            };
+            let tech_display_priority_select = if imported_has_tech_display_priority {
+                "display_priority"
+            } else {
+                "0"
+            };
+
+            let tech_insert_sql = format!(
+                "INSERT INTO tech_catalog (id, name, description, documentation_link, color, display_priority) SELECT id, name, {tech_description_select}, {tech_documentation_link_select}, {tech_color_select}, {tech_display_priority_select} FROM imported.tech_catalog"
+            );
+            self.conn.execute(tech_insert_sql.as_str(), [])?;
             self.conn.execute(
                 "INSERT INTO system_tech (system_id, tech_id) SELECT system_id, tech_id FROM imported.system_tech",
                 [],
@@ -1274,6 +1413,55 @@ impl Repository {
         Ok(self.conn.last_insert_rowid())
     }
 
+    pub fn insert_zone_with_id(
+        &self,
+        id: i64,
+        name: &str,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        color: Option<&str>,
+        render_priority: i64,
+        parent_zone_id: Option<i64>,
+        minimized: bool,
+        representative_system_id: Option<i64>,
+    ) -> Result<()> {
+        self.conn.execute(
+            r#"
+            INSERT INTO zones (
+                id,
+                name,
+                x,
+                y,
+                width,
+                height,
+                color,
+                render_priority,
+                parent_zone_id,
+                minimized,
+                representative_system_id
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+            "#,
+            params![
+                id,
+                name,
+                x,
+                y,
+                width,
+                height,
+                color,
+                render_priority,
+                parent_zone_id,
+                if minimized { 1 } else { 0 },
+                representative_system_id
+            ],
+        )?;
+
+        Ok(())
+    }
+
     pub fn update_zone(
         &self,
         zone_id: i64,
@@ -1354,6 +1542,40 @@ impl Repository {
             VALUES (?1, ?2, ?3, ?4, ?5)
             "#,
             params![name, description, documentation_link, color, display_priority],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn insert_tech_item_with_id(
+        &self,
+        id: i64,
+        name: &str,
+        description: Option<&str>,
+        documentation_link: Option<&str>,
+        color: Option<&str>,
+        display_priority: i64,
+    ) -> Result<()> {
+        self.conn.execute(
+            r#"
+            INSERT INTO tech_catalog (
+                id,
+                name,
+                description,
+                documentation_link,
+                color,
+                display_priority
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "#,
+            params![
+                id,
+                name,
+                description,
+                documentation_link,
+                color,
+                display_priority
+            ],
         )?;
 
         Ok(())

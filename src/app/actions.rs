@@ -1,19 +1,1025 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use eframe::egui::{Pos2, Rect};
+
 use crate::app::{CopiedSystemEntry, InteractionKind, SystemsCatalogApp, MAP_GRID_SPACING, MAP_NODE_SIZE};
 use crate::models::DatabaseColumnInput;
+use crate::plugins::plugin_by_name;
+use crate::project_store::{
+    DatabaseColumnFile, InteractionFile, ProjectFile, ProjectSettings, ProjectTechItem,
+    ProjectZone, ProjectZoneOffset, SystemFile, SystemNoteFile,
+};
 
 impl SystemsCatalogApp {
-    fn load_catalog_from_path(&mut self, path: &str) -> anyhow::Result<()> {
-        self.repo.import_catalog_from_path(path)?;
+    fn spawn_position_for_new_system(
+        &self,
+        parent_id: Option<i64>,
+    ) -> Option<(Pos2, Option<(i64, Pos2)>)> {
+        if parent_id.is_some() {
+            return self
+                .find_next_free_child_spawn_position(parent_id)
+                .map(|position| (position, None));
+        }
+
+        let Some(selected_zone_id) = self.selected_zone_id else {
+            return Some((self.find_next_free_root_spawn_position(), None));
+        };
+
+        let Some(zone) = self.zones.iter().find(|zone| zone.id == selected_zone_id) else {
+            return Some((self.find_next_free_root_spawn_position(), None));
+        };
+
+        let zone_min_x = zone.x + 12.0;
+        let zone_min_y = zone.y + 12.0;
+        let zone_max_x = (zone.x + zone.width - MAP_NODE_SIZE.x - 12.0).max(zone_min_x);
+        let zone_max_y = (zone.y + zone.height - MAP_NODE_SIZE.y - 12.0).max(zone_min_y);
+
+        let mut candidate = Pos2::new(zone_min_x, zone_min_y);
+        for _ in 0..220 {
+            let clamped = self.clamp_node_position(Rect::NOTHING, candidate, MAP_NODE_SIZE);
+            let inside_zone = clamped.x >= zone_min_x
+                && clamped.x <= zone_max_x
+                && clamped.y >= zone_min_y
+                && clamped.y <= zone_max_y;
+
+            if inside_zone && !self.spawn_position_overlaps(clamped) {
+                let offset = Pos2::new(clamped.x - zone.x, clamped.y - zone.y);
+                return Some((clamped, Some((selected_zone_id, offset))));
+            }
+
+            candidate.x += MAP_GRID_SPACING;
+            if candidate.x > zone_max_x {
+                candidate.x = zone_min_x;
+                candidate.y += MAP_GRID_SPACING;
+            }
+            if candidate.y > zone_max_y {
+                break;
+            }
+        }
+
+        Some((self.find_next_free_root_spawn_position(), None))
+    }
+
+    pub(super) fn bulk_convert_selected_system_types(&mut self, target_type: &str) {
+        let normalized_target = Self::normalize_system_type(target_type);
+
+        let mut target_ids = self.selected_map_system_ids.clone();
+        if let Some(selected_id) = self.selected_system_id {
+            target_ids.insert(selected_id);
+        }
+
+        if target_ids.is_empty() {
+            self.status_message = "Select one or more systems first".to_owned();
+            return;
+        }
+
+        let systems_by_id = self
+            .systems
+            .iter()
+            .map(|system| (system.id, system.clone()))
+            .collect::<HashMap<_, _>>();
+
+        let mut converted_count = 0usize;
+        let result = (|| -> anyhow::Result<()> {
+            for system_id in &target_ids {
+                let Some(system) = systems_by_id.get(system_id) else {
+                    continue;
+                };
+
+                if Self::normalize_system_type(system.system_type.as_str()) == normalized_target {
+                    continue;
+                }
+
+                let route_methods = if normalized_target == "api" {
+                    system.route_methods.as_deref()
+                } else {
+                    None
+                };
+
+                self.repo.update_system_details(
+                    system.id,
+                    system.name.as_str(),
+                    system.description.as_str(),
+                    system.naming_root,
+                    system.naming_delimiter.as_str(),
+                    normalized_target.as_str(),
+                    route_methods,
+                )?;
+
+                if normalized_target != "database" {
+                    self.repo
+                        .replace_database_columns_for_system(system.id, &[])?;
+                }
+
+                self.mark_system_as_dirty(system.id);
+                converted_count += 1;
+            }
+
+            self.refresh_systems()?;
+            if let Some(selected_id) = self.selected_system_id {
+                self.load_selected_data(selected_id)?;
+            }
+            Ok(())
+        })();
+
+        match result {
+            Ok(_) => {
+                self.status_message = format!(
+                    "Converted {} system(s) to {}",
+                    converted_count,
+                    normalized_target
+                );
+            }
+            Err(error) => {
+                self.status_message = format!("Failed bulk type conversion: {error}");
+            }
+        }
+    }
+
+    fn write_file_if_changed(path: &Path, bytes: &[u8]) -> anyhow::Result<bool> {
+        if let Ok(existing) = std::fs::read(path) {
+            if existing == bytes {
+                return Ok(false);
+            }
+        }
+
+        std::fs::write(path, bytes)?;
+        Ok(true)
+    }
+
+    fn is_filesystem_project_path(path: &str) -> bool {
+        let trimmed = path.trim();
+        if trimmed.is_empty() {
+            return false;
+        }
+
+        let target = PathBuf::from(trimmed);
+        !target
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.eq_ignore_ascii_case("db"))
+            .unwrap_or(false)
+    }
+
+    fn autosave_filesystem_project(&mut self) -> anyhow::Result<()> {
+        if !Self::is_filesystem_project_path(self.current_catalog_path.as_str()) {
+            return Ok(());
+        }
+
+        let root = PathBuf::from(self.current_catalog_path.as_str());
+        self.export_catalog_to_filesystem_project(&root)
+    }
+
+    pub(super) fn maybe_autosave_project(&mut self, now_secs: f64) {
+        const AUTOSAVE_INTERVAL_SECS: f64 = 2.0;
+
+        if !self.project_autosave_enabled {
+            return;
+        }
+
+        if !Self::is_filesystem_project_path(self.current_catalog_path.as_str()) {
+            return;
+        }
+
+        let should_save = self
+            .project_last_autosave_at_secs
+            .map(|last| now_secs - last >= AUTOSAVE_INTERVAL_SECS)
+            .unwrap_or(true);
+
+        if !should_save {
+            return;
+        }
+
+        self.project_last_autosave_at_secs = Some(now_secs);
+        if let Err(error) = self.autosave_filesystem_project() {
+            self.status_message = format!("Autosave failed: {error}");
+        }
+    }
+
+    fn import_from_plugin_path(&mut self, plugin_name: &str, input_path: &Path) -> anyhow::Result<usize> {
+        let Some(plugin) = plugin_by_name(plugin_name) else {
+            return Err(anyhow::anyhow!("Unknown plugin: {}", plugin_name));
+        };
+        let definition = plugin.definition();
+        if definition.name != plugin_name {
+            return Err(anyhow::anyhow!(
+                "Plugin name mismatch: expected '{}', got '{}'",
+                plugin_name,
+                definition.name
+            ));
+        }
+        match definition.input_type {
+            crate::plugins::PluginInputType::FileSystem => {}
+        }
+
+        let drafts = plugin.transform_file(input_path)?;
+        if drafts.is_empty() {
+            return Ok(0);
+        }
+
+        let expected_system_type = definition.system_type;
+        if !expected_system_type.trim().is_empty()
+            && drafts
+                .iter()
+                .any(|draft| !draft.system_type.eq_ignore_ascii_case(expected_system_type))
+        {
+            return Err(anyhow::anyhow!(
+                "Plugin '{}' produced a system type outside '{}'",
+                definition.display_name,
+                expected_system_type
+            ));
+        }
+
+        let mut created_ids = Vec::new();
+        for draft in drafts {
+            let system_id = self.repo.create_system(
+                draft.name.as_str(),
+                draft.description.as_str(),
+                None,
+                draft.system_type.as_str(),
+                draft.route_methods.as_deref(),
+            )?;
+
+            self.mark_system_as_new(system_id);
+
+            if !draft.database_columns.is_empty() {
+                self.repo
+                    .replace_database_columns_for_system(system_id, &draft.database_columns)?;
+                self.mark_system_as_dirty(system_id);
+            }
+
+            created_ids.push(system_id);
+        }
+
         self.refresh_systems()?;
-        self.load_ui_settings()?;
-        self.clear_selection();
+        for system_id in &created_ids {
+            let position = self.find_next_free_root_spawn_position();
+            self.map_positions.insert(*system_id, position);
+            self.persist_map_position(*system_id, position);
+        }
+
+        if let Some(first) = created_ids.first().copied() {
+            self.selected_system_id = Some(first);
+            let _ = self.load_selected_data(first);
+        }
+
+        Ok(created_ids.len())
+    }
+
+    fn referenced_columns_for_system(&self, system_id: i64) -> HashSet<String> {
+        let mut referenced = HashSet::new();
+
+        for link in &self.all_links {
+            if link.source_system_id == system_id {
+                if let Some(column_name) = link.source_column_name.as_deref() {
+                    let normalized = column_name.trim();
+                    if !normalized.is_empty() {
+                        referenced.insert(normalized.to_owned());
+                    }
+                }
+            }
+
+            if link.target_system_id == system_id {
+                if let Some(column_name) = link.target_column_name.as_deref() {
+                    let normalized = column_name.trim();
+                    if !normalized.is_empty() {
+                        referenced.insert(normalized.to_owned());
+                    }
+                }
+            }
+        }
+
+        referenced
+    }
+
+    fn merge_ddl_columns_preserving_references(
+        mut imported_columns: Vec<DatabaseColumnInput>,
+        referenced_columns: &HashSet<String>,
+    ) -> Vec<DatabaseColumnInput> {
+        let mut known = imported_columns
+            .iter()
+            .map(|column| column.column_name.trim().to_ascii_lowercase())
+            .collect::<HashSet<_>>();
+
+        let mut next_position = imported_columns.len() as i64;
+        for referenced in referenced_columns {
+            let normalized = referenced.trim();
+            if normalized.is_empty() {
+                continue;
+            }
+
+            let key = normalized.to_ascii_lowercase();
+            if known.contains(&key) {
+                continue;
+            }
+
+            imported_columns.push(DatabaseColumnInput {
+                position: next_position,
+                column_name: normalized.to_owned(),
+                column_type: "text".to_owned(),
+                constraints: Some("preserved for existing link references".to_owned()),
+            });
+            known.insert(key);
+            next_position += 1;
+        }
+
+        imported_columns
+    }
+
+    fn normalize_table_identifier(value: &str) -> String {
+        value
+            .trim()
+            .trim_matches('`')
+            .trim_matches('"')
+            .trim_matches('[')
+            .trim_matches(']')
+            .to_ascii_lowercase()
+    }
+
+    fn table_identifier_parts(value: &str) -> (String, Option<String>, String) {
+        let normalized = Self::normalize_table_identifier(value);
+        let segments = normalized
+            .split('.')
+            .map(str::trim)
+            .filter(|segment| !segment.is_empty())
+            .collect::<Vec<_>>();
+
+        if segments.is_empty() {
+            return (normalized, None, String::new());
+        }
+
+        let leaf = segments.last().map(|segment| (*segment).to_owned()).unwrap_or_default();
+        let schema = if segments.len() >= 2 {
+            Some(segments[0].to_owned())
+        } else {
+            None
+        };
+
+        (normalized, schema, leaf)
+    }
+
+    fn preselect_database_system_for_ddl_table(
+        &self,
+        ddl_table_name: &str,
+        database_systems: &[crate::models::SystemRecord],
+        systems_by_id: &HashMap<i64, crate::models::SystemRecord>,
+    ) -> Option<i64> {
+        let (ddl_full, ddl_schema, ddl_leaf) = Self::table_identifier_parts(ddl_table_name);
+        if ddl_leaf.is_empty() {
+            return None;
+        }
+
+        let full_matches = database_systems
+            .iter()
+            .filter(|system| Self::normalize_table_identifier(system.name.as_str()) == ddl_full)
+            .map(|system| system.id)
+            .collect::<Vec<_>>();
+
+        if full_matches.len() == 1 {
+            return full_matches.first().copied();
+        }
+
+        let leaf_matches = database_systems
+            .iter()
+            .filter(|system| {
+                let (_, _, system_leaf) = Self::table_identifier_parts(system.name.as_str());
+                system_leaf == ddl_leaf
+            })
+            .map(|system| system.id)
+            .collect::<Vec<_>>();
+
+        if leaf_matches.len() == 1 {
+            return leaf_matches.first().copied();
+        }
+
+        if leaf_matches.len() > 1 {
+            if let Some(schema_name) = ddl_schema {
+                let parent_name_matches = leaf_matches
+                    .iter()
+                    .filter_map(|system_id| {
+                        let system = systems_by_id.get(system_id)?;
+                        let parent_id = system.parent_id?;
+                        let parent = systems_by_id.get(&parent_id)?;
+                        let parent_name = Self::normalize_table_identifier(parent.name.as_str());
+                        if parent_name == schema_name {
+                            Some(*system_id)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>();
+
+                if parent_name_matches.len() == 1 {
+                    return parent_name_matches.first().copied();
+                }
+            }
+        }
+
+        None
+    }
+
+    fn apply_ddl_mapping(
+        &mut self,
+        drafts: Vec<crate::plugins::PluginSystemDraft>,
+        targets: Vec<Option<i64>>,
+        plugin_display_name: &str,
+    ) -> anyhow::Result<(usize, usize)> {
+        if drafts.len() != targets.len() {
+            return Err(anyhow::anyhow!(
+                "{} mapping state mismatch ({} drafts vs {} targets)",
+                plugin_display_name,
+                drafts.len(),
+                targets.len()
+            ));
+        }
+
+        self.refresh_systems()?;
+
+        let mut used_existing_targets = HashSet::new();
+        for target in targets.iter().flatten() {
+            if !used_existing_targets.insert(*target) {
+                return Err(anyhow::anyhow!(
+                    "One existing system is mapped to multiple DDL tables. Use unique targets."
+                ));
+            }
+        }
+
+        let systems_by_id = self
+            .systems
+            .iter()
+            .map(|system| (system.id, system.clone()))
+            .collect::<HashMap<_, _>>();
+
+        let mut created_ids = Vec::new();
+        let mut updated_count = 0_usize;
+
+        for (draft, target_system_id) in drafts.into_iter().zip(targets.into_iter()) {
+            if let Some(existing_id) = target_system_id {
+                let Some(existing) = systems_by_id.get(&existing_id) else {
+                    return Err(anyhow::anyhow!(
+                        "Mapped target system {} no longer exists",
+                        existing_id
+                    ));
+                };
+
+                self.repo.update_system_details(
+                    existing.id,
+                    existing.name.as_str(),
+                    draft.description.as_str(),
+                    existing.naming_root,
+                    existing.naming_delimiter.as_str(),
+                    "database",
+                    None,
+                )?;
+
+                let referenced_columns = self.referenced_columns_for_system(existing.id);
+                let merged_columns =
+                    Self::merge_ddl_columns_preserving_references(draft.database_columns, &referenced_columns);
+
+                self.repo
+                    .replace_database_columns_for_system(existing.id, &merged_columns)?;
+
+                self.mark_system_as_dirty(existing.id);
+                updated_count += 1;
+            } else {
+                let new_id = self.repo.create_system(
+                    draft.name.as_str(),
+                    draft.description.as_str(),
+                    None,
+                    "database",
+                    None,
+                )?;
+
+                self.mark_system_as_new(new_id);
+
+                if !draft.database_columns.is_empty() {
+                    self.repo
+                        .replace_database_columns_for_system(new_id, &draft.database_columns)?;
+                }
+
+                created_ids.push(new_id);
+            }
+        }
+
+        self.refresh_systems()?;
+        for system_id in &created_ids {
+            let position = self.find_next_free_root_spawn_position();
+            self.map_positions.insert(*system_id, position);
+            self.persist_map_position(*system_id, position);
+        }
+
+        if let Some(first) = created_ids.first().copied() {
+            self.selected_system_id = Some(first);
+            let _ = self.load_selected_data(first);
+        }
+
+        Ok((created_ids.len(), updated_count))
+    }
+
+    pub(super) fn apply_pending_ddl_table_mapping(&mut self) {
+        let drafts = std::mem::take(&mut self.pending_ddl_drafts);
+        let targets = std::mem::take(&mut self.pending_ddl_target_system_ids);
+
+        let result = self.apply_ddl_mapping(drafts, targets, "DDL Plugin");
+        self.show_ddl_table_mapping_modal = false;
+
+        match result {
+            Ok((created_count, updated_count)) => {
+                self.status_message = format!(
+                    "DDL Plugin synced: {} created, {} updated",
+                    created_count, updated_count
+                );
+            }
+            Err(error) => {
+                self.status_message = format!("DDL Plugin mapping failed: {error}");
+            }
+        }
+    }
+
+    pub(super) fn cancel_pending_ddl_table_mapping(&mut self) {
+        self.pending_ddl_drafts.clear();
+        self.pending_ddl_target_system_ids.clear();
+        self.show_ddl_table_mapping_modal = false;
+        self.status_message = "DDL import mapping canceled".to_owned();
+    }
+
+    pub(super) fn import_database_tables_from_ddl_path(&mut self, input_path: &Path) {
+        let result = (|| -> anyhow::Result<(String, usize, usize)> {
+            let Some(plugin) = plugin_by_name("plugin.ddl") else {
+                return Err(anyhow::anyhow!("Unknown plugin: plugin.ddl"));
+            };
+            let definition = plugin.definition();
+
+            self.refresh_systems()?;
+
+            let drafts = plugin.transform_file(input_path)?;
+            if drafts.is_empty() {
+                return Ok((definition.display_name.to_owned(), 0, 0));
+            }
+
+            let existing_database_systems = self
+                .systems
+                .iter()
+                .filter(|system| system.system_type.eq_ignore_ascii_case("database"))
+                .cloned()
+                .collect::<Vec<_>>();
+
+            if !existing_database_systems.is_empty() {
+                let systems_by_id = self
+                    .systems
+                    .iter()
+                    .map(|system| (system.id, system.clone()))
+                    .collect::<HashMap<_, _>>();
+
+                let targets = drafts
+                    .iter()
+                    .map(|draft| {
+                        self.preselect_database_system_for_ddl_table(
+                            draft.name.as_str(),
+                            &existing_database_systems,
+                            &systems_by_id,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+
+                self.pending_ddl_drafts = drafts;
+                self.pending_ddl_target_system_ids = targets;
+                self.open_modal(crate::app::AppModal::DdlTableMapping);
+                self.status_message =
+                    "DDL import mapping ready; review preselected matches and apply".to_owned();
+                return Ok((definition.display_name.to_owned(), 0, 0));
+            }
+
+            let targets = vec![None; drafts.len()];
+            let (created_count, updated_count) =
+                self.apply_ddl_mapping(drafts, targets, definition.display_name)?;
+            Ok((definition.display_name.to_owned(), created_count, updated_count))
+        })();
+
+        match result {
+            Ok((display_name, created_count, updated_count)) => {
+                if self.show_ddl_table_mapping_modal {
+                    return;
+                }
+
+                self.status_message = format!(
+                    "{} synced: {} created, {} updated",
+                    display_name, created_count, updated_count
+                );
+            }
+            Err(error) => {
+                self.status_message = format!("DDL Plugin import failed: {error}");
+            }
+        }
+    }
+
+    pub(super) fn import_api_routes_from_openapi_path(&mut self, input_path: &Path) {
+        let plugin_display_name = plugin_by_name("plugin.openapi")
+            .map(|plugin| plugin.definition().display_name.to_owned())
+            .unwrap_or_else(|| "OpenAPI Plugin".to_owned());
+
+        match self.import_from_plugin_path("plugin.openapi", input_path) {
+            Ok(count) => {
+                self.status_message =
+                    format!("{} imported {} route system(s)", plugin_display_name, count);
+            }
+            Err(error) => {
+                self.status_message = format!("{} import failed: {error}", plugin_display_name);
+            }
+        }
+    }
+
+    fn slugify_segment(value: &str) -> String {
+        let mut slug = String::new();
+        for character in value.chars() {
+            if character.is_ascii_alphanumeric() {
+                slug.push(character.to_ascii_lowercase());
+            } else if (character == ' ' || character == '-' || character == '_') && !slug.ends_with('_') {
+                slug.push('_');
+            }
+        }
+
+        let slug = slug.trim_matches('_');
+        if slug.is_empty() {
+            "item".to_owned()
+        } else {
+            slug.to_owned()
+        }
+    }
+
+    fn system_relative_file_path(
+        &self,
+        system_id: i64,
+        system_by_id: &HashMap<i64, crate::models::SystemRecord>,
+    ) -> String {
+        let mut segments = Vec::new();
+        let mut current = Some(system_id);
+        let mut visited = HashSet::new();
+
+        while let Some(id) = current {
+            if !visited.insert(id) {
+                break;
+            }
+
+            let Some(system) = system_by_id.get(&id) else {
+                break;
+            };
+
+            segments.push(format!(
+                "{}__{}",
+                Self::slugify_segment(system.name.as_str()),
+                system.id
+            ));
+            current = system.parent_id;
+        }
+
+        segments.reverse();
+        let file_name = format!("{}.json", segments.last().cloned().unwrap_or_else(|| format!("system__{}", system_id)));
+        let mut path_parts = vec!["systems".to_owned()];
+        path_parts.extend(segments);
+        path_parts.push(file_name);
+        path_parts.join("/")
+    }
+
+    fn export_catalog_to_filesystem_project(&mut self, root: &Path) -> anyhow::Result<()> {
+        std::fs::create_dir_all(root)?;
+
+        let systems_root = root.join("systems");
+        let interactions_root = root.join("interactions");
+        std::fs::create_dir_all(&systems_root)?;
+        std::fs::create_dir_all(&interactions_root)?;
+
+        let system_by_id = self
+            .systems
+            .iter()
+            .cloned()
+            .map(|system| (system.id, system))
+            .collect::<HashMap<_, _>>();
+
+        let mut systems_paths = Vec::new();
+        for system in &self.systems {
+            let relative_path = self.system_relative_file_path(system.id, &system_by_id);
+            let absolute_path = root.join(relative_path.replace('/', std::path::MAIN_SEPARATOR_STR));
+            if let Some(parent) = absolute_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+
+            let (map_x, map_y) = self
+                .map_positions
+                .get(&system.id)
+                .map(|position| (Some(position.x), Some(position.y)))
+                .unwrap_or((system.map_x, system.map_y));
+
+            let notes = self
+                .repo
+                .list_notes_for_system(system.id)?
+                .into_iter()
+                .map(|note| SystemNoteFile {
+                    id: note.id,
+                    body: note.body,
+                    updated_at: note.updated_at,
+                })
+                .collect::<Vec<_>>();
+
+            let database_columns = self
+                .database_columns_by_system
+                .get(&system.id)
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|column| DatabaseColumnFile {
+                    position: column.position,
+                    column_name: column.column_name,
+                    column_type: column.column_type,
+                    constraints: column.constraints,
+                })
+                .collect::<Vec<_>>();
+
+            let system_file = SystemFile {
+                id: system.id,
+                name: system.name.clone(),
+                description: system.description.clone(),
+                parent_id: system.parent_id,
+                calculated_name: self.naming_path_for_system(system.id),
+                map_x,
+                map_y,
+                line_color_override: system.line_color_override.clone(),
+                naming_root: system.naming_root,
+                naming_delimiter: system.naming_delimiter.clone(),
+                system_type: system.system_type.clone(),
+                route_methods: system.route_methods.clone(),
+                tech_ids: self
+                    .system_tech_ids_by_system
+                    .get(&system.id)
+                    .cloned()
+                    .unwrap_or_default(),
+                notes,
+                database_columns,
+            };
+
+            let bytes = serde_json::to_vec_pretty(&system_file)?;
+            Self::write_file_if_changed(&absolute_path, &bytes)?;
+            systems_paths.push(relative_path);
+        }
+
+        let mut interactions_paths = Vec::new();
+        for interaction in &self.all_links {
+            let file_name = format!(
+                "{}__to__{}__{}.json",
+                interaction.source_system_id, interaction.target_system_id, interaction.id
+            );
+            let relative_path = format!("interactions/{file_name}");
+            let absolute_path = interactions_root.join(file_name);
+
+            let interaction_file = InteractionFile {
+                id: interaction.id,
+                source_system_id: interaction.source_system_id,
+                target_system_id: interaction.target_system_id,
+                label: interaction.label.clone(),
+                note: interaction.note.clone(),
+                kind: interaction.kind.clone(),
+                source_column_name: interaction.source_column_name.clone(),
+                target_column_name: interaction.target_column_name.clone(),
+            };
+
+            let bytes = serde_json::to_vec_pretty(&interaction_file)?;
+            Self::write_file_if_changed(&absolute_path, &bytes)?;
+            interactions_paths.push(relative_path);
+        }
+
+        let project = ProjectFile {
+            schema_version: 1,
+            systems_paths,
+            interactions_paths,
+            tech_catalog: self
+                .tech_catalog
+                .iter()
+                .cloned()
+                .map(|tech| ProjectTechItem {
+                    id: tech.id,
+                    name: tech.name,
+                    description: tech.description,
+                    documentation_link: tech.documentation_link,
+                    color: tech.color,
+                    display_priority: tech.display_priority,
+                })
+                .collect(),
+            zones: self
+                .zones
+                .iter()
+                .cloned()
+                .map(|zone| ProjectZone {
+                    id: zone.id,
+                    name: zone.name,
+                    x: zone.x,
+                    y: zone.y,
+                    width: zone.width,
+                    height: zone.height,
+                    color: zone.color,
+                    render_priority: zone.render_priority,
+                    parent_zone_id: zone.parent_zone_id,
+                    minimized: zone.minimized,
+                    representative_system_id: zone.representative_system_id,
+                })
+                .collect(),
+            zone_offsets: self
+                .zone_offsets_by_system
+                .iter()
+                .map(|(system_id, (zone_id, offset))| ProjectZoneOffset {
+                    zone_id: *zone_id,
+                    system_id: *system_id,
+                    offset_x: offset.x,
+                    offset_y: offset.y,
+                })
+                .collect(),
+            settings: ProjectSettings {
+                autosave_enabled: self.project_autosave_enabled,
+                map_zoom: self.map_zoom,
+                map_pan_x: self.map_pan.x,
+                map_pan_y: self.map_pan.y,
+                map_world_width: self.map_world_size.x,
+                map_world_height: self.map_world_size.y,
+                snap_to_grid: self.snap_to_grid,
+            },
+        };
+
+        let project_path = root.join("Project.json");
+        let project_bytes = serde_json::to_vec_pretty(&project)?;
+        Self::write_file_if_changed(&project_path, &project_bytes)?;
+
+        self.clear_system_change_flags();
+
         Ok(())
     }
 
-    fn catalog_file_name_from_project_name(name: &str) -> String {
+    fn import_filesystem_project_from_root(&mut self, root: &Path) -> anyhow::Result<()> {
+        let project_path = root.join("Project.json");
+        let project_text = std::fs::read_to_string(&project_path)?;
+        let project: ProjectFile = serde_json::from_str(project_text.as_str())?;
+
+        self.repo.clear_catalog_data()?;
+
+        let mut systems = Vec::new();
+        for relative_path in &project.systems_paths {
+            let absolute_path = root.join(relative_path.replace('/', std::path::MAIN_SEPARATOR_STR));
+            let file_text = std::fs::read_to_string(&absolute_path)?;
+            let system: SystemFile = serde_json::from_str(file_text.as_str())?;
+            systems.push(system);
+        }
+
+        for tech in &project.tech_catalog {
+            self.repo.insert_tech_item_with_id(
+                tech.id,
+                tech.name.as_str(),
+                tech.description.as_deref(),
+                tech.documentation_link.as_deref(),
+                tech.color.as_deref(),
+                tech.display_priority,
+            )?;
+        }
+
+        for system in &systems {
+            self.repo.insert_system_with_id(
+                system.id,
+                system.name.as_str(),
+                system.description.as_str(),
+                None,
+                system.map_x,
+                system.map_y,
+                system.line_color_override.as_deref(),
+                system.naming_root,
+                system.naming_delimiter.as_str(),
+                system.system_type.as_str(),
+                system.route_methods.as_deref(),
+            )?;
+        }
+
+        for system in &systems {
+            self.repo.update_system_parent(system.id, system.parent_id)?;
+
+            for note in &system.notes {
+                self.repo.insert_note_with_id(
+                    note.id,
+                    system.id,
+                    note.body.as_str(),
+                    note.updated_at.as_str(),
+                )?;
+            }
+
+            let columns = system
+                .database_columns
+                .iter()
+                .map(|column| DatabaseColumnInput {
+                    position: column.position,
+                    column_name: column.column_name.clone(),
+                    column_type: column.column_type.clone(),
+                    constraints: column.constraints.clone(),
+                })
+                .collect::<Vec<_>>();
+
+            self.repo.replace_database_columns_for_system(system.id, &columns)?;
+
+            for tech_id in &system.tech_ids {
+                self.repo.add_tech_to_system(system.id, *tech_id)?;
+            }
+        }
+
+        for relative_path in &project.interactions_paths {
+            let absolute_path = root.join(relative_path.replace('/', std::path::MAIN_SEPARATOR_STR));
+            let file_text = std::fs::read_to_string(&absolute_path)?;
+            let interaction: InteractionFile = serde_json::from_str(file_text.as_str())?;
+            self.repo.insert_link_with_id(
+                interaction.id,
+                interaction.source_system_id,
+                interaction.target_system_id,
+                interaction.label.as_str(),
+                interaction.note.as_str(),
+                interaction.kind.as_str(),
+                interaction.source_column_name.as_deref(),
+                interaction.target_column_name.as_deref(),
+            )?;
+        }
+
+        for zone in &project.zones {
+            self.repo.insert_zone_with_id(
+                zone.id,
+                zone.name.as_str(),
+                zone.x,
+                zone.y,
+                zone.width,
+                zone.height,
+                zone.color.as_deref(),
+                zone.render_priority,
+                None,
+                false,
+                zone.representative_system_id,
+            )?;
+        }
+
+        for zone in &project.zones {
+            self.repo.update_zone(
+                zone.id,
+                zone.name.as_str(),
+                zone.x,
+                zone.y,
+                zone.width,
+                zone.height,
+                zone.color.as_deref(),
+                zone.render_priority,
+                zone.parent_zone_id,
+                zone.minimized,
+                zone.representative_system_id,
+            )?;
+        }
+
+        for offset in &project.zone_offsets {
+            self.repo.upsert_zone_system_offset(
+                offset.zone_id,
+                offset.system_id,
+                offset.offset_x,
+                offset.offset_y,
+            )?;
+        }
+
+        self.refresh_systems()?;
+        self.clear_selection();
+
+        self.map_zoom = project.settings.map_zoom;
+        self.map_pan.x = project.settings.map_pan_x;
+        self.map_pan.y = project.settings.map_pan_y;
+        self.map_world_size.x = project.settings.map_world_width;
+        self.map_world_size.y = project.settings.map_world_height;
+        self.snap_to_grid = project.settings.snap_to_grid;
+        self.project_autosave_enabled = project.settings.autosave_enabled;
+        self.project_last_autosave_at_secs = None;
+        self.clear_system_change_flags();
+        self.settings_dirty = true;
+
+        Ok(())
+    }
+
+    fn load_catalog_from_path(&mut self, path: &str) -> anyhow::Result<()> {
+        let target = PathBuf::from(path);
+
+        let is_sqlite_catalog = target
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.eq_ignore_ascii_case("db"))
+            .unwrap_or(false);
+
+        if is_sqlite_catalog {
+            return Err(anyhow::anyhow!(
+                "Direct .db loading is disabled. Create a new project and use Migration source DB for one-time import."
+            ));
+        } else {
+            self.import_filesystem_project_from_root(&target)?;
+        }
+
+        Ok(())
+    }
+
+    fn catalog_directory_name_from_project_name(name: &str) -> String {
         let mut slug = String::new();
         for character in name.chars() {
             if character.is_ascii_alphanumeric() {
@@ -27,9 +1033,9 @@ impl SystemsCatalogApp {
 
         let slug = slug.trim_matches('_');
         if slug.is_empty() {
-            "catalog".to_owned()
+            "catalog_project".to_owned()
         } else {
-            format!("{slug}.db")
+            slug.to_owned()
         }
     }
 
@@ -74,6 +1080,7 @@ impl SystemsCatalogApp {
             let child_id =
                 self.repo
                     .create_system(method.as_str(), "", Some(route_system_id), "service", None)?;
+            self.mark_system_as_new(child_id);
 
             let base_x = route_position.x + (MAP_GRID_SPACING * 2.0);
             let mut candidate = eframe::egui::Pos2::new(base_x, route_position.y + MAP_GRID_SPACING);
@@ -552,7 +1559,7 @@ impl SystemsCatalogApp {
     }
 
     fn create_system_with_generated_unique_name(
-        &self,
+        &mut self,
         base_name: &str,
         description: &str,
         parent_id: Option<i64>,
@@ -566,6 +1573,7 @@ impl SystemsCatalogApp {
             .repo
             .create_system(base, description, parent_id, "service", None)
         {
+            self.mark_system_as_new(id);
             return Ok(id);
         }
 
@@ -580,6 +1588,7 @@ impl SystemsCatalogApp {
                 .repo
                 .create_system(candidate.as_str(), description, parent_id, "service", None)
             {
+                self.mark_system_as_new(id);
                 return Ok(id);
             }
         }
@@ -889,7 +1898,10 @@ impl SystemsCatalogApp {
             .and_then(|_| self.load_selected_data(system_id));
 
         match result {
-            Ok(_) => self.status_message = "System details updated".to_owned(),
+            Ok(_) => {
+                self.mark_system_as_dirty(system_id);
+                self.status_message = "System details updated".to_owned();
+            }
             Err(error) => {
                 self.status_message = format!("Failed to update system details: {error}")
             }
@@ -971,13 +1983,22 @@ impl SystemsCatalogApp {
     }
 
     pub(super) fn export_catalog(&mut self) {
+        if self.new_system_ids.is_empty() && self.dirty_system_ids.is_empty() {
+            self.show_save_catalog_modal = false;
+            self.status_message = "No new/dirty systems to save".to_owned();
+            return;
+        }
+
         let path = self.save_catalog_path.trim().to_owned();
         if path.is_empty() {
             self.status_message = "Save path is required".to_owned();
             return;
         }
 
-        match self.repo.export_catalog_to_path(path.as_str()) {
+        let destination_path = PathBuf::from(path.as_str());
+        let export_result = self.export_catalog_to_filesystem_project(&destination_path);
+
+        match export_result {
             Ok(_) => {
                 self.push_recent_catalog_path(path.as_str());
                 self.load_catalog_path = path.clone();
@@ -987,9 +2008,9 @@ impl SystemsCatalogApp {
                 }
                 self.settings_dirty = true;
                 self.show_save_catalog_modal = false;
-                self.status_message = format!("Catalog saved to {}", path);
+                self.status_message = format!("Filesystem project saved to {}", path);
             }
-            Err(error) => self.status_message = format!("Failed to save catalog: {error}"),
+            Err(error) => self.status_message = format!("Failed to save project: {error}"),
         }
     }
 
@@ -1010,9 +2031,9 @@ impl SystemsCatalogApp {
                 self.current_catalog_name = Self::catalog_name_from_path(path.as_str());
                 self.settings_dirty = true;
                 self.show_load_catalog_modal = false;
-                self.status_message = format!("Catalog loaded from {}", path);
+                self.status_message = format!("Project loaded from {}", path);
             }
-            Err(error) => self.status_message = format!("Failed to load catalog: {error}"),
+            Err(error) => self.status_message = format!("Failed to load project: {error}"),
         }
     }
 
@@ -1023,6 +2044,31 @@ impl SystemsCatalogApp {
             return;
         }
 
+        if trimmed == self.current_catalog_path.trim() {
+            self.status_message = "Project is already open".to_owned();
+            return;
+        }
+
+        let target = PathBuf::from(trimmed);
+        if !target.exists() {
+            self.recent_catalog_paths
+                .retain(|recent_path| recent_path.trim() != trimmed);
+            self.settings_dirty = true;
+            self.status_message = format!("Project path no longer exists: {}", trimmed);
+            return;
+        }
+
+        if target.is_dir() && !target.join("Project.json").exists() {
+            self.recent_catalog_paths
+                .retain(|recent_path| recent_path.trim() != trimmed);
+            self.settings_dirty = true;
+            self.status_message = format!(
+                "Project folder is missing Project.json and was removed from recents: {}",
+                trimmed
+            );
+            return;
+        }
+
         match self.load_catalog_from_path(trimmed) {
             Ok(_) => {
                 self.push_recent_catalog_path(trimmed);
@@ -1030,6 +2076,7 @@ impl SystemsCatalogApp {
                 self.load_catalog_path = trimmed.to_owned();
                 self.current_catalog_path = trimmed.to_owned();
                 self.current_catalog_name = Self::catalog_name_from_path(trimmed);
+                self.pending_catalog_switch_path = None;
                 self.settings_dirty = true;
                 self.status_message = format!("Switched to project '{}'", self.current_catalog_name);
             }
@@ -1061,23 +2108,59 @@ impl SystemsCatalogApp {
             return;
         }
 
-        let file_name = Self::catalog_file_name_from_project_name(project_name.as_str());
-        let path = target_directory.join(file_name);
+        let path = if self.new_catalog_directory.trim().is_empty() {
+            let directory_name = Self::catalog_directory_name_from_project_name(project_name.as_str());
+            target_directory.join(directory_name)
+        } else {
+            target_directory.clone()
+        };
         let path_text = path.to_string_lossy().to_string();
+        let migration_source_db_path = self.new_catalog_migration_db_path.trim().to_owned();
 
-        let result = self
-            .repo
-            .clear_catalog_data()
-            .and_then(|_| self.refresh_systems())
-            .and_then(|_| self.repo.export_catalog_to_path(path_text.as_str()));
+        let migration_requested = !migration_source_db_path.is_empty();
+        if migration_requested {
+            let migration_source = PathBuf::from(migration_source_db_path.as_str());
+            let looks_like_db = migration_source
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .map(|ext| {
+                    ext.eq_ignore_ascii_case("db")
+                        || ext.eq_ignore_ascii_case("sqlite")
+                        || ext.eq_ignore_ascii_case("sqlite3")
+                })
+                .unwrap_or(false);
+            if !looks_like_db {
+                self.status_message = "Migration source must be a .db/.sqlite/.sqlite3 file"
+                    .to_owned();
+                return;
+            }
+
+            if !migration_source.exists() {
+                self.status_message = "Migration source DB path does not exist".to_owned();
+                return;
+            }
+        }
+
+        let result = (|| -> anyhow::Result<()> {
+            if migration_requested {
+                self.repo.import_catalog_from_path(migration_source_db_path.as_str())?;
+                self.refresh_systems()?;
+            } else {
+                self.repo.clear_catalog_data()?;
+                self.refresh_systems()?;
+            }
+
+            self.export_catalog_to_filesystem_project(&path)?;
+            Ok(())
+        })();
 
         match result {
             Ok(_) => {
                 self.clear_selection();
-                self.map_positions.clear();
                 self.current_catalog_name = project_name;
                 self.current_catalog_path = path_text.clone();
                 self.new_catalog_directory = target_directory.to_string_lossy().to_string();
+                self.new_catalog_migration_db_path.clear();
                 self.save_catalog_path = path_text.clone();
                 self.load_catalog_path = path_text.clone();
                 self.push_recent_catalog_path(path_text.as_str());
@@ -1087,10 +2170,17 @@ impl SystemsCatalogApp {
                 self.show_load_catalog_modal = false;
                 self.show_new_catalog_confirm_modal = false;
                 self.settings_dirty = true;
-                self.status_message = format!("Created project '{}'", self.current_catalog_name);
+                self.status_message = if migration_requested {
+                    format!(
+                        "Created project '{}' from DB migration",
+                        self.current_catalog_name
+                    )
+                } else {
+                    format!("Created project '{}'", self.current_catalog_name)
+                };
             }
             Err(error) => {
-                self.status_message = format!("Failed to create new catalog: {error}");
+                self.status_message = format!("Failed to create new project: {error}");
             }
         }
     }
@@ -1112,7 +2202,10 @@ impl SystemsCatalogApp {
             .and_then(|_| self.load_selected_data(system_id));
 
         match result {
-            Ok(_) => self.status_message = "System line color override updated".to_owned(),
+            Ok(_) => {
+                self.mark_system_as_dirty(system_id);
+                self.status_message = "System line color override updated".to_owned();
+            }
             Err(error) => {
                 self.status_message = format!("Failed to update line color override: {error}")
             }
@@ -1251,7 +2344,10 @@ impl SystemsCatalogApp {
             .and_then(|_| self.load_selected_data(system_id));
 
         match result {
-            Ok(_) => self.status_message = "Technology removed from system".to_owned(),
+            Ok(_) => {
+                self.mark_system_as_dirty(system_id);
+                self.status_message = "Technology removed from system".to_owned();
+            }
             Err(error) => {
                 self.status_message = format!("Failed to remove technology from system: {error}")
             }
@@ -1278,7 +2374,10 @@ impl SystemsCatalogApp {
             .and_then(|_| self.load_selected_data(system_id));
 
         match result {
-            Ok(_) => self.status_message = "Parent updated".to_owned(),
+            Ok(_) => {
+                self.mark_system_as_dirty(system_id);
+                self.status_message = "Parent updated".to_owned();
+            }
             Err(error) => self.status_message = format!("Failed to update parent: {error}"),
         }
     }
@@ -1389,6 +2488,7 @@ impl SystemsCatalogApp {
 
         match result {
             Ok(_) => {
+                self.mark_system_as_dirty(system_id);
                 self.selected_tech_id_for_assignment = None;
                 self.status_message = "Technology assigned to system".to_owned();
             }
@@ -1434,21 +2534,23 @@ impl SystemsCatalogApp {
                 route_methods.as_deref(),
             )
             .and_then(|new_id| {
+                self.mark_system_as_new(new_id);
                 for tech_id in &assigned_tech_ids {
                     self.repo.add_tech_to_system(new_id, *tech_id)?;
                 }
 
                 self.refresh_systems()?;
 
-                let spawn_position = if parent_id.is_some() {
-                    self.find_next_free_child_spawn_position(parent_id)
-                } else {
-                    Some(self.find_next_free_root_spawn_position())
-                };
-
-                if let Some(spawn_position) = spawn_position {
+                if let Some((spawn_position, zone_binding)) =
+                    self.spawn_position_for_new_system(parent_id)
+                {
                     self.map_positions.insert(new_id, spawn_position);
                     self.persist_map_position(new_id, spawn_position);
+
+                    if let Some((zone_id, offset)) = zone_binding {
+                        self.assign_system_to_zone_offset(new_id, zone_id, offset);
+                        self.persist_system_zone_offset(new_id, zone_id, offset);
+                    }
                 }
 
                 self.spawn_route_method_systems(new_id, &route_methods_set_for_spawn)?;
@@ -1500,6 +2602,7 @@ impl SystemsCatalogApp {
                 let new_id = self
                     .repo
                     .create_system(name, "", parent_id, "service", None)?;
+                self.mark_system_as_new(new_id);
 
                 for tech_id in &parent_tech_ids {
                     let _ = self.repo.add_tech_to_system(new_id, *tech_id);
@@ -1511,15 +2614,15 @@ impl SystemsCatalogApp {
             self.refresh_systems()?;
 
             for created_id in created_ids {
-                let spawn_position = if parent_id.is_some() {
-                    self.find_next_free_child_spawn_position(parent_id)
-                } else {
-                    Some(self.find_next_free_root_spawn_position())
-                };
-
-                if let Some(position) = spawn_position {
+                if let Some((position, zone_binding)) = self.spawn_position_for_new_system(parent_id)
+                {
                     self.map_positions.insert(created_id, position);
                     self.persist_map_position(created_id, position);
+
+                    if let Some((zone_id, offset)) = zone_binding {
+                        self.assign_system_to_zone_offset(created_id, zone_id, offset);
+                        self.persist_system_zone_offset(created_id, zone_id, offset);
+                    }
                 }
             }
 
@@ -1570,6 +2673,7 @@ impl SystemsCatalogApp {
 
         match result {
             Ok(_) => {
+                self.mark_system_as_dirty(system_id);
                 self.status_message =
                     format!("Added technology '{tech_name}' to '{system_name}'");
             }
@@ -1616,6 +2720,9 @@ impl SystemsCatalogApp {
 
         match result {
             Ok(_) => {
+                for system_id in &subtree_ids {
+                    self.mark_system_as_dirty(*system_id);
+                }
                 if added_count > 0 {
                     self.status_message = format!(
                         "Added '{}' to {} system(s) in subtree",

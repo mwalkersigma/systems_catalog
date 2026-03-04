@@ -12,6 +12,7 @@ use crate::models::{
     DatabaseColumnInput, DatabaseColumnRecord, SystemLink, SystemNote, SystemRecord, TechItem,
     ZoneRecord,
 };
+use crate::plugins::PluginSystemDraft;
 
 pub(crate) const MAP_NODE_SIZE: Vec2 = Vec2::new(170.0, 64.0);
 pub(crate) const MAP_WORLD_SIZE: Vec2 = Vec2::new(12000.0, 12000.0);
@@ -92,6 +93,7 @@ pub enum AppModal {
     SaveCatalog,
     LoadCatalog,
     NewCatalogConfirm,
+    DdlTableMapping,
     HelpGettingStarted,
     HelpCreatingInteractions,
     HelpManagingTechnology,
@@ -197,6 +199,8 @@ pub struct SystemsCatalogApp {
     fast_add_selected_catalog_tech_on_map: bool,
 
     map_positions: HashMap<i64, Pos2>,
+    new_system_ids: HashSet<i64>,
+    dirty_system_ids: HashSet<i64>,
     map_card_label_cache: HashMap<i64, String>,
     map_node_size_cache: HashMap<i64, Vec2>,
     /// Per-frame cache: set of all system IDs for quick existence checks.
@@ -267,6 +271,7 @@ pub struct SystemsCatalogApp {
     show_save_catalog_modal: bool,
     show_load_catalog_modal: bool,
     show_new_catalog_confirm_modal: bool,
+    show_ddl_table_mapping_modal: bool,
     show_help_getting_started_modal: bool,
     show_help_creating_interactions_modal: bool,
     show_help_managing_technology_modal: bool,
@@ -282,8 +287,14 @@ pub struct SystemsCatalogApp {
     recent_catalog_paths: Vec<String>,
     current_catalog_name: String,
     current_catalog_path: String,
+    pending_catalog_switch_path: Option<String>,
     new_catalog_name: String,
     new_catalog_directory: String,
+    new_catalog_migration_db_path: String,
+    pending_ddl_drafts: Vec<PluginSystemDraft>,
+    pending_ddl_target_system_ids: Vec<Option<i64>>,
+    project_autosave_enabled: bool,
+    project_last_autosave_at_secs: Option<f64>,
     show_left_sidebar: bool,
     active_sidebar_tab: SidebarTab,
 
@@ -365,6 +376,8 @@ impl SystemsCatalogApp {
             database_columns_by_system: HashMap::new(),
             fast_add_selected_catalog_tech_on_map: false,
             map_positions: HashMap::new(),
+            new_system_ids: HashSet::new(),
+            dirty_system_ids: HashSet::new(),
             map_card_label_cache: HashMap::new(),
             map_node_size_cache: HashMap::new(),
             system_id_set: HashSet::new(),
@@ -430,6 +443,7 @@ impl SystemsCatalogApp {
             show_save_catalog_modal: false,
             show_load_catalog_modal: false,
             show_new_catalog_confirm_modal: false,
+            show_ddl_table_mapping_modal: false,
             show_help_getting_started_modal: false,
             show_help_creating_interactions_modal: false,
             show_help_managing_technology_modal: false,
@@ -440,13 +454,19 @@ impl SystemsCatalogApp {
             show_debug_inspection_window: false,
             show_debug_memory_window: false,
             modal_open_stack: Vec::new(),
-            save_catalog_path: "systems_catalog_export.db".to_owned(),
-            load_catalog_path: "systems_catalog_export.db".to_owned(),
+            save_catalog_path: String::new(),
+            load_catalog_path: String::new(),
             recent_catalog_paths: Vec::new(),
-            current_catalog_name: "Working Catalog".to_owned(),
+            current_catalog_name: "Working Project".to_owned(),
             current_catalog_path: String::new(),
+            pending_catalog_switch_path: None,
             new_catalog_name: String::new(),
             new_catalog_directory: String::new(),
+            new_catalog_migration_db_path: String::new(),
+            pending_ddl_drafts: Vec::new(),
+            pending_ddl_target_system_ids: Vec::new(),
+            project_autosave_enabled: false,
+            project_last_autosave_at_secs: None,
             show_left_sidebar: true,
             active_sidebar_tab: SidebarTab::Systems,
             parent_line_style: LineStyle {
@@ -514,6 +534,7 @@ impl SystemsCatalogApp {
             AppModal::SaveCatalog => self.show_save_catalog_modal,
             AppModal::LoadCatalog => self.show_load_catalog_modal,
             AppModal::NewCatalogConfirm => self.show_new_catalog_confirm_modal,
+            AppModal::DdlTableMapping => self.show_ddl_table_mapping_modal,
             AppModal::HelpGettingStarted => self.show_help_getting_started_modal,
             AppModal::HelpCreatingInteractions => self.show_help_creating_interactions_modal,
             AppModal::HelpManagingTechnology => self.show_help_managing_technology_modal,
@@ -535,6 +556,7 @@ impl SystemsCatalogApp {
             AppModal::SaveCatalog => self.show_save_catalog_modal = is_open,
             AppModal::LoadCatalog => self.show_load_catalog_modal = is_open,
             AppModal::NewCatalogConfirm => self.show_new_catalog_confirm_modal = is_open,
+            AppModal::DdlTableMapping => self.show_ddl_table_mapping_modal = is_open,
             AppModal::HelpGettingStarted => self.show_help_getting_started_modal = is_open,
             AppModal::HelpCreatingInteractions => self.show_help_creating_interactions_modal = is_open,
             AppModal::HelpManagingTechnology => self.show_help_managing_technology_modal = is_open,
@@ -626,6 +648,11 @@ impl SystemsCatalogApp {
 
         self.map_positions
             .retain(|system_id, _| self.system_id_set.contains(system_id));
+
+        self.new_system_ids
+            .retain(|system_id| self.system_id_set.contains(system_id));
+        self.dirty_system_ids
+            .retain(|system_id| self.system_id_set.contains(system_id));
 
         self.zone_offsets_by_system.retain(|system_id, (zone_id, _)| {
             self.system_id_set.contains(system_id) && zone_id_set.contains(zone_id)
@@ -2143,6 +2170,24 @@ impl SystemsCatalogApp {
         }
     }
 
+    fn mark_system_as_new(&mut self, system_id: i64) {
+        self.new_system_ids.insert(system_id);
+        self.dirty_system_ids.remove(&system_id);
+    }
+
+    fn mark_system_as_dirty(&mut self, system_id: i64) {
+        if self.new_system_ids.contains(&system_id) {
+            return;
+        }
+
+        self.dirty_system_ids.insert(system_id);
+    }
+
+    fn clear_system_change_flags(&mut self) {
+        self.new_system_ids.clear();
+        self.dirty_system_ids.clear();
+    }
+
     fn push_recent_catalog_path(&mut self, path: &str) {
         let trimmed = path.trim();
         if trimmed.is_empty() {
@@ -2159,7 +2204,7 @@ impl SystemsCatalogApp {
     fn catalog_name_from_path(path: &str) -> String {
         let trimmed = path.trim();
         if trimmed.is_empty() {
-            return "Working Catalog".to_owned();
+            return "Working Project".to_owned();
         }
 
         std::path::Path::new(trimmed)
@@ -2167,7 +2212,7 @@ impl SystemsCatalogApp {
             .and_then(|name| name.to_str())
             .map(str::trim)
             .filter(|name| !name.is_empty())
-            .unwrap_or("Working Catalog")
+                .unwrap_or("Working Project")
             .to_owned()
     }
 
@@ -2706,6 +2751,8 @@ impl SystemsCatalogApp {
                 .update_system_position(system_id, position.x as f64, position.y as f64)
         {
             self.status_message = format!("Failed to persist map position: {error}");
+        } else {
+            self.mark_system_as_dirty(system_id);
         }
     }
 
