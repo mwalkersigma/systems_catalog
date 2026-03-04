@@ -5431,6 +5431,49 @@ impl eframe::App for SystemsCatalogApp {
                     {
                         self.project_last_autosave_at_secs = None;
                     }
+                    ui.checkbox(
+                        &mut self.manage_system_json_hierarchy,
+                        "Manage System JSON Hierarchy",
+                    );
+
+                    if !self.current_catalog_path.trim().is_empty() {
+                        let current_path = self.current_catalog_path.trim().to_owned();
+                        if self.git_repo_detect_path != current_path {
+                            self.git_repo_detect_path = current_path;
+                        }
+
+                        ui.separator();
+                        ui.label("Version control");
+                        match self.git_repo_detected_for_path {
+                            Some(true) => {
+                                if ui.button("Commit").clicked() {
+                                    self.commit_project_changes();
+                                    ui.close_menu();
+                                }
+                                if ui.button("Rollback").clicked() {
+                                    self.rollback_project_changes();
+                                    ui.close_menu();
+                                }
+                                if ui.button("Re-check Version Control").clicked() {
+                                    self.detect_version_control_status();
+                                }
+                            }
+                            Some(false) => {
+                                if ui.button("Enable Version Control").clicked() {
+                                    self.enable_version_control();
+                                    ui.close_menu();
+                                }
+                                if ui.button("Re-check Version Control").clicked() {
+                                    self.detect_version_control_status();
+                                }
+                            }
+                            None => {
+                                if ui.button("Check Version Control").clicked() {
+                                    self.detect_version_control_status();
+                                }
+                            }
+                        }
+                    }
 
                     if !self.recent_catalog_paths.is_empty() {
                         ui.separator();
@@ -5675,8 +5718,17 @@ impl eframe::App for SystemsCatalogApp {
                 });
         }
 
-        if let Some(path) = self.pending_catalog_switch_path.take() {
-            self.switch_to_recent_catalog(path.as_str());
+        if self.pending_catalog_switch_path.is_some() {
+            if !self.pending_catalog_switch_armed {
+                self.pending_catalog_switch_armed = true;
+                if let Some(path) = &self.pending_catalog_switch_path {
+                    self.status_message = format!("Loading project {}...", path);
+                }
+                ctx.request_repaint();
+            } else if let Some(path) = self.pending_catalog_switch_path.take() {
+                self.pending_catalog_switch_armed = false;
+                self.switch_to_recent_catalog(path.as_str());
+            }
         }
 
         if self.selected_system_id.is_some() || self.selected_zone_id.is_some() {

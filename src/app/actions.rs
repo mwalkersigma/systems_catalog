@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use eframe::egui::{Pos2, Rect};
 
@@ -169,6 +170,322 @@ impl SystemsCatalogApp {
 
         let root = PathBuf::from(self.current_catalog_path.as_str());
         self.export_catalog_to_filesystem_project(&root)
+    }
+
+    fn system_id_from_relative_path(relative_path: &str) -> Option<i64> {
+        if !relative_path.starts_with("systems/") {
+            return None;
+        }
+
+        let file_stem = Path::new(relative_path).file_stem()?.to_str()?;
+        let (_, id_text) = file_stem.rsplit_once("__")?;
+        id_text.parse::<i64>().ok()
+    }
+
+    fn git_changed_system_ids(root: &Path) -> Option<HashSet<i64>> {
+        let changed_paths = Self::git_changed_paths(root)?;
+        let mut changed_ids = HashSet::new();
+
+        for effective_path in changed_paths {
+            if !effective_path.starts_with("systems/") {
+                continue;
+            }
+
+            let Some(system_id) = Self::system_id_from_relative_path(effective_path.as_str()) else {
+                return None;
+            };
+
+            changed_ids.insert(system_id);
+        }
+
+        Some(changed_ids)
+    }
+
+    fn git_changed_paths(root: &Path) -> Option<HashSet<String>> {
+        let root_text = root.to_str()?;
+
+        let inside_work_tree = Command::new("git")
+            .args(["-C", root_text, "rev-parse", "--is-inside-work-tree"])
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .and_then(|output| String::from_utf8(output.stdout).ok())
+            .map(|value| value.trim().eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
+        if !inside_work_tree {
+            return None;
+        }
+
+        let output = Command::new("git")
+            .args([
+                "-C",
+                root_text,
+                "status",
+                "--porcelain",
+                "--untracked-files=all",
+                "--",
+                "systems",
+            ])
+            .output()
+            .ok()?;
+
+        if !output.status.success() {
+            return None;
+        }
+
+        let stdout = String::from_utf8(output.stdout).ok()?;
+        let mut changed_paths = HashSet::new();
+
+        for line in stdout.lines() {
+            if line.len() < 4 {
+                continue;
+            }
+
+            let status = &line[..2];
+            let raw_path = line[3..].trim();
+
+            let effective_path = if (status.starts_with('R') || status.starts_with('C'))
+                && raw_path.contains(" -> ")
+            {
+                raw_path.rsplit(" -> ").next().unwrap_or(raw_path)
+            } else {
+                raw_path
+            };
+
+            changed_paths.insert(effective_path.to_owned());
+        }
+
+        Some(changed_paths)
+    }
+
+    fn git_is_repo(root: &Path) -> bool {
+        let Some(root_text) = root.to_str() else {
+            return false;
+        };
+
+        Command::new("git")
+            .args(["-C", root_text, "rev-parse", "--is-inside-work-tree"])
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .and_then(|output| String::from_utf8(output.stdout).ok())
+            .map(|value| value.trim().eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    }
+
+    pub(super) fn detect_version_control_status(&mut self) {
+        let path = self.current_catalog_path.trim().to_owned();
+        if path.is_empty() {
+            self.git_repo_detect_path.clear();
+            self.git_repo_detected_for_path = None;
+            self.status_message = "No project path selected".to_owned();
+            return;
+        }
+
+        let root = PathBuf::from(path.as_str());
+        let detected = Self::git_is_repo(&root);
+        self.git_repo_detect_path = path;
+        self.git_repo_detected_for_path = Some(detected);
+        self.status_message = if detected {
+            "Version control detected (git repository present)".to_owned()
+        } else {
+            "No git repository found for this project".to_owned()
+        };
+    }
+
+    pub(super) fn enable_version_control(&mut self) {
+        if !Self::is_filesystem_project_path(self.current_catalog_path.as_str()) {
+            self.status_message = "Version control is only available for filesystem projects".to_owned();
+            return;
+        }
+
+        let root = PathBuf::from(self.current_catalog_path.as_str());
+        let Some(root_text) = root.to_str() else {
+            self.status_message = "Invalid project path".to_owned();
+            return;
+        };
+
+        if Self::git_is_repo(&root) {
+            self.git_repo_detect_path = root_text.to_owned();
+            self.git_repo_detected_for_path = Some(true);
+            self.status_message = "Git repository already initialized".to_owned();
+            return;
+        }
+
+        let result = (|| -> anyhow::Result<()> {
+            let init = Command::new("git")
+                .args(["-C", root_text, "init"])
+                .output()?;
+            if !init.status.success() {
+                return Err(anyhow::anyhow!(
+                    "git init failed: {}",
+                    String::from_utf8_lossy(&init.stderr).trim()
+                ));
+            }
+
+            let add = Command::new("git")
+                .args(["-C", root_text, "add", "-A"])
+                .output()?;
+            if !add.status.success() {
+                return Err(anyhow::anyhow!(
+                    "git add failed: {}",
+                    String::from_utf8_lossy(&add.stderr).trim()
+                ));
+            }
+
+            let commit = Command::new("git")
+                .args(["-C", root_text, "commit", "-m", "first commit"])
+                .output()?;
+            if !commit.status.success() {
+                let stderr = String::from_utf8_lossy(&commit.stderr);
+                let stdout = String::from_utf8_lossy(&commit.stdout);
+                let text = format!("{} {}", stdout.trim(), stderr.trim());
+                if text.contains("nothing to commit") {
+                    return Ok(());
+                }
+                return Err(anyhow::anyhow!("git commit failed: {}", text.trim()));
+            }
+
+            Ok(())
+        })();
+
+        match result {
+            Ok(_) => {
+                self.git_repo_detect_path = root_text.to_owned();
+                self.git_repo_detected_for_path = Some(true);
+                self.status_message = "Git version control initialized".to_owned();
+            }
+            Err(error) => {
+                self.status_message = format!("Failed to enable version control: {error}");
+            }
+        }
+    }
+
+    pub(super) fn commit_project_changes(&mut self) {
+        if !Self::is_filesystem_project_path(self.current_catalog_path.as_str()) {
+            self.status_message = "Commit is only available for filesystem projects".to_owned();
+            return;
+        }
+
+        let root = PathBuf::from(self.current_catalog_path.as_str());
+        let Some(root_text) = root.to_str() else {
+            self.status_message = "Invalid project path".to_owned();
+            return;
+        };
+
+        if !Self::git_is_repo(&root) {
+            self.git_repo_detect_path = root_text.to_owned();
+            self.git_repo_detected_for_path = Some(false);
+            self.status_message = "No git repository found. Enable Version Control first".to_owned();
+            return;
+        }
+        self.git_repo_detect_path = root_text.to_owned();
+        self.git_repo_detected_for_path = Some(true);
+
+        let message = format!(
+            "catalog commit: {} dirty, {} new",
+            self.dirty_system_ids.len(),
+            self.new_system_ids.len()
+        );
+
+        let result = (|| -> anyhow::Result<()> {
+            let add = Command::new("git")
+                .args(["-C", root_text, "add", "-A"])
+                .output()?;
+            if !add.status.success() {
+                return Err(anyhow::anyhow!(
+                    "git add failed: {}",
+                    String::from_utf8_lossy(&add.stderr).trim()
+                ));
+            }
+
+            let commit = Command::new("git")
+                .args(["-C", root_text, "commit", "-m", message.as_str()])
+                .output()?;
+            if !commit.status.success() {
+                let stderr = String::from_utf8_lossy(&commit.stderr);
+                let stdout = String::from_utf8_lossy(&commit.stdout);
+                let text = format!("{} {}", stdout.trim(), stderr.trim());
+                if text.contains("nothing to commit") {
+                    return Ok(());
+                }
+                return Err(anyhow::anyhow!("git commit failed: {}", text.trim()));
+            }
+
+            Ok(())
+        })();
+
+        match result {
+            Ok(_) => {
+                self.status_message = format!("Committed project changes ({})", message);
+            }
+            Err(error) => {
+                self.status_message = format!("Commit failed: {error}");
+            }
+        }
+    }
+
+    pub(super) fn rollback_project_changes(&mut self) {
+        if !Self::is_filesystem_project_path(self.current_catalog_path.as_str()) {
+            self.status_message = "Rollback is only available for filesystem projects".to_owned();
+            return;
+        }
+
+        let root = PathBuf::from(self.current_catalog_path.as_str());
+        let Some(root_text) = root.to_str() else {
+            self.status_message = "Invalid project path".to_owned();
+            return;
+        };
+
+        if !Self::git_is_repo(&root) {
+            self.git_repo_detect_path = root_text.to_owned();
+            self.git_repo_detected_for_path = Some(false);
+            self.status_message = "No git repository found. Enable Version Control first".to_owned();
+            return;
+        }
+        self.git_repo_detect_path = root_text.to_owned();
+        self.git_repo_detected_for_path = Some(true);
+
+        let changed_count = Self::git_changed_system_ids(&root)
+            .map(|ids| ids.len())
+            .unwrap_or(0);
+
+        let result = (|| -> anyhow::Result<()> {
+            let restore = Command::new("git")
+                .args(["-C", root_text, "restore", "--staged", "--worktree", "."])
+                .output()?;
+            if !restore.status.success() {
+                return Err(anyhow::anyhow!(
+                    "git restore failed: {}",
+                    String::from_utf8_lossy(&restore.stderr).trim()
+                ));
+            }
+
+            let clean = Command::new("git")
+                .args(["-C", root_text, "clean", "-fd"])
+                .output()?;
+            if !clean.status.success() {
+                return Err(anyhow::anyhow!(
+                    "git clean failed: {}",
+                    String::from_utf8_lossy(&clean.stderr).trim()
+                ));
+            }
+
+            let reload_path = self.current_catalog_path.clone();
+            self.load_catalog_from_path_with_options(reload_path.as_str(), true)?;
+            Ok(())
+        })();
+
+        match result {
+            Ok(_) => {
+                self.status_message =
+                    format!("Rollback complete ({} changed system file(s) restored)", changed_count);
+            }
+            Err(error) => {
+                self.status_message = format!("Rollback failed: {error}");
+            }
+        }
     }
 
     pub(super) fn maybe_autosave_project(&mut self, now_secs: f64) {
@@ -653,33 +970,92 @@ impl SystemsCatalogApp {
         system_id: i64,
         system_by_id: &HashMap<i64, crate::models::SystemRecord>,
     ) -> String {
-        let mut segments = Vec::new();
-        let mut current = Some(system_id);
-        let mut visited = HashSet::new();
+        let Some(system) = system_by_id.get(&system_id) else {
+            return format!("systems/system__{}.json", system_id);
+        };
 
-        while let Some(id) = current {
-            if !visited.insert(id) {
+        let short_slug = |value: &str| {
+            let mut slug = Self::slugify_segment(value);
+            if slug.chars().count() > 24 {
+                slug = slug.chars().take(24).collect::<String>();
+            }
+            if slug.is_empty() {
+                "item".to_owned()
+            } else {
+                slug
+            }
+        };
+
+        let parent_prefix = system
+            .parent_id
+            .and_then(|parent_id| system_by_id.get(&parent_id))
+            .map(|parent| format!("p{}", short_slug(parent.name.as_str())))
+            .unwrap_or_else(|| "root".to_owned());
+
+        let system_slug = short_slug(system.name.as_str());
+        format!("systems/{}_{}__{}.json", parent_prefix, system_slug, system.id)
+    }
+
+    fn existing_project_system_paths(root: &Path) -> Vec<String> {
+        let project_path = root.join("Project.json");
+        let Ok(project_text) = std::fs::read_to_string(project_path) else {
+            return Vec::new();
+        };
+
+        let Ok(project) = serde_json::from_str::<ProjectFile>(project_text.as_str()) else {
+            return Vec::new();
+        };
+
+        project.systems_paths
+    }
+
+    fn remove_empty_system_dirs_upward(
+        mut current: Option<&Path>,
+        systems_root: &Path,
+    ) -> anyhow::Result<()> {
+        while let Some(directory) = current {
+            if directory == systems_root || !directory.starts_with(systems_root) {
                 break;
             }
 
-            let Some(system) = system_by_id.get(&id) else {
+            let mut entries = std::fs::read_dir(directory)?;
+            if entries.next().is_some() {
                 break;
-            };
+            }
 
-            segments.push(format!(
-                "{}__{}",
-                Self::slugify_segment(system.name.as_str()),
-                system.id
-            ));
-            current = system.parent_id;
+            std::fs::remove_dir(directory)?;
+            current = directory.parent();
         }
 
-        segments.reverse();
-        let file_name = format!("{}.json", segments.last().cloned().unwrap_or_else(|| format!("system__{}", system_id)));
-        let mut path_parts = vec!["systems".to_owned()];
-        path_parts.extend(segments);
-        path_parts.push(file_name);
-        path_parts.join("/")
+        Ok(())
+    }
+
+    fn remove_stale_system_files(
+        root: &Path,
+        systems_root: &Path,
+        previous_paths: &[String],
+        current_paths: &[String],
+    ) -> anyhow::Result<()> {
+        let current_set = current_paths.iter().map(String::as_str).collect::<HashSet<_>>();
+
+        for relative_path in previous_paths {
+            if !relative_path.starts_with("systems/") {
+                continue;
+            }
+            if current_set.contains(relative_path.as_str()) {
+                continue;
+            }
+
+            let absolute_path = root.join(relative_path.replace('/', std::path::MAIN_SEPARATOR_STR));
+            if !absolute_path.is_file() {
+                continue;
+            }
+
+            std::fs::remove_file(&absolute_path)?;
+            Self::remove_empty_system_dirs_upward(absolute_path.parent(), systems_root)?;
+        }
+
+        Ok(())
     }
 
     fn export_catalog_to_filesystem_project(&mut self, root: &Path) -> anyhow::Result<()> {
@@ -689,6 +1065,12 @@ impl SystemsCatalogApp {
         let interactions_root = root.join("interactions");
         std::fs::create_dir_all(&systems_root)?;
         std::fs::create_dir_all(&interactions_root)?;
+
+        let previous_system_paths = if self.manage_system_json_hierarchy {
+            Self::existing_project_system_paths(root)
+        } else {
+            Vec::new()
+        };
 
         let system_by_id = self
             .systems
@@ -763,6 +1145,15 @@ impl SystemsCatalogApp {
             systems_paths.push(relative_path);
         }
 
+        if self.manage_system_json_hierarchy {
+            Self::remove_stale_system_files(
+                root,
+                &systems_root,
+                previous_system_paths.as_slice(),
+                systems_paths.as_slice(),
+            )?;
+        }
+
         let mut interactions_paths = Vec::new();
         for interaction in &self.all_links {
             let file_name = format!(
@@ -835,6 +1226,8 @@ impl SystemsCatalogApp {
                 .collect(),
             settings: ProjectSettings {
                 autosave_enabled: self.project_autosave_enabled,
+                manage_system_json_hierarchy: self.manage_system_json_hierarchy,
+                has_git: self.git_repo_detected_for_path.unwrap_or(false),
                 map_zoom: self.map_zoom,
                 map_pan_x: self.map_pan.x,
                 map_pan_y: self.map_pan.y,
@@ -853,133 +1246,263 @@ impl SystemsCatalogApp {
         Ok(())
     }
 
-    fn import_filesystem_project_from_root(&mut self, root: &Path) -> anyhow::Result<()> {
+    fn import_filesystem_project_from_root(
+        &mut self,
+        root: &Path,
+        force_full_sync: bool,
+    ) -> anyhow::Result<()> {
         let project_path = root.join("Project.json");
         let project_text = std::fs::read_to_string(&project_path)?;
         let project: ProjectFile = serde_json::from_str(project_text.as_str())?;
 
-        self.repo.clear_catalog_data()?;
+        let git_changed_paths = Self::git_changed_paths(root);
+        let git_changed_system_ids = Self::git_changed_system_ids(root);
+        let use_git_change_filter = !force_full_sync && git_changed_system_ids.is_some();
+        let git_changed_system_ids = git_changed_system_ids.unwrap_or_default();
+        let git_changed_paths = git_changed_paths.unwrap_or_default();
+
+        let project_changed_non_system = force_full_sync
+            || (use_git_change_filter
+            && git_changed_paths.iter().any(|path| {
+                path.eq_ignore_ascii_case("Project.json") || path.starts_with("interactions/")
+            }));
+
+        let path_by_system_id = project
+            .systems_paths
+            .iter()
+            .filter_map(|relative_path| {
+                Self::system_id_from_relative_path(relative_path.as_str())
+                    .map(|system_id| (system_id, relative_path.clone()))
+            })
+            .collect::<HashMap<_, _>>();
+
+        let existing_systems = self.repo.list_systems()?;
+        let existing_by_id = existing_systems
+            .into_iter()
+            .map(|system| (system.id, system))
+            .collect::<HashMap<_, _>>();
+        let file_ids = path_by_system_id.keys().copied().collect::<HashSet<_>>();
+
+        for existing_id in existing_by_id.keys().copied().collect::<Vec<_>>() {
+            if !file_ids.contains(&existing_id) {
+                self.repo.delete_system(existing_id)?;
+            }
+        }
+
+        let existing_ids = existing_by_id.keys().copied().collect::<HashSet<_>>();
+        let mut systems_to_load_ids = if use_git_change_filter {
+            file_ids
+                .difference(&existing_ids)
+                .copied()
+                .chain(git_changed_system_ids.iter().copied())
+                .filter(|system_id| file_ids.contains(system_id))
+                .collect::<HashSet<_>>()
+        } else {
+            file_ids.clone()
+        };
+
+        if project_changed_non_system {
+            systems_to_load_ids = file_ids.clone();
+        }
 
         let mut systems = Vec::new();
-        for relative_path in &project.systems_paths {
+        for system_id in &systems_to_load_ids {
+            let Some(relative_path) = path_by_system_id.get(system_id) else {
+                continue;
+            };
             let absolute_path = root.join(relative_path.replace('/', std::path::MAIN_SEPARATOR_STR));
             let file_text = std::fs::read_to_string(&absolute_path)?;
             let system: SystemFile = serde_json::from_str(file_text.as_str())?;
             systems.push(system);
         }
 
-        for tech in &project.tech_catalog {
-            self.repo.insert_tech_item_with_id(
-                tech.id,
-                tech.name.as_str(),
-                tech.description.as_deref(),
-                tech.documentation_link.as_deref(),
-                tech.color.as_deref(),
-                tech.display_priority,
-            )?;
-        }
-
+        let mut inserted_ids = HashSet::new();
         for system in &systems {
-            self.repo.insert_system_with_id(
-                system.id,
-                system.name.as_str(),
-                system.description.as_str(),
-                None,
-                system.map_x,
-                system.map_y,
-                system.line_color_override.as_deref(),
-                system.naming_root,
-                system.naming_delimiter.as_str(),
-                system.system_type.as_str(),
-                system.route_methods.as_deref(),
-            )?;
-        }
+            if let Some(existing) = existing_by_id.get(&system.id) {
+                let changed = existing.name != system.name
+                    || existing.description != system.description
+                    || existing.naming_root != system.naming_root
+                    || existing.naming_delimiter != system.naming_delimiter
+                    || existing.system_type != system.system_type
+                    || existing.route_methods != system.route_methods
+                    || existing.map_x != system.map_x
+                    || existing.map_y != system.map_y
+                    || existing.line_color_override != system.line_color_override;
 
-        for system in &systems {
-            self.repo.update_system_parent(system.id, system.parent_id)?;
-
-            for note in &system.notes {
-                self.repo.insert_note_with_id(
-                    note.id,
+                if changed {
+                    self.repo.update_system_details(
+                        system.id,
+                        system.name.as_str(),
+                        system.description.as_str(),
+                        system.naming_root,
+                        system.naming_delimiter.as_str(),
+                        system.system_type.as_str(),
+                        system.route_methods.as_deref(),
+                    )?;
+                    self.repo.update_system_position_optional(system.id, system.map_x, system.map_y)?;
+                    self.repo.update_system_line_color_override(
+                        system.id,
+                        system.line_color_override.as_deref(),
+                    )?;
+                }
+            } else {
+                self.repo.insert_system_with_id(
                     system.id,
-                    note.body.as_str(),
-                    note.updated_at.as_str(),
+                    system.name.as_str(),
+                    system.description.as_str(),
+                    None,
+                    system.map_x,
+                    system.map_y,
+                    system.line_color_override.as_deref(),
+                    system.naming_root,
+                    system.naming_delimiter.as_str(),
+                    system.system_type.as_str(),
+                    system.route_methods.as_deref(),
+                )?;
+                inserted_ids.insert(system.id);
+            }
+        }
+
+        for system in &systems {
+            let current_parent = existing_by_id.get(&system.id).and_then(|existing| existing.parent_id);
+            if inserted_ids.contains(&system.id) || current_parent != system.parent_id {
+                self.repo.update_system_parent(system.id, system.parent_id)?;
+            }
+        }
+
+        if !use_git_change_filter || project_changed_non_system {
+            if systems_to_load_ids.len() != file_ids.len() {
+                systems.clear();
+                for relative_path in &project.systems_paths {
+                    let absolute_path =
+                        root.join(relative_path.replace('/', std::path::MAIN_SEPARATOR_STR));
+                    let file_text = std::fs::read_to_string(&absolute_path)?;
+                    let system: SystemFile = serde_json::from_str(file_text.as_str())?;
+                    systems.push(system);
+                }
+            }
+
+            self.repo.clear_non_system_catalog_data()?;
+
+            for tech in &project.tech_catalog {
+                self.repo.insert_tech_item_with_id(
+                    tech.id,
+                    tech.name.as_str(),
+                    tech.description.as_deref(),
+                    tech.documentation_link.as_deref(),
+                    tech.color.as_deref(),
+                    tech.display_priority,
                 )?;
             }
 
-            let columns = system
-                .database_columns
-                .iter()
-                .map(|column| DatabaseColumnInput {
-                    position: column.position,
-                    column_name: column.column_name.clone(),
-                    column_type: column.column_type.clone(),
-                    constraints: column.constraints.clone(),
-                })
-                .collect::<Vec<_>>();
+            for system in &systems {
+                for note in &system.notes {
+                    self.repo.insert_note_with_id(
+                        note.id,
+                        system.id,
+                        note.body.as_str(),
+                        note.updated_at.as_str(),
+                    )?;
+                }
 
-            self.repo.replace_database_columns_for_system(system.id, &columns)?;
+                let columns = system
+                    .database_columns
+                    .iter()
+                    .map(|column| DatabaseColumnInput {
+                        position: column.position,
+                        column_name: column.column_name.clone(),
+                        column_type: column.column_type.clone(),
+                        constraints: column.constraints.clone(),
+                    })
+                    .collect::<Vec<_>>();
 
-            for tech_id in &system.tech_ids {
-                self.repo.add_tech_to_system(system.id, *tech_id)?;
+                self.repo.replace_database_columns_for_system(system.id, &columns)?;
+                self.repo
+                    .replace_system_tech_assignments(system.id, system.tech_ids.as_slice())?;
             }
-        }
 
-        for relative_path in &project.interactions_paths {
-            let absolute_path = root.join(relative_path.replace('/', std::path::MAIN_SEPARATOR_STR));
-            let file_text = std::fs::read_to_string(&absolute_path)?;
-            let interaction: InteractionFile = serde_json::from_str(file_text.as_str())?;
-            self.repo.insert_link_with_id(
-                interaction.id,
-                interaction.source_system_id,
-                interaction.target_system_id,
-                interaction.label.as_str(),
-                interaction.note.as_str(),
-                interaction.kind.as_str(),
-                interaction.source_column_name.as_deref(),
-                interaction.target_column_name.as_deref(),
-            )?;
-        }
+            for relative_path in &project.interactions_paths {
+                let absolute_path = root.join(relative_path.replace('/', std::path::MAIN_SEPARATOR_STR));
+                let file_text = std::fs::read_to_string(&absolute_path)?;
+                let interaction: InteractionFile = serde_json::from_str(file_text.as_str())?;
+                self.repo.insert_link_with_id(
+                    interaction.id,
+                    interaction.source_system_id,
+                    interaction.target_system_id,
+                    interaction.label.as_str(),
+                    interaction.note.as_str(),
+                    interaction.kind.as_str(),
+                    interaction.source_column_name.as_deref(),
+                    interaction.target_column_name.as_deref(),
+                )?;
+            }
 
-        for zone in &project.zones {
-            self.repo.insert_zone_with_id(
-                zone.id,
-                zone.name.as_str(),
-                zone.x,
-                zone.y,
-                zone.width,
-                zone.height,
-                zone.color.as_deref(),
-                zone.render_priority,
-                None,
-                false,
-                zone.representative_system_id,
-            )?;
-        }
+            for zone in &project.zones {
+                self.repo.insert_zone_with_id(
+                    zone.id,
+                    zone.name.as_str(),
+                    zone.x,
+                    zone.y,
+                    zone.width,
+                    zone.height,
+                    zone.color.as_deref(),
+                    zone.render_priority,
+                    None,
+                    false,
+                    zone.representative_system_id,
+                )?;
+            }
 
-        for zone in &project.zones {
-            self.repo.update_zone(
-                zone.id,
-                zone.name.as_str(),
-                zone.x,
-                zone.y,
-                zone.width,
-                zone.height,
-                zone.color.as_deref(),
-                zone.render_priority,
-                zone.parent_zone_id,
-                zone.minimized,
-                zone.representative_system_id,
-            )?;
-        }
+            for zone in &project.zones {
+                self.repo.update_zone(
+                    zone.id,
+                    zone.name.as_str(),
+                    zone.x,
+                    zone.y,
+                    zone.width,
+                    zone.height,
+                    zone.color.as_deref(),
+                    zone.render_priority,
+                    zone.parent_zone_id,
+                    zone.minimized,
+                    zone.representative_system_id,
+                )?;
+            }
 
-        for offset in &project.zone_offsets {
-            self.repo.upsert_zone_system_offset(
-                offset.zone_id,
-                offset.system_id,
-                offset.offset_x,
-                offset.offset_y,
-            )?;
+            for offset in &project.zone_offsets {
+                self.repo.upsert_zone_system_offset(
+                    offset.zone_id,
+                    offset.system_id,
+                    offset.offset_x,
+                    offset.offset_y,
+                )?;
+            }
+        } else {
+            for system in &systems {
+                self.repo.delete_notes_for_system(system.id)?;
+                for note in &system.notes {
+                    self.repo.insert_note_with_id(
+                        note.id,
+                        system.id,
+                        note.body.as_str(),
+                        note.updated_at.as_str(),
+                    )?;
+                }
+
+                let columns = system
+                    .database_columns
+                    .iter()
+                    .map(|column| DatabaseColumnInput {
+                        position: column.position,
+                        column_name: column.column_name.clone(),
+                        column_type: column.column_type.clone(),
+                        constraints: column.constraints.clone(),
+                    })
+                    .collect::<Vec<_>>();
+                self.repo.replace_database_columns_for_system(system.id, &columns)?;
+                self.repo
+                    .replace_system_tech_assignments(system.id, system.tech_ids.as_slice())?;
+            }
         }
 
         self.refresh_systems()?;
@@ -992,6 +1515,9 @@ impl SystemsCatalogApp {
         self.map_world_size.y = project.settings.map_world_height;
         self.snap_to_grid = project.settings.snap_to_grid;
         self.project_autosave_enabled = project.settings.autosave_enabled;
+        self.manage_system_json_hierarchy = project.settings.manage_system_json_hierarchy;
+        self.git_repo_detect_path = root.to_string_lossy().to_string();
+        self.git_repo_detected_for_path = Some(project.settings.has_git);
         self.project_last_autosave_at_secs = None;
         self.clear_system_change_flags();
         self.settings_dirty = true;
@@ -999,7 +1525,11 @@ impl SystemsCatalogApp {
         Ok(())
     }
 
-    fn load_catalog_from_path(&mut self, path: &str) -> anyhow::Result<()> {
+    pub(super) fn load_catalog_from_path_with_options(
+        &mut self,
+        path: &str,
+        force_full_sync: bool,
+    ) -> anyhow::Result<()> {
         let target = PathBuf::from(path);
 
         let is_sqlite_catalog = target
@@ -1013,10 +1543,14 @@ impl SystemsCatalogApp {
                 "Direct .db loading is disabled. Create a new project and use Migration source DB for one-time import."
             ));
         } else {
-            self.import_filesystem_project_from_root(&target)?;
+            self.import_filesystem_project_from_root(&target, force_full_sync)?;
         }
 
         Ok(())
+    }
+
+    pub(super) fn load_catalog_from_path(&mut self, path: &str) -> anyhow::Result<()> {
+        self.load_catalog_from_path_with_options(path, false)
     }
 
     fn catalog_directory_name_from_project_name(name: &str) -> String {
@@ -2360,6 +2894,17 @@ impl SystemsCatalogApp {
             return;
         };
 
+        let current_parent_id = self
+            .systems
+            .iter()
+            .find(|system| system.id == system_id)
+            .and_then(|system| system.parent_id);
+
+        if current_parent_id == self.selected_system_parent_id {
+            self.status_message = "Parent unchanged".to_owned();
+            return;
+        }
+
         if let Some(parent_id) = self.selected_system_parent_id {
             if self.would_create_parent_cycle(system_id, parent_id) {
                 self.status_message = "Invalid parent: this would create a cycle".to_owned();
@@ -2367,15 +2912,17 @@ impl SystemsCatalogApp {
             }
         }
 
-        let result = self
-            .repo
-            .update_system_parent(system_id, self.selected_system_parent_id)
-            .and_then(|_| self.refresh_systems())
-            .and_then(|_| self.load_selected_data(system_id));
+        let result = (|| -> anyhow::Result<()> {
+            self.repo
+                .update_system_parent(system_id, self.selected_system_parent_id)?;
+            self.mark_system_as_dirty(system_id);
+            self.refresh_systems()?;
+            self.load_selected_data(system_id)?;
+            Ok(())
+        })();
 
         match result {
             Ok(_) => {
-                self.mark_system_as_dirty(system_id);
                 self.status_message = "Parent updated".to_owned();
             }
             Err(error) => self.status_message = format!("Failed to update parent: {error}"),
@@ -2804,19 +3351,28 @@ impl SystemsCatalogApp {
             return;
         }
 
+        let current_parent_id = self
+            .systems
+            .iter()
+            .find(|system| system.id == child_id)
+            .and_then(|system| system.parent_id);
+        if current_parent_id == Some(parent_id) {
+            self.status_message = "Parent unchanged".to_owned();
+            return;
+        }
+
         let child_name = self.system_name_by_id(child_id);
         let parent_name = self.system_name_by_id(parent_id);
 
-        let result = self
-            .repo
-            .update_system_parent(child_id, Some(parent_id))
-            .and_then(|_| self.refresh_systems())
-            .and_then(|_| {
-                if self.selected_system_id == Some(child_id) {
-                    self.load_selected_data(child_id)?;
-                }
-                Ok(())
-            });
+        let result = (|| -> anyhow::Result<()> {
+            self.repo.update_system_parent(child_id, Some(parent_id))?;
+            self.mark_system_as_dirty(child_id);
+            self.refresh_systems()?;
+            if self.selected_system_id == Some(child_id) {
+                self.load_selected_data(child_id)?;
+            }
+            Ok(())
+        })();
 
         match result {
             Ok(_) => {

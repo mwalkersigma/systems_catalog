@@ -287,13 +287,17 @@ pub struct SystemsCatalogApp {
     recent_catalog_paths: Vec<String>,
     current_catalog_name: String,
     current_catalog_path: String,
+    git_repo_detect_path: String,
+    git_repo_detected_for_path: Option<bool>,
     pending_catalog_switch_path: Option<String>,
+    pending_catalog_switch_armed: bool,
     new_catalog_name: String,
     new_catalog_directory: String,
     new_catalog_migration_db_path: String,
     pending_ddl_drafts: Vec<PluginSystemDraft>,
     pending_ddl_target_system_ids: Vec<Option<i64>>,
     project_autosave_enabled: bool,
+    manage_system_json_hierarchy: bool,
     project_last_autosave_at_secs: Option<f64>,
     show_left_sidebar: bool,
     active_sidebar_tab: SidebarTab,
@@ -459,13 +463,17 @@ impl SystemsCatalogApp {
             recent_catalog_paths: Vec::new(),
             current_catalog_name: "Working Project".to_owned(),
             current_catalog_path: String::new(),
+            git_repo_detect_path: String::new(),
+            git_repo_detected_for_path: None,
             pending_catalog_switch_path: None,
+            pending_catalog_switch_armed: false,
             new_catalog_name: String::new(),
             new_catalog_directory: String::new(),
             new_catalog_migration_db_path: String::new(),
             pending_ddl_drafts: Vec::new(),
             pending_ddl_target_system_ids: Vec::new(),
             project_autosave_enabled: false,
+            manage_system_json_hierarchy: false,
             project_last_autosave_at_secs: None,
             show_left_sidebar: true,
             active_sidebar_tab: SidebarTab::Systems,
@@ -520,6 +528,14 @@ impl SystemsCatalogApp {
         app.remove_legacy_window_settings()?;
         app.refresh_systems()?;
         app.load_ui_settings()?;
+
+        let startup_catalog_path = app.current_catalog_path.trim().to_owned();
+        if !startup_catalog_path.is_empty() {
+            app.pending_catalog_switch_path = Some(startup_catalog_path.clone());
+            app.pending_catalog_switch_armed = false;
+            app.status_message = format!("Loading project {}...", startup_catalog_path);
+        }
+
         Ok(app)
     }
 

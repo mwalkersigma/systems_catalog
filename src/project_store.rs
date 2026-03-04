@@ -1,5 +1,13 @@
 use serde::{Deserialize, Serialize};
 
+fn default_manage_system_json_hierarchy() -> bool {
+    false
+}
+
+fn default_has_git() -> bool {
+    false
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectFile {
@@ -52,6 +60,10 @@ pub struct ProjectZoneOffset {
 #[serde(rename_all = "camelCase")]
 pub struct ProjectSettings {
     pub autosave_enabled: bool,
+    #[serde(default = "default_manage_system_json_hierarchy")]
+    pub manage_system_json_hierarchy: bool,
+    #[serde(default = "default_has_git")]
+    pub has_git: bool,
     pub map_zoom: f32,
     pub map_pan_x: f32,
     pub map_pan_y: f32,

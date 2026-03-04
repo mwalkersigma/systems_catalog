@@ -631,6 +631,16 @@ impl Repository {
         system_type: &str,
         route_methods: Option<&str>,
     ) -> Result<()> {
+        let display_name = {
+            let trimmed = name.trim();
+            if trimmed.is_empty() {
+                format!("System {id}")
+            } else {
+                trimmed.to_owned()
+            }
+        };
+        let internal_name = format!("sys_{id}");
+
         self.conn.execute(
             r#"
             INSERT INTO systems (
@@ -651,8 +661,8 @@ impl Repository {
             "#,
             params![
                 id,
-                name,
-                name,
+                internal_name,
+                display_name,
                 description,
                 parent_id,
                 map_x,
@@ -785,6 +795,24 @@ impl Repository {
     }
 
     pub fn update_system_position(&self, system_id: i64, map_x: f64, map_y: f64) -> Result<()> {
+        self.conn.execute(
+            r#"
+            UPDATE systems
+            SET map_x = ?2, map_y = ?3
+            WHERE id = ?1
+            "#,
+            params![system_id, map_x, map_y],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn update_system_position_optional(
+        &self,
+        system_id: i64,
+        map_x: Option<f32>,
+        map_y: Option<f32>,
+    ) -> Result<()> {
         self.conn.execute(
             r#"
             UPDATE systems
@@ -1069,6 +1097,40 @@ impl Repository {
         Ok(())
     }
 
+    pub fn delete_notes_for_system(&self, system_id: i64) -> Result<()> {
+        self.conn.execute(
+            r#"
+            DELETE FROM notes
+            WHERE system_id = ?1
+            "#,
+            params![system_id],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn replace_system_tech_assignments(&self, system_id: i64, tech_ids: &[i64]) -> Result<()> {
+        self.conn.execute(
+            r#"
+            DELETE FROM system_tech
+            WHERE system_id = ?1
+            "#,
+            params![system_id],
+        )?;
+
+        for tech_id in tech_ids {
+            self.conn.execute(
+                r#"
+                INSERT INTO system_tech (system_id, tech_id)
+                VALUES (?1, ?2)
+                "#,
+                params![system_id, tech_id],
+            )?;
+        }
+
+        Ok(())
+    }
+
     pub fn import_catalog_from_path(&self, path: &str) -> Result<()> {
         self.conn.execute_batch("PRAGMA foreign_keys = OFF;")?;
 
@@ -1308,6 +1370,17 @@ impl Repository {
         self.conn.execute("DELETE FROM notes", [])?;
         self.conn.execute("DELETE FROM database_columns", [])?;
         self.conn.execute("DELETE FROM systems", [])?;
+        self.conn.execute("DELETE FROM tech_catalog", [])?;
+        self.conn.execute("DELETE FROM zones", [])?;
+        self.conn.execute("DELETE FROM zone_system_offsets", [])?;
+        Ok(())
+    }
+
+    pub fn clear_non_system_catalog_data(&self) -> Result<()> {
+        self.conn.execute("DELETE FROM system_tech", [])?;
+        self.conn.execute("DELETE FROM links", [])?;
+        self.conn.execute("DELETE FROM notes", [])?;
+        self.conn.execute("DELETE FROM database_columns", [])?;
         self.conn.execute("DELETE FROM tech_catalog", [])?;
         self.conn.execute("DELETE FROM zones", [])?;
         self.conn.execute("DELETE FROM zone_system_offsets", [])?;
