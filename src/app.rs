@@ -711,6 +711,7 @@ impl SystemsCatalogApp {
     }
 
     fn select_zone(&mut self, zone_id: i64) {
+        self.clear_selection();
         self.selected_zone_id = Some(zone_id);
 
         if let Some(zone) = self.zones.iter().find(|zone| zone.id == zone_id) {
@@ -2557,8 +2558,8 @@ impl SystemsCatalogApp {
             .find(|zone| zone.id == zone_id)
             .and_then(|zone| zone.representative_system_id)?;
 
-        let candidates = self.zone_representative_candidates(zone_id);
-        if candidates.contains(&selected) {
+        let zone_system_ids = self.zone_system_ids(zone_id)?;
+        if zone_system_ids.contains(&selected) {
             Some(selected)
         } else {
             None

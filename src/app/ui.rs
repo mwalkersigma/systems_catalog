@@ -189,7 +189,15 @@ impl SystemsCatalogApp {
         }
     }
 
-    fn map_node_size_for(&self, label: &str) -> Vec2 {
+    fn map_card_icon_for_system_type(system_type: &str) -> &'static str {
+        match system_type {
+            "route" | "api" => ICON_ROUTE,
+            "database" => ICON_DATABASE,
+            _ => ICON_ROUTE,
+        }
+    }
+
+    fn map_node_size_for(&self, system: &SystemRecord, label: &str) -> Vec2 {
         let max_line_char_count = label
             .lines()
             .map(|line| line.chars().count())
@@ -212,19 +220,19 @@ impl SystemsCatalogApp {
 
         let estimated_line_count = self.estimate_wrapped_line_count(label, width) as f32;
         let estimated_text_height = estimated_line_count * MAP_CARD_LINE_HEIGHT;
-        let height = (estimated_text_height + MAP_CARD_VERTICAL_PADDING)
+        let mut height = (estimated_text_height + MAP_CARD_VERTICAL_PADDING)
             .clamp(MAP_CARD_MIN_HEIGHT, MAP_CARD_MAX_HEIGHT);
+
+        if self.snap_to_grid && system.system_type == "database" {
+            height = ((height / MAP_GRID_SPACING).round() * MAP_GRID_SPACING)
+                .clamp(MAP_CARD_MIN_HEIGHT, MAP_CARD_MAX_HEIGHT);
+        }
 
         Vec2::new(width, height)
     }
 
     fn map_card_label_for_system(&self, system: &SystemRecord) -> String {
-        let prefix = match system.system_type.as_str() {
-            "route" | "api" => ICON_ROUTE,
-            "database" => ICON_DATABASE,
-            _ => "",
-        };
-
+        let prefix = Self::map_card_icon_for_system_type(system.system_type.as_str());
         let title = if prefix.is_empty() {
             system.name.clone()
         } else {
@@ -276,7 +284,7 @@ impl SystemsCatalogApp {
             }
 
             let label = self.map_card_label_for_system(system);
-            let size = self.map_node_size_for(label.as_str());
+            let size = self.map_node_size_for(system, label.as_str());
             self.map_card_label_cache.insert(system.id, label);
             self.map_node_size_cache.insert(system.id, size);
         }
@@ -293,7 +301,9 @@ impl SystemsCatalogApp {
         self.map_node_size_cache
             .get(&system.id)
             .copied()
-            .unwrap_or_else(|| self.map_node_size_for(self.map_card_label_for_system(system).as_str()))
+            .unwrap_or_else(|| {
+                self.map_node_size_for(system, self.map_card_label_for_system(system).as_str())
+            })
     }
 
     fn map_node_size_cached_by_id(&self, system_id: i64) -> Vec2 {
@@ -2114,6 +2124,12 @@ impl SystemsCatalogApp {
     }
 
     fn select_system(&mut self, system_id: i64) {
+        self.selected_zone_id = None;
+        self.selected_zone_name.clear();
+        self.selected_zone_render_priority = 1;
+        self.selected_zone_parent_zone_id = None;
+        self.selected_zone_minimized = false;
+        self.selected_zone_representative_system_id = None;
         self.selected_system_id = Some(system_id);
         if let Err(error) = self.load_selected_data(system_id) {
             self.status_message = format!("Failed to load selection: {error}");
@@ -4875,14 +4891,102 @@ impl SystemsCatalogApp {
             let has_database_columns = database_columns
                 .map(|cols| !cols.is_empty())
                 .unwrap_or(false);
+            let icon_only_zoom = self.map_zoom <= 0.20;
+            let compact_database_zoom = self.map_zoom <= 0.30;
+            let hide_service_content_zoom = self.map_zoom <= 0.10;
+            let is_service_type = !matches!(system.system_type.as_str(), "route" | "api" | "database");
+            let is_database_type = system.system_type == "database";
 
-            if system.system_type == "database" && has_database_columns {
+            if hide_service_content_zoom && (is_service_type || is_database_type) {
+                let font_id = FontId::proportional(font_size);
+                let text_wrap_width =
+                    (node_rect.width() - (MAP_CARD_HORIZONTAL_PADDING * self.map_zoom)).max(24.0);
+                let wrapped_text = painter.layout(
+                    system.name.clone(),
+                    font_id,
+                    text_color,
+                    text_wrap_width,
+                );
+                let text_pos = Pos2::new(
+                    node_rect.center().x - (wrapped_text.size().x * 0.5),
+                    node_rect.center().y - (wrapped_text.size().y * 0.5),
+                );
+                painter.with_clip_rect(node_rect.shrink(1.0)).galley(
+                    text_pos,
+                    wrapped_text,
+                    text_color,
+                );
+            } else if (is_service_type || (is_database_type && !has_database_columns)) && compact_database_zoom {
+                let font_id = FontId::proportional(font_size);
+                let text_wrap_width =
+                    (node_rect.width() - (MAP_CARD_HORIZONTAL_PADDING * self.map_zoom)).max(24.0);
+                let wrapped_text = painter.layout(
+                    format!(
+                        "{} {}",
+                        Self::map_card_icon_for_system_type(system.system_type.as_str()),
+                        system.name
+                    ),
+                    font_id,
+                    text_color,
+                    text_wrap_width,
+                );
+                let text_pos = Pos2::new(
+                    node_rect.center().x - (wrapped_text.size().x * 0.5),
+                    node_rect.center().y - (wrapped_text.size().y * 0.5),
+                );
+                painter.with_clip_rect(node_rect.shrink(1.0)).galley(
+                    text_pos,
+                    wrapped_text,
+                    text_color,
+                );
+            } else if system.system_type == "database" && has_database_columns && compact_database_zoom {
+                let font_id = FontId::proportional(font_size);
+                let text_wrap_width =
+                    (node_rect.width() - (MAP_CARD_HORIZONTAL_PADDING * self.map_zoom)).max(24.0);
+                let wrapped_text = painter.layout(
+                    format!(
+                        "{} {}",
+                        Self::map_card_icon_for_system_type(system.system_type.as_str()),
+                        system.name
+                    ),
+                    font_id,
+                    text_color,
+                    text_wrap_width,
+                );
+                let text_pos = Pos2::new(
+                    node_rect.center().x - (wrapped_text.size().x * 0.5),
+                    node_rect.center().y - (wrapped_text.size().y * 0.5),
+                );
+                painter.with_clip_rect(node_rect.shrink(1.0)).galley(
+                    text_pos,
+                    wrapped_text,
+                    text_color,
+                );
+            } else if icon_only_zoom {
+                let icon = Self::map_card_icon_for_system_type(system.system_type.as_str());
+                let icon_font_size = if is_service_type {
+                    (16.0 * self.map_zoom).clamp(6.0, 11.0)
+                } else {
+                    (22.0 * self.map_zoom).clamp(8.0, 16.0)
+                };
+                painter.text(
+                    node_rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    icon,
+                    FontId::proportional(icon_font_size),
+                    text_color,
+                );
+            } else if system.system_type == "database" && has_database_columns {
                 let database_columns = database_columns.unwrap();
                 let header_font = FontId::proportional(font_size);
                 let row_font = FontId::monospace((font_size * 0.86).clamp(6.0, 18.0));
                 let constraints_font = FontId::proportional((font_size * 0.68).clamp(6.0, 14.0));
 
-                let title = format!("{} {}", ICON_DATABASE, system.name);
+                let title = format!(
+                    "{} {}",
+                    Self::map_card_icon_for_system_type(system.system_type.as_str()),
+                    system.name
+                );
                 let top_padding = (8.0 * self.map_zoom).clamp(4.0, 10.0);
                 let left_padding = (8.0 * self.map_zoom).clamp(4.0, 10.0);
                 let right_padding = left_padding;
@@ -4933,16 +5037,18 @@ impl SystemsCatalogApp {
                         text_color,
                     );
 
-                    if let Some(constraints) = column.constraints.as_deref() {
-                        let trimmed = constraints.trim();
-                        if !trimmed.is_empty() {
-                            painter.text(
-                                Pos2::new(node_rect.center().x, row_y + row_height - row_vertical_padding),
-                                egui::Align2::CENTER_BOTTOM,
-                                trimmed,
-                                constraints_font.clone(),
-                                Color32::from_gray(176),
-                            );
+                    if !compact_database_zoom {
+                        if let Some(constraints) = column.constraints.as_deref() {
+                            let trimmed = constraints.trim();
+                            if !trimmed.is_empty() {
+                                painter.text(
+                                    Pos2::new(node_rect.center().x, row_y + row_height - row_vertical_padding),
+                                    egui::Align2::CENTER_BOTTOM,
+                                    trimmed,
+                                    constraints_font.clone(),
+                                    Color32::from_gray(176),
+                                );
+                            }
                         }
                     }
 
@@ -4979,7 +5085,7 @@ impl SystemsCatalogApp {
             }
 
             let has_children = self.system_has_children(system.id);
-            if has_children {
+            if has_children && self.map_zoom > 0.30 {
                 let disclosure_radius = (9.0 * self.map_zoom).clamp(7.0, 15.0);
                 let disclosure_center = Pos2::new(
                     node_rect.left() + (disclosure_radius + 2.0),
@@ -5404,6 +5510,7 @@ impl eframe::App for SystemsCatalogApp {
                         .checkbox(&mut self.snap_to_grid, "Snap to Grid")
                         .changed()
                     {
+                        self.map_node_size_cache.clear();
                         self.settings_dirty = true;
                     }
                     ui.separator();
