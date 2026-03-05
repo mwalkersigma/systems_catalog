@@ -6,7 +6,7 @@ use eframe::egui::{Pos2, Rect};
 
 use crate::app::{CopiedSystemEntry, InteractionKind, SystemsCatalogApp, MAP_GRID_SPACING, MAP_NODE_SIZE};
 use crate::models::DatabaseColumnInput;
-use crate::plugins::plugin_by_name;
+use crate::plugins::{parse_llm_detailed_import_file, plugin_by_name};
 use crate::project_store::{
     DatabaseColumnFile, InteractionFile, ProjectFile, ProjectSettings, ProjectTechItem,
     ProjectZone, ProjectZoneOffset, SystemFile, SystemNoteFile,
@@ -549,24 +549,56 @@ impl SystemsCatalogApp {
         }
 
         let mut created_ids = Vec::new();
-        for draft in drafts {
-            let system_id = self.repo.create_system(
-                draft.name.as_str(),
-                draft.description.as_str(),
-                None,
-                draft.system_type.as_str(),
-                draft.route_methods.as_deref(),
-            )?;
+        let mut created_ids_by_key = HashMap::<String, i64>::new();
+        let mut pending = drafts.into_iter().collect::<Vec<_>>();
 
-            self.mark_system_as_new(system_id);
+        while !pending.is_empty() {
+            let mut next_pending = Vec::new();
+            let mut progress = false;
 
-            if !draft.database_columns.is_empty() {
-                self.repo
-                    .replace_database_columns_for_system(system_id, &draft.database_columns)?;
-                self.mark_system_as_dirty(system_id);
+            for draft in pending {
+                let parent_id = match draft.parent_source_key.as_deref() {
+                    Some(parent_key) => match created_ids_by_key.get(parent_key).copied() {
+                        Some(parent_id) => Some(parent_id),
+                        None => {
+                            next_pending.push(draft);
+                            continue;
+                        }
+                    },
+                    None => None,
+                };
+
+                let system_id = self.repo.create_system(
+                    draft.name.as_str(),
+                    draft.description.as_str(),
+                    parent_id,
+                    draft.system_type.as_str(),
+                    draft.route_methods.as_deref(),
+                )?;
+
+                self.mark_system_as_new(system_id);
+
+                if !draft.database_columns.is_empty() {
+                    self.repo
+                        .replace_database_columns_for_system(system_id, &draft.database_columns)?;
+                    self.mark_system_as_dirty(system_id);
+                }
+
+                if let Some(source_key) = draft.source_key {
+                    created_ids_by_key.insert(source_key, system_id);
+                }
+
+                created_ids.push(system_id);
+                progress = true;
             }
 
-            created_ids.push(system_id);
+            if !progress {
+                return Err(anyhow::anyhow!(
+                    "Plugin import failed to resolve parent hierarchy"
+                ));
+            }
+
+            pending = next_pending;
         }
 
         self.refresh_systems()?;
@@ -936,10 +968,596 @@ impl SystemsCatalogApp {
             .map(|plugin| plugin.definition().display_name.to_owned())
             .unwrap_or_else(|| "OpenAPI Plugin".to_owned());
 
-        match self.import_from_plugin_path("plugin.openapi", input_path) {
+        let result = (|| -> anyhow::Result<(usize, usize)> {
+            let Some(plugin) = plugin_by_name("plugin.openapi") else {
+                return Err(anyhow::anyhow!("Unknown plugin: plugin.openapi"));
+            };
+
+            let mut drafts = plugin.transform_file(input_path)?;
+            if drafts.is_empty() {
+                return Ok((0, 0));
+            }
+
+            drafts.sort_by(|left, right| {
+                let left_depth = left
+                    .source_key
+                    .as_deref()
+                    .map(|key| key.split('/').filter(|segment| !segment.is_empty()).count())
+                    .unwrap_or(0);
+                let right_depth = right
+                    .source_key
+                    .as_deref()
+                    .map(|key| key.split('/').filter(|segment| !segment.is_empty()).count())
+                    .unwrap_or(0);
+                left_depth
+                    .cmp(&right_depth)
+                    .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+            });
+
+            self.refresh_systems()?;
+            let mut api_systems = self
+                .systems
+                .iter()
+                .filter(|system| system.system_type.eq_ignore_ascii_case("api"))
+                .cloned()
+                .collect::<Vec<_>>();
+
+            let mut created_count = 0_usize;
+            let mut updated_count = 0_usize;
+            let mut created_ids = Vec::new();
+            let mut id_by_source_key = HashMap::<String, i64>::new();
+
+            for draft in drafts {
+                let parent_id = draft
+                    .parent_source_key
+                    .as_deref()
+                    .and_then(|key| id_by_source_key.get(key).copied());
+
+                let existing = api_systems
+                    .iter()
+                    .find(|system| {
+                        system.parent_id == parent_id
+                            && system.name.eq_ignore_ascii_case(draft.name.as_str())
+                    })
+                    .cloned();
+
+                if let Some(existing) = existing {
+                    let existing_methods = existing
+                        .route_methods
+                        .as_deref()
+                        .unwrap_or("")
+                        .trim()
+                        .to_ascii_uppercase();
+                    let draft_methods = draft
+                        .route_methods
+                        .as_deref()
+                        .unwrap_or("")
+                        .trim()
+                        .to_ascii_uppercase();
+
+                    if existing.description != draft.description
+                        || existing_methods != draft_methods
+                        || existing.system_type != "api"
+                    {
+                        self.repo.update_system_details(
+                            existing.id,
+                            existing.name.as_str(),
+                            draft.description.as_str(),
+                            existing.naming_root,
+                            existing.naming_delimiter.as_str(),
+                            "api",
+                            draft.route_methods.as_deref(),
+                        )?;
+                        self.mark_system_as_dirty(existing.id);
+                        updated_count += 1;
+                    }
+
+                    if let Some(source_key) = draft.source_key {
+                        id_by_source_key.insert(source_key, existing.id);
+                    }
+                } else {
+                    let system_id = self.repo.create_system(
+                        draft.name.as_str(),
+                        draft.description.as_str(),
+                        parent_id,
+                        "api",
+                        draft.route_methods.as_deref(),
+                    )?;
+
+                    self.mark_system_as_new(system_id);
+                    created_count += 1;
+                    created_ids.push((system_id, parent_id));
+
+                    api_systems.push(crate::models::SystemRecord {
+                        id: system_id,
+                        name: draft.name.clone(),
+                        description: draft.description,
+                        parent_id,
+                        map_x: None,
+                        map_y: None,
+                        line_color_override: None,
+                        naming_root: false,
+                        naming_delimiter: "/".to_owned(),
+                        system_type: "api".to_owned(),
+                        route_methods: draft.route_methods.clone(),
+                    });
+
+                    if let Some(source_key) = draft.source_key {
+                        id_by_source_key.insert(source_key, system_id);
+                    }
+                }
+            }
+
+            self.refresh_systems()?;
+            for (system_id, parent_id) in created_ids {
+                if let Some((position, _)) = self.spawn_position_for_new_system(parent_id) {
+                    self.map_positions.insert(system_id, position);
+                    self.persist_map_position(system_id, position);
+                }
+            }
+
+            Ok((created_count, updated_count))
+        })();
+
+        match result {
+            Ok((created_count, updated_count)) => {
+                self.status_message = format!(
+                    "{} synced: {} created, {} updated",
+                    plugin_display_name, created_count, updated_count
+                );
+            }
+            Err(error) => {
+                self.status_message = format!("{} import failed: {error}", plugin_display_name);
+            }
+        }
+    }
+
+    pub(super) fn import_llm_detailed_map_from_path(&mut self, input_path: &Path) {
+        match parse_llm_detailed_import_file(input_path) {
+            Ok((systems, interactions)) => {
+                if systems.is_empty() {
+                    self.status_message = "LLM Detailed Import: no systems found".to_owned();
+                    return;
+                }
+
+                self.pending_llm_detailed_system_drafts = systems;
+                self.pending_llm_detailed_interaction_drafts = interactions;
+                self.pending_llm_detailed_root_name = input_path
+                    .file_stem()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or("Imported Systems")
+                    .to_owned();
+                self.open_modal(crate::app::AppModal::LlmDetailedImport);
+                self.status_message = "LLM detailed import ready; provide root name and apply"
+                    .to_owned();
+            }
+            Err(error) => {
+                self.status_message = format!("LLM Detailed Import failed: {error}");
+            }
+        }
+    }
+
+    fn normalize_interaction_kind_label(value: Option<&str>) -> crate::app::InteractionKind {
+        let normalized = value.unwrap_or("standard").trim().to_ascii_lowercase();
+        match normalized.as_str() {
+            "pull" => crate::app::InteractionKind::Pull,
+            "push" => crate::app::InteractionKind::Push,
+            "bidirectional" | "bi" | "both" => crate::app::InteractionKind::Bidirectional,
+            _ => crate::app::InteractionKind::Standard,
+        }
+    }
+
+    fn place_tree_node_position(&mut self, system_id: i64, desired: Pos2) -> Pos2 {
+        let mut candidate = self.clamp_node_position(
+            eframe::egui::Rect::NOTHING,
+            desired,
+            MAP_NODE_SIZE,
+        );
+        let mut attempts = 0;
+        while self.spawn_position_overlaps(candidate) && attempts < 250 {
+            candidate.y += MAP_GRID_SPACING;
+            candidate = self.clamp_node_position(
+                eframe::egui::Rect::NOTHING,
+                candidate,
+                MAP_NODE_SIZE,
+            );
+            attempts += 1;
+        }
+
+        self.map_positions.insert(system_id, candidate);
+        self.persist_map_position(system_id, candidate);
+        candidate
+    }
+
+    fn layout_imported_tree_under_root(&mut self, root_id: i64, imported_system_ids: &HashSet<i64>) {
+        if imported_system_ids.is_empty() {
+            return;
+        }
+
+        let root_position = self.find_next_free_root_spawn_position();
+        let root_position = self.place_tree_node_position(root_id, root_position);
+        let root_row_y = root_position.y;
+
+        let mut children_by_parent = HashMap::<i64, Vec<i64>>::new();
+        let mut system_names_by_id = HashMap::<i64, String>::new();
+        for system in &self.systems {
+            system_names_by_id.insert(system.id, system.name.to_ascii_lowercase());
+            if !imported_system_ids.contains(&system.id) {
+                continue;
+            }
+
+            let Some(parent_id) = system.parent_id else {
+                continue;
+            };
+
+            if imported_system_ids.contains(&parent_id) {
+                children_by_parent.entry(parent_id).or_default().push(system.id);
+            }
+        }
+
+        for child_ids in children_by_parent.values_mut() {
+            child_ids.sort_by_key(|system_id| {
+                system_names_by_id
+                    .get(system_id)
+                    .cloned()
+                    .unwrap_or_default()
+            });
+        }
+
+        let mut next_row = 2.0_f32;
+        let mut stack = children_by_parent
+            .get(&root_id)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .rev()
+            .map(|child_id| (child_id, 1usize))
+            .collect::<Vec<_>>();
+
+        while let Some((node_id, depth)) = stack.pop() {
+            let desired = Pos2::new(
+                root_position.x + (depth as f32 * MAP_GRID_SPACING * 2.0),
+                root_row_y + (next_row * MAP_GRID_SPACING),
+            );
+            self.place_tree_node_position(node_id, desired);
+            next_row += 2.0;
+
+            if let Some(children) = children_by_parent.get(&node_id) {
+                for child_id in children.iter().rev() {
+                    stack.push((*child_id, depth + 1));
+                }
+            }
+        }
+    }
+
+    fn sorted_children_for_subtree(&self, root_id: i64) -> HashMap<i64, Vec<i64>> {
+        let subtree_ids = self.system_and_descendant_ids(root_id);
+        let mut children_by_parent = HashMap::<i64, Vec<i64>>::new();
+        let mut system_names_by_id = HashMap::<i64, String>::new();
+
+        for system in &self.systems {
+            system_names_by_id.insert(system.id, system.name.to_ascii_lowercase());
+
+            if !subtree_ids.contains(&system.id) || system.id == root_id {
+                continue;
+            }
+
+            let Some(parent_id) = system.parent_id else {
+                continue;
+            };
+
+            if subtree_ids.contains(&parent_id) {
+                children_by_parent.entry(parent_id).or_default().push(system.id);
+            }
+        }
+
+        for child_ids in children_by_parent.values_mut() {
+            child_ids.sort_by_key(|system_id| {
+                system_names_by_id
+                    .get(system_id)
+                    .cloned()
+                    .unwrap_or_default()
+            });
+        }
+
+        children_by_parent
+    }
+
+    pub(super) fn layout_selected_subsystem_file_tree(&mut self) {
+        let Some(root_id) = self.selected_system_id else {
+            self.status_message = "Select a system first".to_owned();
+            return;
+        };
+
+        let Some(root_position) = self.effective_map_position(root_id) else {
+            self.status_message = "Selected system has no map position".to_owned();
+            return;
+        };
+
+        let children_by_parent = self.sorted_children_for_subtree(root_id);
+        let affected_count = self.system_and_descendant_ids(root_id).len();
+        if affected_count <= 1 {
+            self.status_message = "Selected system has no descendants to lay out".to_owned();
+            return;
+        }
+
+        self.push_map_undo_snapshot();
+
+        let mut next_row = 2.0_f32;
+        let mut moved_count = 0usize;
+        let mut stack = children_by_parent
+            .get(&root_id)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .rev()
+            .map(|child_id| (child_id, 1usize))
+            .collect::<Vec<_>>();
+
+        while let Some((node_id, depth)) = stack.pop() {
+            let desired = Pos2::new(
+                root_position.x + (depth as f32 * MAP_GRID_SPACING * 2.0),
+                root_position.y + (next_row * MAP_GRID_SPACING),
+            );
+            self.place_tree_node_position(node_id, desired);
+            moved_count += 1;
+            next_row += 2.0;
+
+            if let Some(children) = children_by_parent.get(&node_id) {
+                for child_id in children.iter().rev() {
+                    stack.push((*child_id, depth + 1));
+                }
+            }
+        }
+
+        if moved_count > 0 {
+            self.mark_project_as_dirty();
+        }
+        self.status_message = format!(
+            "Applied file tree layout to {} subsystem{}",
+            moved_count,
+            if moved_count == 1 { "" } else { "s" }
+        );
+    }
+
+    pub(super) fn layout_selected_subsystem_regular_tree(&mut self) {
+        let Some(root_id) = self.selected_system_id else {
+            self.status_message = "Select a system first".to_owned();
+            return;
+        };
+
+        let Some(root_position) = self.effective_map_position(root_id) else {
+            self.status_message = "Selected system has no map position".to_owned();
+            return;
+        };
+
+        let children_by_parent = self.sorted_children_for_subtree(root_id);
+        let affected_count = self.system_and_descendant_ids(root_id).len();
+        if affected_count <= 1 {
+            self.status_message = "Selected system has no descendants to lay out".to_owned();
+            return;
+        }
+
+        self.push_map_undo_snapshot();
+
+        let mut moved_count = 0usize;
+        let mut stack = vec![root_id];
+        let mut positions = HashMap::<i64, Pos2>::new();
+        positions.insert(root_id, root_position);
+
+        while let Some(parent_id) = stack.pop() {
+            let Some(parent_position) = positions.get(&parent_id).copied() else {
+                continue;
+            };
+
+            let Some(children) = children_by_parent.get(&parent_id).cloned() else {
+                continue;
+            };
+
+            for (index, child_id) in children.iter().enumerate() {
+                let desired = Pos2::new(
+                    parent_position.x + (MAP_GRID_SPACING * 2.0),
+                    parent_position.y + ((index as f32 + 1.0) * MAP_GRID_SPACING * 2.0),
+                );
+                let placed = self.place_tree_node_position(*child_id, desired);
+                moved_count += 1;
+                positions.insert(*child_id, placed);
+                stack.push(*child_id);
+            }
+        }
+
+        if moved_count > 0 {
+            self.mark_project_as_dirty();
+        }
+        self.status_message = format!(
+            "Applied regular tree layout to {} subsystem{}",
+            moved_count,
+            if moved_count == 1 { "" } else { "s" }
+        );
+    }
+
+    pub(super) fn apply_pending_llm_detailed_import(&mut self) {
+        let root_name = self.pending_llm_detailed_root_name.trim().to_owned();
+        if root_name.is_empty() {
+            self.status_message = "Root name is required".to_owned();
+            return;
+        }
+
+        let systems = std::mem::take(&mut self.pending_llm_detailed_system_drafts);
+        let interactions = std::mem::take(&mut self.pending_llm_detailed_interaction_drafts);
+
+        let result = (|| -> anyhow::Result<(usize, usize)> {
+            let root_id = self
+                .repo
+                .create_system(root_name.as_str(), "LLM detailed import root", None, "service", None)?;
+            self.mark_system_as_new(root_id);
+
+            let mut created_ids_by_key = HashMap::<String, i64>::new();
+            let mut created_system_ids = vec![root_id];
+            let mut pending = systems;
+
+            while !pending.is_empty() {
+                let mut next_pending = Vec::new();
+                let mut progress = false;
+
+                for draft in pending {
+                    let parent_id = match draft.parent_source_key.as_deref() {
+                        Some(parent_key) => match created_ids_by_key.get(parent_key).copied() {
+                            Some(parent_id) => Some(parent_id),
+                            None => {
+                                next_pending.push(draft);
+                                continue;
+                            }
+                        },
+                        None => Some(root_id),
+                    };
+
+                    let system_id = self.repo.create_system(
+                        draft.name.as_str(),
+                        draft.description.as_str(),
+                        parent_id,
+                        Self::normalize_system_type(draft.system_type.as_str()).as_str(),
+                        draft.route_methods.as_deref(),
+                    )?;
+                    self.mark_system_as_new(system_id);
+                    created_system_ids.push(system_id);
+
+                    if let Some(source_key) = draft.source_key {
+                        created_ids_by_key.insert(source_key, system_id);
+                    }
+                    progress = true;
+                }
+
+                if !progress {
+                    return Err(anyhow::anyhow!(
+                        "LLM detailed import failed to resolve system hierarchy"
+                    ));
+                }
+                pending = next_pending;
+            }
+
+            let mut aggregated = HashMap::<(i64, i64), (crate::app::InteractionKind, String, String)>::new();
+
+            for interaction in interactions {
+                let Some(source_id) = created_ids_by_key.get(interaction.source_key.as_str()).copied() else {
+                    continue;
+                };
+                let Some(target_id) = created_ids_by_key.get(interaction.target_key.as_str()).copied() else {
+                    continue;
+                };
+                if source_id == target_id {
+                    continue;
+                }
+
+                let kind = Self::normalize_interaction_kind_label(interaction.kind.as_deref());
+                let key = if source_id <= target_id {
+                    (source_id, target_id)
+                } else {
+                    (target_id, source_id)
+                };
+
+                let entry = aggregated.entry(key).or_insert_with(|| {
+                    (
+                        kind,
+                        interaction.label.clone(),
+                        interaction.note.clone(),
+                    )
+                });
+
+                let existing_kind = entry.0;
+                entry.0 = match (existing_kind, kind) {
+                    (crate::app::InteractionKind::Bidirectional, _)
+                    | (_, crate::app::InteractionKind::Bidirectional) => {
+                        crate::app::InteractionKind::Bidirectional
+                    }
+                    (crate::app::InteractionKind::Pull, crate::app::InteractionKind::Push)
+                    | (crate::app::InteractionKind::Push, crate::app::InteractionKind::Pull) => {
+                        crate::app::InteractionKind::Bidirectional
+                    }
+                    (_, next_kind) => next_kind,
+                };
+
+                if entry.1.trim().is_empty() && !interaction.label.trim().is_empty() {
+                    entry.1 = interaction.label;
+                }
+                if entry.2.trim().is_empty() && !interaction.note.trim().is_empty() {
+                    entry.2 = interaction.note;
+                }
+            }
+
+            let mut created_interactions = 0usize;
+            for ((source_id, target_id), (kind, label, note)) in aggregated {
+                self.repo.create_link(
+                    source_id,
+                    target_id,
+                    label.trim(),
+                    Self::interaction_kind_to_setting_value(kind),
+                    None,
+                    None,
+                )?;
+
+                if !note.trim().is_empty() {
+                    if let Some(link_id) = self
+                        .repo
+                        .list_links()?
+                        .into_iter()
+                        .find(|link| link.source_system_id == source_id && link.target_system_id == target_id)
+                        .map(|link| link.id)
+                    {
+                        self.repo.update_link_details(
+                            link_id,
+                            label.trim(),
+                            note.trim(),
+                            Self::interaction_kind_to_setting_value(kind),
+                            None,
+                            None,
+                        )?;
+                    }
+                }
+
+                created_interactions += 1;
+            }
+
+            self.refresh_systems()?;
+            let mut imported_ids = created_system_ids.into_iter().collect::<HashSet<_>>();
+            imported_ids.insert(root_id);
+            self.layout_imported_tree_under_root(root_id, &imported_ids);
+
+            Ok((created_ids_by_key.len() + 1, created_interactions))
+        })();
+
+        self.show_llm_detailed_import_modal = false;
+
+        match result {
+            Ok((system_count, interaction_count)) => {
+                self.status_message = format!(
+                    "LLM Detailed Import complete: {} systems, {} interactions",
+                    system_count, interaction_count
+                );
+            }
+            Err(error) => {
+                self.status_message = format!("LLM Detailed Import failed: {error}");
+            }
+        }
+    }
+
+    pub(super) fn cancel_pending_llm_detailed_import(&mut self) {
+        self.pending_llm_detailed_system_drafts.clear();
+        self.pending_llm_detailed_interaction_drafts.clear();
+        self.pending_llm_detailed_root_name.clear();
+        self.show_llm_detailed_import_modal = false;
+        self.status_message = "LLM detailed import canceled".to_owned();
+    }
+
+    pub(super) fn import_llm_systems_from_path(&mut self, input_path: &Path) {
+        let plugin_display_name = plugin_by_name("plugin.llm")
+            .map(|plugin| plugin.definition().display_name.to_owned())
+            .unwrap_or_else(|| "LLM Import Plugin".to_owned());
+
+        match self.import_from_plugin_path("plugin.llm", input_path) {
             Ok(count) => {
                 self.status_message =
-                    format!("{} imported {} route system(s)", plugin_display_name, count);
+                    format!("{} imported {} system(s)", plugin_display_name, count);
             }
             Err(error) => {
                 self.status_message = format!("{} import failed: {error}", plugin_display_name);
@@ -1720,6 +2338,7 @@ impl SystemsCatalogApp {
 
         match result {
             Ok(_) => {
+                self.mark_project_as_dirty();
                 self.status_message = "Zone created".to_owned();
             }
             Err(error) => {
@@ -1758,8 +2377,13 @@ impl SystemsCatalogApp {
             )
             .and_then(|_| self.refresh_systems());
 
-        if result.is_err() {
-            self.status_message = "Failed to update zone".to_owned();
+        match result {
+            Ok(_) => {
+                self.mark_project_as_dirty();
+            }
+            Err(_) => {
+                self.status_message = "Failed to update zone".to_owned();
+            }
         }
     }
 
@@ -1811,8 +2435,13 @@ impl SystemsCatalogApp {
                 Ok(())
             });
 
-        if result.is_err() {
-            self.status_message = "Failed to update zone geometry".to_owned();
+        match result {
+            Ok(_) => {
+                self.mark_project_as_dirty();
+            }
+            Err(_) => {
+                self.status_message = "Failed to update zone geometry".to_owned();
+            }
         }
     }
 
@@ -1899,6 +2528,7 @@ impl SystemsCatalogApp {
 
         match result {
             Ok(_) => {
+                self.mark_project_as_dirty();
                 self.status_message = if next_minimized {
                     "Zone minimized".to_owned()
                 } else {
@@ -1942,6 +2572,7 @@ impl SystemsCatalogApp {
 
         match result {
             Ok(_) => {
+                self.mark_project_as_dirty();
                 self.selected_zone_id = None;
                 self.selected_zone_name.clear();
                 self.selected_zone_render_priority = 1;
@@ -2517,9 +3148,9 @@ impl SystemsCatalogApp {
     }
 
     pub(super) fn export_catalog(&mut self) {
-        if self.new_system_ids.is_empty() && self.dirty_system_ids.is_empty() {
+        if !self.has_unsaved_project_changes() {
             self.show_save_catalog_modal = false;
-            self.status_message = "No new/dirty systems to save".to_owned();
+            self.status_message = "No unsaved project changes to save".to_owned();
             return;
         }
 
@@ -2752,6 +3383,11 @@ impl SystemsCatalogApp {
             return;
         };
 
+        let Some(existing_link) = self.selected_links.iter().find(|link| link.id == link_id) else {
+            self.status_message = "Selected interaction is no longer available".to_owned();
+            return;
+        };
+
         let label = self.edited_link_label.trim();
         let note = self.edited_link_note.trim();
         let kind = Self::interaction_kind_to_setting_value(self.edited_link_kind);
@@ -2760,22 +3396,255 @@ impl SystemsCatalogApp {
             return;
         };
 
-        let result = self
-            .repo
-            .update_link_details(
+        let selected_target_system_id = self
+            .selected_interaction_transfer_target_id
+            .or(self.new_link_target_id)
+            .unwrap_or(existing_link.target_system_id);
+
+        let mut next_source_system_id = existing_link.source_system_id;
+        let mut next_target_system_id = existing_link.target_system_id;
+
+        if existing_link.source_system_id == system_id {
+            next_source_system_id = selected_target_system_id;
+        }
+        if existing_link.target_system_id == system_id {
+            next_target_system_id = selected_target_system_id;
+        }
+
+        // Fallback: if the selected system is not one endpoint (unexpected), treat this as
+        // direct target reassignment for the edited interaction.
+        if existing_link.source_system_id != system_id
+            && existing_link.target_system_id != system_id
+            && selected_target_system_id != existing_link.target_system_id
+        {
+            next_target_system_id = selected_target_system_id;
+        }
+
+        let endpoints_changed = next_source_system_id != existing_link.source_system_id
+            || next_target_system_id != existing_link.target_system_id;
+
+        if endpoints_changed && next_source_system_id == next_target_system_id {
+            self.status_message = "Interaction cannot point to the same system on both ends"
+                .to_owned();
+            return;
+        }
+
+        let source_column_name = if endpoints_changed {
+            None
+        } else {
+            self.edited_link_source_column_name.clone()
+        };
+        let target_column_name = if endpoints_changed {
+            None
+        } else {
+            self.edited_link_target_column_name.clone()
+        };
+
+        let duplicate_target = self
+            .all_links
+            .iter()
+            .find(|link| {
+                link.id != link_id
+                    && link.source_system_id == next_source_system_id
+                    && link.target_system_id == next_target_system_id
+            })
+            .map(|link| link.id);
+
+        if endpoints_changed {
+            if let Some(existing_id) = duplicate_target {
+                self.status_message = format!(
+                    "Interaction already exists for this source/target pair (#{existing_id})"
+                );
+                return;
+            }
+        }
+
+        let result = (|| -> anyhow::Result<()> {
+            if endpoints_changed {
+                self.repo.update_link_endpoints(
+                    link_id,
+                    next_source_system_id,
+                    next_target_system_id,
+                )?;
+                self.edited_link_source_column_name = None;
+                self.edited_link_target_column_name = None;
+            }
+
+            self.repo.update_link_details(
                 link_id,
                 label,
                 note,
                 kind,
-                self.edited_link_source_column_name.as_deref(),
-                self.edited_link_target_column_name.as_deref(),
-            )
+                source_column_name.as_deref(),
+                target_column_name.as_deref(),
+            )?;
+
+            Ok(())
+        })()
             .and_then(|_| self.refresh_systems())
             .and_then(|_| self.load_selected_data(system_id));
 
         match result {
-            Ok(_) => self.status_message = "Interaction updated".to_owned(),
+            Ok(_) => {
+                self.mark_project_as_dirty();
+                self.status_message = if endpoints_changed {
+                    "Interaction updated and endpoint moved".to_owned()
+                } else {
+                    "Interaction updated".to_owned()
+                };
+            }
             Err(error) => self.status_message = format!("Failed to update interaction: {error}"),
+        }
+    }
+
+    fn merge_interaction_kind_values(existing_kind: &str, incoming_kind: &str) -> String {
+        let existing = Self::interaction_kind_from_setting_value(existing_kind);
+        let incoming = Self::interaction_kind_from_setting_value(incoming_kind);
+
+        let merged = match (existing, incoming) {
+            (InteractionKind::Bidirectional, _) | (_, InteractionKind::Bidirectional) => {
+                InteractionKind::Bidirectional
+            }
+            (InteractionKind::Pull, InteractionKind::Push)
+            | (InteractionKind::Push, InteractionKind::Pull) => InteractionKind::Bidirectional,
+            (_, next) => next,
+        };
+
+        Self::interaction_kind_to_setting_value(merged).to_owned()
+    }
+
+    fn merge_interaction_text(existing: &str, incoming: &str, delimiter: &str) -> String {
+        let existing_trimmed = existing.trim();
+        let incoming_trimmed = incoming.trim();
+
+        if existing_trimmed.is_empty() {
+            return incoming_trimmed.to_owned();
+        }
+        if incoming_trimmed.is_empty() || existing_trimmed.eq_ignore_ascii_case(incoming_trimmed) {
+            return existing_trimmed.to_owned();
+        }
+
+        format!("{}{}{}", existing_trimmed, delimiter, incoming_trimmed)
+    }
+
+    pub(super) fn transfer_selected_system_interactions(&mut self) {
+        let Some(source_system_id) = self.selected_system_id else {
+            self.status_message = "Select a source system first".to_owned();
+            return;
+        };
+
+        let Some(target_system_id) = self.selected_interaction_transfer_target_id else {
+            self.status_message = "Select a target system first".to_owned();
+            return;
+        };
+
+        if source_system_id == target_system_id {
+            self.status_message = "Source and target systems must be different".to_owned();
+            return;
+        }
+
+        let result = (|| -> anyhow::Result<(usize, usize, usize)> {
+            let mut links = self.repo.list_links()?;
+            let mut moved_count = 0usize;
+            let mut merged_count = 0usize;
+            let mut dropped_self_count = 0usize;
+
+            let transfer_candidates = links
+                .iter()
+                .filter(|link| {
+                    link.source_system_id == source_system_id || link.target_system_id == source_system_id
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+
+            for link in transfer_candidates {
+                let next_source = if link.source_system_id == source_system_id {
+                    target_system_id
+                } else {
+                    link.source_system_id
+                };
+                let next_target = if link.target_system_id == source_system_id {
+                    target_system_id
+                } else {
+                    link.target_system_id
+                };
+
+                if next_source == next_target {
+                    self.repo.delete_link(link.id)?;
+                    links.retain(|existing| existing.id != link.id);
+                    dropped_self_count += 1;
+                    continue;
+                }
+
+                let duplicate = links
+                    .iter()
+                    .find(|existing| {
+                        existing.id != link.id
+                            && existing.source_system_id == next_source
+                            && existing.target_system_id == next_target
+                    })
+                    .cloned();
+
+                if let Some(existing) = duplicate {
+                    let merged_kind = Self::merge_interaction_kind_values(
+                        existing.kind.as_str(),
+                        link.kind.as_str(),
+                    );
+                    let merged_label =
+                        Self::merge_interaction_text(existing.label.as_str(), link.label.as_str(), " | ");
+                    let merged_note =
+                        Self::merge_interaction_text(existing.note.as_str(), link.note.as_str(), "\n\n");
+
+                    self.repo.update_link_details(
+                        existing.id,
+                        merged_label.as_str(),
+                        merged_note.as_str(),
+                        merged_kind.as_str(),
+                        existing.source_column_name.as_deref(),
+                        existing.target_column_name.as_deref(),
+                    )?;
+                    self.repo.delete_link(link.id)?;
+
+                    links.retain(|item| item.id != link.id);
+                    if let Some(entry) = links.iter_mut().find(|item| item.id == existing.id) {
+                        entry.label = merged_label;
+                        entry.note = merged_note;
+                        entry.kind = merged_kind;
+                    }
+
+                    merged_count += 1;
+                } else {
+                    self.repo
+                        .update_link_endpoints(link.id, next_source, next_target)?;
+                    if let Some(entry) = links.iter_mut().find(|item| item.id == link.id) {
+                        entry.source_system_id = next_source;
+                        entry.target_system_id = next_target;
+                    }
+                    moved_count += 1;
+                }
+            }
+
+            self.refresh_systems()?;
+            if let Some(selected_id) = self.selected_system_id {
+                self.load_selected_data(selected_id)?;
+            }
+
+            Ok((moved_count, merged_count, dropped_self_count))
+        })();
+
+        match result {
+            Ok((moved_count, merged_count, dropped_self_count)) => {
+                if moved_count > 0 || merged_count > 0 || dropped_self_count > 0 {
+                    self.mark_project_as_dirty();
+                }
+                self.status_message = format!(
+                    "Transferred interactions: {} moved, {} merged, {} removed self-links",
+                    moved_count, merged_count, dropped_self_count
+                );
+            }
+            Err(error) => {
+                self.status_message = format!("Failed to transfer interactions: {error}");
+            }
         }
     }
 
@@ -2797,7 +3666,10 @@ impl SystemsCatalogApp {
             .and_then(|_| self.load_selected_data(system_id));
 
         match result {
-            Ok(_) => self.status_message = "Interaction removed".to_owned(),
+            Ok(_) => {
+                self.mark_project_as_dirty();
+                self.status_message = "Interaction removed".to_owned();
+            }
             Err(error) => self.status_message = format!("Failed to remove interaction: {error}"),
         }
     }
@@ -3329,6 +4201,7 @@ impl SystemsCatalogApp {
 
         match result {
             Ok(_) => {
+                self.mark_project_as_dirty();
                 self.new_link_label.clear();
                 self.new_link_target_id = None;
                 self.selected_system_id = Some(source_id);

@@ -979,6 +979,25 @@ impl Repository {
         Ok(())
     }
 
+    pub fn update_link_endpoints(
+        &self,
+        link_id: i64,
+        source_system_id: i64,
+        target_system_id: i64,
+    ) -> Result<()> {
+        self.conn.execute(
+            r#"
+            UPDATE links
+            SET source_system_id = ?2,
+                target_system_id = ?3
+            WHERE id = ?1
+            "#,
+            params![link_id, source_system_id, target_system_id],
+        )?;
+
+        Ok(())
+    }
+
     pub fn delete_link(&self, link_id: i64) -> Result<()> {
         self.conn.execute(
             r#"

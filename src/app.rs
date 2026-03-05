@@ -12,7 +12,7 @@ use crate::models::{
     DatabaseColumnInput, DatabaseColumnRecord, SystemLink, SystemNote, SystemRecord, TechItem,
     ZoneRecord,
 };
-use crate::plugins::PluginSystemDraft;
+use crate::plugins::{PluginInteractionDraft, PluginSystemDraft};
 
 pub(crate) const MAP_NODE_SIZE: Vec2 = Vec2::new(170.0, 64.0);
 pub(crate) const MAP_WORLD_SIZE: Vec2 = Vec2::new(12000.0, 12000.0);
@@ -94,6 +94,7 @@ pub enum AppModal {
     LoadCatalog,
     NewCatalogConfirm,
     DdlTableMapping,
+    LlmDetailedImport,
     HelpGettingStarted,
     HelpCreatingInteractions,
     HelpManagingTechnology,
@@ -174,6 +175,8 @@ pub struct SystemsCatalogApp {
 
     new_link_target_id: Option<i64>,
     new_link_label: String,
+    selected_interaction_transfer_target_id: Option<i64>,
+    interaction_transfer_pick_source_id: Option<i64>,
     selected_link_id_for_edit: Option<i64>,
     edited_link_label: String,
     edited_link_note: String,
@@ -199,6 +202,7 @@ pub struct SystemsCatalogApp {
     fast_add_selected_catalog_tech_on_map: bool,
 
     map_positions: HashMap<i64, Pos2>,
+    project_dirty: bool,
     new_system_ids: HashSet<i64>,
     dirty_system_ids: HashSet<i64>,
     map_card_label_cache: HashMap<i64, String>,
@@ -272,6 +276,7 @@ pub struct SystemsCatalogApp {
     show_load_catalog_modal: bool,
     show_new_catalog_confirm_modal: bool,
     show_ddl_table_mapping_modal: bool,
+    show_llm_detailed_import_modal: bool,
     show_help_getting_started_modal: bool,
     show_help_creating_interactions_modal: bool,
     show_help_managing_technology_modal: bool,
@@ -296,6 +301,9 @@ pub struct SystemsCatalogApp {
     new_catalog_migration_db_path: String,
     pending_ddl_drafts: Vec<PluginSystemDraft>,
     pending_ddl_target_system_ids: Vec<Option<i64>>,
+    pending_llm_detailed_system_drafts: Vec<PluginSystemDraft>,
+    pending_llm_detailed_interaction_drafts: Vec<PluginInteractionDraft>,
+    pending_llm_detailed_root_name: String,
     project_autosave_enabled: bool,
     manage_system_json_hierarchy: bool,
     project_last_autosave_at_secs: Option<f64>,
@@ -357,6 +365,8 @@ impl SystemsCatalogApp {
             selected_system_route_methods: HashSet::new(),
             new_link_target_id: None,
             new_link_label: String::new(),
+            selected_interaction_transfer_target_id: None,
+            interaction_transfer_pick_source_id: None,
             selected_link_id_for_edit: None,
             edited_link_label: String::new(),
             edited_link_note: String::new(),
@@ -380,6 +390,7 @@ impl SystemsCatalogApp {
             database_columns_by_system: HashMap::new(),
             fast_add_selected_catalog_tech_on_map: false,
             map_positions: HashMap::new(),
+            project_dirty: false,
             new_system_ids: HashSet::new(),
             dirty_system_ids: HashSet::new(),
             map_card_label_cache: HashMap::new(),
@@ -448,6 +459,7 @@ impl SystemsCatalogApp {
             show_load_catalog_modal: false,
             show_new_catalog_confirm_modal: false,
             show_ddl_table_mapping_modal: false,
+            show_llm_detailed_import_modal: false,
             show_help_getting_started_modal: false,
             show_help_creating_interactions_modal: false,
             show_help_managing_technology_modal: false,
@@ -472,6 +484,9 @@ impl SystemsCatalogApp {
             new_catalog_migration_db_path: String::new(),
             pending_ddl_drafts: Vec::new(),
             pending_ddl_target_system_ids: Vec::new(),
+            pending_llm_detailed_system_drafts: Vec::new(),
+            pending_llm_detailed_interaction_drafts: Vec::new(),
+            pending_llm_detailed_root_name: String::new(),
             project_autosave_enabled: false,
             manage_system_json_hierarchy: false,
             project_last_autosave_at_secs: None,
@@ -551,6 +566,7 @@ impl SystemsCatalogApp {
             AppModal::LoadCatalog => self.show_load_catalog_modal,
             AppModal::NewCatalogConfirm => self.show_new_catalog_confirm_modal,
             AppModal::DdlTableMapping => self.show_ddl_table_mapping_modal,
+            AppModal::LlmDetailedImport => self.show_llm_detailed_import_modal,
             AppModal::HelpGettingStarted => self.show_help_getting_started_modal,
             AppModal::HelpCreatingInteractions => self.show_help_creating_interactions_modal,
             AppModal::HelpManagingTechnology => self.show_help_managing_technology_modal,
@@ -573,6 +589,7 @@ impl SystemsCatalogApp {
             AppModal::LoadCatalog => self.show_load_catalog_modal = is_open,
             AppModal::NewCatalogConfirm => self.show_new_catalog_confirm_modal = is_open,
             AppModal::DdlTableMapping => self.show_ddl_table_mapping_modal = is_open,
+            AppModal::LlmDetailedImport => self.show_llm_detailed_import_modal = is_open,
             AppModal::HelpGettingStarted => self.show_help_getting_started_modal = is_open,
             AppModal::HelpCreatingInteractions => self.show_help_creating_interactions_modal = is_open,
             AppModal::HelpManagingTechnology => self.show_help_managing_technology_modal = is_open,
@@ -745,6 +762,8 @@ impl SystemsCatalogApp {
     }
 
     fn load_selected_data(&mut self, system_id: i64) -> Result<()> {
+        self.selected_interaction_transfer_target_id = None;
+        self.interaction_transfer_pick_source_id = None;
         self.selected_links = self.repo.list_links_for_system(system_id)?;
         self.selected_system_tech = self.repo.list_tech_for_system(system_id)?;
         self.selected_notes = self.repo.list_notes_for_system(system_id)?;
@@ -1254,6 +1273,8 @@ impl SystemsCatalogApp {
         self.edited_link_kind = InteractionKind::Standard;
         self.edited_link_source_column_name = None;
         self.edited_link_target_column_name = None;
+        self.selected_interaction_transfer_target_id = None;
+        self.interaction_transfer_pick_source_id = None;
         self.map_link_drag_from = None;
         self.map_interaction_drag_from = None;
         self.map_interaction_drag_kind = InteractionKind::Standard;
@@ -2188,11 +2209,13 @@ impl SystemsCatalogApp {
     }
 
     fn mark_system_as_new(&mut self, system_id: i64) {
+        self.project_dirty = true;
         self.new_system_ids.insert(system_id);
         self.dirty_system_ids.remove(&system_id);
     }
 
     fn mark_system_as_dirty(&mut self, system_id: i64) {
+        self.project_dirty = true;
         if self.new_system_ids.contains(&system_id) {
             return;
         }
@@ -2200,7 +2223,16 @@ impl SystemsCatalogApp {
         self.dirty_system_ids.insert(system_id);
     }
 
+    fn mark_project_as_dirty(&mut self) {
+        self.project_dirty = true;
+    }
+
+    fn has_unsaved_project_changes(&self) -> bool {
+        self.project_dirty
+    }
+
     fn clear_system_change_flags(&mut self) {
+        self.project_dirty = false;
         self.new_system_ids.clear();
         self.dirty_system_ids.clear();
     }

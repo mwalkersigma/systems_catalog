@@ -1849,6 +1849,14 @@ impl SystemsCatalogApp {
                     self.new_system_ids.len(),
                     self.dirty_system_ids.len()
                 ));
+                ui.label(format!(
+                    "Project has unsaved changes: {}",
+                    if self.has_unsaved_project_changes() {
+                        "yes"
+                    } else {
+                        "no"
+                    }
+                ));
 
                 if !self.recent_catalog_paths.is_empty() {
                     ui.label("Recent paths");
@@ -3080,6 +3088,17 @@ impl SystemsCatalogApp {
             self.update_selected_system_parent();
         }
 
+        ui.separator();
+        ui.label("Subsystem layout");
+        ui.horizontal(|ui| {
+            if ui.button("File tree").clicked() {
+                self.layout_selected_subsystem_file_tree();
+            }
+            if ui.button("Regular tree").clicked() {
+                self.layout_selected_subsystem_regular_tree();
+            }
+        });
+
         ui.horizontal(|ui| {
             if ui.button("Delete system").clicked() {
                 self.delete_selected_system();
@@ -3146,6 +3165,56 @@ impl SystemsCatalogApp {
         ui.text_edit_singleline(&mut self.new_link_label);
         if ui.button("Add interaction").clicked() {
             self.create_link();
+        }
+
+        ui.separator();
+        ui.label("Transfer interactions");
+        let transfer_target_label = self
+            .selected_interaction_transfer_target_id
+            .map(|id| self.system_dropdown_label(id))
+            .unwrap_or_else(|| "Select destination system".to_owned());
+        let transfer_target_label =
+            Self::clamp_text_to_width(&transfer_target_label, ui.available_width());
+
+        egui::ComboBox::from_label("Transfer to")
+            .selected_text(transfer_target_label)
+            .show_ui(ui, |ui| {
+                for (candidate_id, _) in self.zone_filtered_system_candidates(Some(system.id)) {
+                    let option_label = self.system_dropdown_label(candidate_id);
+                    ui.selectable_value(
+                        &mut self.selected_interaction_transfer_target_id,
+                        Some(candidate_id),
+                        option_label,
+                    );
+                }
+            });
+
+        let transfer_pick_active = self.interaction_transfer_pick_source_id == Some(system.id);
+        if ui
+            .button(if transfer_pick_active {
+                "Cancel map target pick"
+            } else {
+                "Select target on map"
+            })
+            .clicked()
+        {
+            if transfer_pick_active {
+                self.interaction_transfer_pick_source_id = None;
+                self.status_message = "Transfer target pick canceled".to_owned();
+            } else {
+                self.interaction_transfer_pick_source_id = Some(system.id);
+                self.selected_interaction_transfer_target_id = None;
+                self.status_message =
+                    "Click a destination system on the map for transfer".to_owned();
+            }
+        }
+
+        if transfer_pick_active {
+            ui.label("Picking transfer target: click a destination card on the map.");
+        }
+
+        if ui.button("Transfer interactions").clicked() {
+            self.transfer_selected_system_interactions();
         }
 
         if self.selected_links.is_empty() {
@@ -4401,6 +4470,8 @@ impl SystemsCatalogApp {
                                         self.status_message =
                                             format!("Failed to update nested zone geometry: {error}");
                                         break;
+                                    } else {
+                                        self.mark_project_as_dirty();
                                     }
                                 }
                             }
@@ -4635,6 +4706,20 @@ impl SystemsCatalogApp {
 
             if response.clicked() {
                 if disclosure_click_consumed {
+                    continue;
+                }
+
+                if let Some(pick_source_id) = self.interaction_transfer_pick_source_id {
+                    if pick_source_id == system.id {
+                        self.status_message = "Choose a different destination system".to_owned();
+                    } else {
+                        self.selected_interaction_transfer_target_id = Some(system.id);
+                        self.interaction_transfer_pick_source_id = None;
+                        self.status_message = format!(
+                            "Transfer destination set to '{}'",
+                            self.system_name_by_id(system.id)
+                        );
+                    }
                     continue;
                 }
 
@@ -5287,6 +5372,49 @@ impl SystemsCatalogApp {
             }
         }
     }
+
+    fn render_llm_detailed_import_modal(&mut self, ctx: &egui::Context) {
+        if !self.show_llm_detailed_import_modal {
+            return;
+        }
+
+        let mut open = self.show_llm_detailed_import_modal;
+        let mut close_requested = false;
+
+        egui::Window::new("LLM Detailed Import")
+            .collapsible(false)
+            .resizable(false)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.label("Root system name for this import");
+                ui.text_edit_singleline(&mut self.pending_llm_detailed_root_name);
+                ui.small(format!(
+                    "Importing {} systems and {} interactions",
+                    self.pending_llm_detailed_system_drafts.len(),
+                    self.pending_llm_detailed_interaction_drafts.len()
+                ));
+
+                ui.horizontal(|ui| {
+                    if ui.button("Import").clicked() {
+                        self.apply_pending_llm_detailed_import();
+                        if !self.show_llm_detailed_import_modal {
+                            close_requested = true;
+                        }
+                    }
+
+                    if ui.button("Cancel").clicked() {
+                        self.cancel_pending_llm_detailed_import();
+                        close_requested = true;
+                    }
+                });
+            });
+
+        if close_requested {
+            open = false;
+        }
+
+        self.show_llm_detailed_import_modal = open;
+    }
 }
 
 impl eframe::App for SystemsCatalogApp {
@@ -5421,6 +5549,26 @@ impl eframe::App for SystemsCatalogApp {
                         }
                         if let Some(path) = dialog.pick_file() {
                             self.import_api_routes_from_openapi_path(path.as_path());
+                        }
+                        ui.close_menu();
+                    }
+                    if ui.button("Import LLM Systems File").clicked() {
+                        let mut dialog = FileDialog::new().add_filter("LLM Systems", &["json"]);
+                        if !self.current_catalog_path.trim().is_empty() {
+                            dialog = dialog.set_directory(self.current_catalog_path.as_str());
+                        }
+                        if let Some(path) = dialog.pick_file() {
+                            self.import_llm_systems_from_path(path.as_path());
+                        }
+                        ui.close_menu();
+                    }
+                    if ui.button("Import LLM Detailed Map").clicked() {
+                        let mut dialog = FileDialog::new().add_filter("LLM Detailed", &["json"]);
+                        if !self.current_catalog_path.trim().is_empty() {
+                            dialog = dialog.set_directory(self.current_catalog_path.as_str());
+                        }
+                        if let Some(path) = dialog.pick_file() {
+                            self.import_llm_detailed_map_from_path(path.as_path());
                         }
                         ui.close_menu();
                     }
@@ -5758,6 +5906,7 @@ impl eframe::App for SystemsCatalogApp {
         self.render_save_catalog_modal(ctx);
         self.render_load_catalog_modal(ctx);
         self.render_new_catalog_confirm_modal(ctx);
+        self.render_llm_detailed_import_modal(ctx);
         self.render_ddl_table_mapping_modal(ctx);
         self.render_hotkeys_modal(ctx);
         self.render_interaction_style_modal(ctx);
@@ -5789,4 +5938,5 @@ impl eframe::App for SystemsCatalogApp {
 
         self.save_ui_settings_if_dirty();
     }
+
 }
