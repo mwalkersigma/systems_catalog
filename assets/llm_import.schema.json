@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://systems-catalog.local/schemas/llm-import.schema.json",
+  "title": "Systems Catalog LLM Import",
+  "description": "Schema for importing LLM-generated systems into systems_catalog.",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "schemaVersion": { "type": "integer" },
+        "inventory": {
+          "type": "object",
+          "description": "Optional project inventory metadata for traceability"
+        },
+        "systems": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/system" }
+        }
+      },
+      "required": ["systems"],
+      "additionalProperties": true
+    },
+    {
+      "type": "array",
+      "items": { "$ref": "#/$defs/system" }
+    }
+  ],
+  "$defs": {
+    "system": {
+      "type": "object",
+      "properties": {
+        "key": {
+          "type": "string",
+          "description": "Unique stable identifier for this system in the import file"
+        },
+        "parentKey": {
+          "type": ["string", "null"],
+          "description": "Optional key of parent system"
+        },
+        "path": {
+          "type": "string",
+          "description": "Optional slash path used to derive hierarchy (for example /users/create)"
+        },
+        "name": {
+          "type": "string",
+          "description": "Display name of the system"
+        },
+        "description": {
+          "type": "string",
+          "description": "Short business or technical description"
+        },
+        "systemType": {
+          "type": "string",
+          "enum": ["service", "api", "database"],
+          "default": "service"
+        },
+        "routeMethods": {
+          "description": "HTTP methods if this is an API system",
+          "oneOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]
+              }
+            },
+            {
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "required": ["name"],
+      "additionalProperties": true
+    }
+  }
+}

@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://systems-catalog.local/schemas/llm-detailed-import.schema.json",
+  "title": "Systems Catalog Detailed LLM Import",
+  "description": "Schema for detailed LLM-generated system + interaction imports.",
+  "type": "object",
+  "properties": {
+    "schemaVersion": { "type": "integer" },
+    "inventory": {
+      "type": "object",
+      "description": "Optional inventory metadata generated during analysis"
+    },
+    "systems": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/system" }
+    },
+    "interactions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/interaction" }
+    }
+  },
+  "required": ["systems"],
+  "additionalProperties": true,
+  "$defs": {
+    "system": {
+      "type": "object",
+      "properties": {
+        "key": {
+          "type": "string",
+          "description": "Unique stable identifier for this system"
+        },
+        "parentKey": {
+          "type": ["string", "null"],
+          "description": "Optional parent key"
+        },
+        "path": {
+          "type": "string",
+          "description": "Optional slash path for hierarchy derivation"
+        },
+        "name": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "systemType": {
+          "type": "string",
+          "enum": ["service", "api", "database"],
+          "default": "service"
+        },
+        "routeMethods": {
+          "oneOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]
+              }
+            },
+            {
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "required": ["name"],
+      "additionalProperties": true
+    },
+    "interaction": {
+      "type": "object",
+      "properties": {
+        "sourceKey": { "type": "string" },
+        "targetKey": { "type": "string" },
+        "kind": {
+          "type": "string",
+          "enum": ["standard", "pull", "push", "bidirectional"]
+        },
+        "label": { "type": "string" },
+        "note": { "type": "string" }
+      },
+      "required": ["sourceKey", "targetKey"],
+      "additionalProperties": true
+    }
+  }
+}

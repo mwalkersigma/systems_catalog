@@ -27,6 +27,7 @@ const MAP_CARD_LINE_HEIGHT: f32 = 20.0;
 const MAP_CARD_VERTICAL_PADDING: f32 = 30.0;
 const MAP_TEXT_SCALE_THRESHOLD_ZOOM: f32 = 0.5;
 const MAP_TEXT_MIN_LOW_ZOOM_MULTIPLIER: f32 = 0.7;
+const MAP_ZONE_OVERVIEW_HIDE_CARDS_ZOOM: f32 = 0.05;
 const INTERACTION_NOTE_POPUP_OPEN_DELAY_SECS: f64 = 0.2;
 const INTERACTION_NOTE_POPUP_CLOSE_DELAY_SECS: f64 = 0.2;
 
@@ -3675,17 +3676,17 @@ impl SystemsCatalogApp {
         ui.horizontal(|ui| {
             ui.heading("Mind Map");
 
-            let info_response = ui.small_button("\u{2139}");
+            let info_response = ui.small_button("(i)");
             if info_response.hovered() {
                 egui::show_tooltip(ui.ctx(), ui.id().with("map_help_tip"), |ui| {
-                    ui.label("Space + drag \u{2192} Pan");
-                    ui.label("Z + drag \u{2192} Draw zone");
-                    ui.label("Ctrl + Scroll \u{2192} Zoom");
-                    ui.label("Scroll \u{2192} Pan vertical/horizontal");
-                    ui.label("Shift + drag (child \u{2192} parent) \u{2192} Assign parent");
-                    ui.label("Ctrl+R/B/F/D then click source + target \u{2192} Interaction");
-                    ui.label("Alt+C / Alt+V \u{2192} Copy / Paste cards");
-                    ui.label("Drag empty space \u{2192} Box-select systems");
+                    ui.label("Space + drag -> Pan");
+                    ui.label("Z + drag -> Draw zone");
+                    ui.label("Ctrl + Scroll -> Zoom");
+                    ui.label("Scroll -> Pan vertical/horizontal");
+                    ui.label("Shift + drag (child -> parent) -> Assign parent");
+                    ui.label("Ctrl+R/B/F/D then click source + target -> Interaction");
+                    ui.label("Alt+C / Alt+V -> Copy / Paste cards");
+                    ui.label("Drag empty space -> Box-select systems");
                 });
             }
         });
@@ -3749,7 +3750,7 @@ impl SystemsCatalogApp {
             self.zone_drag_moves_captured_systems = true;
         }
 
-        let zoom_active = !modal_open && (pointer_over_map || map_response.has_focus());
+        let zoom_active = !modal_open && pointer_over_map;
         let ctrl_down = ui.input(|input| input.modifiers.ctrl);
         if zoom_active {
             if ctrl_down {
@@ -3795,6 +3796,7 @@ impl SystemsCatalogApp {
 
         let zoom = self.map_zoom;
         let pan = self.map_pan;
+        let zone_overview_mode = zoom <= MAP_ZONE_OVERVIEW_HIDE_CARDS_ZOOM;
 
         self.map_last_view_center_local = Some(Pos2::new(
             ((map_rect.center().x - map_rect.left() - pan.x) / zoom)
@@ -3882,7 +3884,7 @@ impl SystemsCatalogApp {
                     }
                 }
 
-                let logical_rect = if effective_minimized {
+                let logical_rect = if effective_minimized && !zone_overview_mode {
                     let representative_id = resolved_representative?;
                     let representative_position = self.effective_map_position(representative_id)?;
                     let tile_size = self.map_node_size_cached_by_id(representative_id) * zoom;
@@ -3910,7 +3912,7 @@ impl SystemsCatalogApp {
                     id: zone.id,
                     rect: zone_rect,
                     logical_rect,
-                    name: if effective_minimized {
+                    name: if effective_minimized && !zone_overview_mode {
                         resolved_representative
                             .map(|id| self.system_name_by_id(id))
                             .unwrap_or_else(|| zone.name.clone())
@@ -4031,19 +4033,29 @@ impl SystemsCatalogApp {
                         ),
                     ),
                 );
-                painter.text(
-                    zone.rect.left_top() + Vec2::new(6.0, 4.0),
-                    egui::Align2::LEFT_TOP,
-                    zone.name.as_str(),
-                    FontId::proportional((12.0 * self.map_zoom).clamp(10.0, 14.0)),
-                    Color32::from_gray(210),
-                );
+                if zone_overview_mode {
+                    painter.text(
+                        zone.rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        zone.name.as_str(),
+                        FontId::proportional((14.0 * self.map_zoom).clamp(10.0, 16.0)),
+                        Color32::from_gray(220),
+                    );
+                } else {
+                    painter.text(
+                        zone.rect.left_top() + Vec2::new(6.0, 4.0),
+                        egui::Align2::LEFT_TOP,
+                        zone.name.as_str(),
+                        FontId::proportional((12.0 * self.map_zoom).clamp(10.0, 14.0)),
+                        Color32::from_gray(210),
+                    );
+                }
 
                 // Skip the zone disclosure button for minimized zones — the
                 // representative card's own disclosure handles un-minimize so
                 // that we avoid a double-fire where both handlers react to the
                 // same click.
-                if !zone.minimized {
+                if !zone.minimized && !zone_overview_mode {
                     let disclosure_radius = (8.5 * self.map_zoom).clamp(7.0, 13.0);
                     let disclosure_center = Pos2::new(
                         zone.rect.left() + (disclosure_radius + 2.0),
@@ -4126,16 +4138,19 @@ impl SystemsCatalogApp {
 
         let disclosure_click_consumed = disclosure_clicked_zone_id.is_some();
 
-        let visible_ids = self.visible_system_ids();
-        let visible_systems = self
-            .systems
-            .iter()
-            .filter(|system| {
-                visible_ids.contains(&system.id)
-                    && !minimized_hidden_system_ids.contains(&system.id)
-            })
-            .cloned()
-            .collect::<Vec<_>>();
+        let visible_systems = if zone_overview_mode {
+            Vec::new()
+        } else {
+            let visible_ids = self.visible_system_ids();
+            self.systems
+                .iter()
+                .filter(|system| {
+                    visible_ids.contains(&system.id)
+                        && !minimized_hidden_system_ids.contains(&system.id)
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        };
 
         let mut node_rects: HashMap<i64, Rect> = HashMap::new();
         for system in &visible_systems {

@@ -19,7 +19,7 @@ pub(crate) const MAP_WORLD_SIZE: Vec2 = Vec2::new(12000.0, 12000.0);
 pub(crate) const MAP_WORLD_MIN_SIZE: Vec2 = Vec2::new(4000.0, 4000.0);
 pub(crate) const MAP_WORLD_MAX_SIZE: Vec2 = Vec2::new(50000.0, 50000.0);
 pub(crate) const MAP_GRID_SPACING: f32 = 48.0;
-pub(crate) const MAP_MIN_ZOOM: f32 = 0.05;
+pub(crate) const MAP_MIN_ZOOM: f32 = 0.01;
 pub(crate) const MAP_MAX_ZOOM: f32 = 1.5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
