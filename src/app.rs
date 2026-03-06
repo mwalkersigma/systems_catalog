@@ -1,5 +1,7 @@
 mod actions;
+mod entities;
 mod help_text;
+mod toolbar;
 mod ui;
 
 use std::collections::{HashMap, HashSet};
@@ -369,6 +371,14 @@ pub struct SystemsCatalogApp {
 }
 
 impl SystemsCatalogApp {
+    fn finite_or_default(value: f32, default: f32) -> f32 {
+        if value.is_finite() {
+            value
+        } else {
+            default
+        }
+    }
+
     pub fn new(repo: Repository) -> Result<Self> {
         let mut app = Self {
             repo,
@@ -1388,14 +1398,18 @@ impl SystemsCatalogApp {
     }
 
     pub(crate) fn apply_eframe_persisted_state(&mut self, state: EframePersistedUiState) {
-        self.map_zoom = state.map_zoom.clamp(MAP_MIN_ZOOM, MAP_MAX_ZOOM);
+        self.map_zoom = Self::finite_or_default(state.map_zoom, 1.0).clamp(MAP_MIN_ZOOM, MAP_MAX_ZOOM);
         self.map_pan = Vec2::new(state.map_pan_x, state.map_pan_y);
+        if !self.map_pan.x.is_finite() {
+            self.map_pan.x = 0.0;
+        }
+        if !self.map_pan.y.is_finite() {
+            self.map_pan.y = 0.0;
+        }
         self.map_world_size = Vec2::new(
-            state
-                .map_world_width
+            Self::finite_or_default(state.map_world_width, MAP_WORLD_SIZE.x)
                 .clamp(MAP_WORLD_MIN_SIZE.x, MAP_WORLD_MAX_SIZE.x),
-            state
-                .map_world_height
+            Self::finite_or_default(state.map_world_height, MAP_WORLD_SIZE.y)
                 .clamp(MAP_WORLD_MIN_SIZE.y, MAP_WORLD_MAX_SIZE.y),
         );
         self.snap_to_grid = state.snap_to_grid;
@@ -1625,7 +1639,9 @@ impl SystemsCatalogApp {
     fn load_ui_settings(&mut self) -> Result<()> {
         if let Some(value) = self.repo.get_setting("parent_line_width")? {
             if let Ok(parsed) = value.parse::<f32>() {
-                self.parent_line_style.width = parsed.clamp(0.5, 6.0);
+                if parsed.is_finite() {
+                    self.parent_line_style.width = parsed.clamp(0.5, 6.0);
+                }
             }
         }
 
@@ -1649,7 +1665,9 @@ impl SystemsCatalogApp {
 
         if let Some(value) = self.repo.get_setting("interaction_line_width")? {
             if let Ok(parsed) = value.parse::<f32>() {
-                self.interaction_line_style.width = parsed.clamp(0.5, 6.0);
+                if parsed.is_finite() {
+                    self.interaction_line_style.width = parsed.clamp(0.5, 6.0);
+                }
             }
         }
 
@@ -1765,13 +1783,17 @@ impl SystemsCatalogApp {
 
         if let Some(value) = self.repo.get_setting("dimmed_line_opacity_percent")? {
             if let Ok(parsed) = value.parse::<f32>() {
-                self.dimmed_line_opacity_percent = parsed.clamp(0.0, 100.0);
+                if parsed.is_finite() {
+                    self.dimmed_line_opacity_percent = parsed.clamp(0.0, 100.0);
+                }
             }
         }
 
         if let Some(value) = self.repo.get_setting("selected_line_brightness_percent")? {
             if let Ok(parsed) = value.parse::<f32>() {
-                self.selected_line_brightness_percent = parsed.clamp(100.0, 220.0);
+                if parsed.is_finite() {
+                    self.selected_line_brightness_percent = parsed.clamp(100.0, 220.0);
+                }
             }
         }
 

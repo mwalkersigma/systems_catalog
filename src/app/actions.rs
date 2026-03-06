@@ -1736,7 +1736,7 @@ impl SystemsCatalogApp {
                 })
                 .collect::<Vec<_>>();
 
-            let system_file = SystemFile {
+            let mut system_file = SystemFile {
                 id: system.id,
                 name: system.name.clone(),
                 description: system.description.clone(),
@@ -1757,6 +1757,7 @@ impl SystemsCatalogApp {
                 notes,
                 database_columns,
             };
+            self.apply_system_file_entity_schema(system, &mut system_file);
 
             let bytes = serde_json::to_vec_pretty(&system_file)?;
             Self::write_file_if_changed(&absolute_path, &bytes)?;
@@ -1930,7 +1931,8 @@ impl SystemsCatalogApp {
             };
             let absolute_path = root.join(relative_path.replace('/', std::path::MAIN_SEPARATOR_STR));
             let file_text = std::fs::read_to_string(&absolute_path)?;
-            let system: SystemFile = serde_json::from_str(file_text.as_str())?;
+            let mut system: SystemFile = serde_json::from_str(file_text.as_str())?;
+            self.normalize_loaded_system_file_for_entity(&mut system);
             systems.push(system);
         }
 
@@ -1995,7 +1997,8 @@ impl SystemsCatalogApp {
                     let absolute_path =
                         root.join(relative_path.replace('/', std::path::MAIN_SEPARATOR_STR));
                     let file_text = std::fs::read_to_string(&absolute_path)?;
-                    let system: SystemFile = serde_json::from_str(file_text.as_str())?;
+                    let mut system: SystemFile = serde_json::from_str(file_text.as_str())?;
+                    self.normalize_loaded_system_file_for_entity(&mut system);
                     systems.push(system);
                 }
             }
@@ -2126,11 +2129,43 @@ impl SystemsCatalogApp {
         self.refresh_systems()?;
         self.clear_selection();
 
-        self.map_zoom = project.settings.map_zoom;
-        self.map_pan.x = project.settings.map_pan_x;
-        self.map_pan.y = project.settings.map_pan_y;
-        self.map_world_size.x = project.settings.map_world_width;
-        self.map_world_size.y = project.settings.map_world_height;
+        let safe_zoom = if project.settings.map_zoom.is_finite() {
+            project.settings.map_zoom
+        } else {
+            1.0
+        };
+        let safe_pan_x = if project.settings.map_pan_x.is_finite() {
+            project.settings.map_pan_x
+        } else {
+            0.0
+        };
+        let safe_pan_y = if project.settings.map_pan_y.is_finite() {
+            project.settings.map_pan_y
+        } else {
+            0.0
+        };
+        let safe_world_w = if project.settings.map_world_width.is_finite() {
+            project.settings.map_world_width
+        } else {
+            crate::app::MAP_WORLD_SIZE.x
+        };
+        let safe_world_h = if project.settings.map_world_height.is_finite() {
+            project.settings.map_world_height
+        } else {
+            crate::app::MAP_WORLD_SIZE.y
+        };
+
+        self.map_zoom = safe_zoom.clamp(crate::app::MAP_MIN_ZOOM, crate::app::MAP_MAX_ZOOM);
+        self.map_pan.x = safe_pan_x;
+        self.map_pan.y = safe_pan_y;
+        self.map_world_size.x = safe_world_w.clamp(
+            crate::app::MAP_WORLD_MIN_SIZE.x,
+            crate::app::MAP_WORLD_MAX_SIZE.x,
+        );
+        self.map_world_size.y = safe_world_h.clamp(
+            crate::app::MAP_WORLD_MIN_SIZE.y,
+            crate::app::MAP_WORLD_MAX_SIZE.y,
+        );
         self.snap_to_grid = project.settings.snap_to_grid;
         self.project_autosave_enabled = project.settings.autosave_enabled;
         self.manage_system_json_hierarchy = project.settings.manage_system_json_hierarchy;

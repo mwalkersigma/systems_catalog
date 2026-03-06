@@ -11,8 +11,7 @@ use rfd::FileDialog;
 use crate::app::{
     AppModal, ChildSpawnMode, FlowInspectorPickTarget, InteractionKind, LineLayerDepth,
     LineLayerOrder, LinePattern, LineStyle, LineTerminator, SidebarTab, SystemsCatalogApp,
-    ZoneDragKind, MAP_MAX_ZOOM, MAP_MIN_ZOOM, MAP_NODE_SIZE, MAP_WORLD_MAX_SIZE,
-    MAP_WORLD_MIN_SIZE,
+    ZoneDragKind, MAP_MAX_ZOOM, MAP_MIN_ZOOM, MAP_NODE_SIZE,
 };
 use crate::models::SystemRecord;
 
@@ -33,7 +32,7 @@ const INTERACTION_NOTE_POPUP_CLOSE_DELAY_SECS: f64 = 0.2;
 const DETAILS_LABEL_CHAR_LIMIT: usize = 72;
 
 impl SystemsCatalogApp {
-    fn copy_selected_systems_to_clipboard(&mut self) {
+    pub(super) fn copy_selected_systems_to_clipboard(&mut self) {
         self.copy_selected_map_systems();
 
         let Some(payload) = self.copied_systems_payload() else {
@@ -51,7 +50,7 @@ impl SystemsCatalogApp {
         }
     }
 
-    fn load_copied_systems_from_clipboard(&mut self) {
+    pub(super) fn load_copied_systems_from_clipboard(&mut self) {
         let Ok(mut clipboard) = Clipboard::new() else {
             return;
         };
@@ -234,41 +233,7 @@ impl SystemsCatalogApp {
     }
 
     fn map_card_label_for_system(&self, system: &SystemRecord) -> String {
-        let prefix = Self::map_card_icon_for_system_type(system.system_type.as_str());
-        let title = if prefix.is_empty() {
-            system.name.clone()
-        } else {
-            format!("{prefix} {}", system.name)
-        };
-
-        if system.system_type != "database" {
-            return title;
-        }
-
-        let Some(columns) = self.database_columns_by_system.get(&system.id) else {
-            return title;
-        };
-
-        if columns.is_empty() {
-            return title;
-        }
-
-        let mut rows = Vec::with_capacity(columns.len() + 2);
-        rows.push(title);
-        rows.push("column | type | constraints".to_owned());
-        for column in columns {
-            let mut line = format!("{} | {}", column.column_name, column.column_type);
-            if let Some(constraints) = column.constraints.as_deref() {
-                let trimmed = constraints.trim();
-                if !trimmed.is_empty() {
-                    line.push_str(" | ");
-                    line.push_str(trimmed);
-                }
-            }
-            rows.push(line);
-        }
-
-        rows.join("\n")
+        self.system_entity_for(system).render_map_label(self, system)
     }
 
     fn refresh_map_card_caches_if_needed(&mut self) {
@@ -2146,11 +2111,11 @@ impl SystemsCatalogApp {
         }
     }
 
-    fn system_dropdown_label(&self, system_id: i64) -> String {
+    pub(super) fn system_dropdown_label(&self, system_id: i64) -> String {
         self.naming_path_for_system(system_id)
     }
 
-    fn clamp_text_to_width(text: &str, available_width: f32) -> String {
+    pub(super) fn clamp_text_to_width(text: &str, available_width: f32) -> String {
         let safe_width = available_width.max(80.0);
         let max_chars = ((safe_width / 7.0).floor() as usize).clamp(12, 120);
         Self::clamp_text_to_width_with_limit(text, max_chars)
@@ -2167,7 +2132,7 @@ impl SystemsCatalogApp {
         format!("{truncated}…")
     }
 
-    fn toggle_left_sidebar_tab(&mut self, tab: SidebarTab) {
+    pub(super) fn toggle_left_sidebar_tab(&mut self, tab: SidebarTab) {
         if self.show_left_sidebar && self.active_sidebar_tab == tab {
             self.show_left_sidebar = false;
         } else {
@@ -2359,182 +2324,11 @@ impl SystemsCatalogApp {
     }
 
     fn render_zone_details(&mut self, ui: &mut egui::Ui) {
-        let Some(zone_id) = self.selected_zone_id else {
-            return;
-        };
-
-        ui.set_max_width(ui.available_width());
-
-        ui.heading("Zone Details");
-
-        if let Some(zone) = self.zones.iter().find(|z| z.id == zone_id) {
-            ui.label(RichText::new(zone.name.clone()).strong());
-        }
-
-        ui.separator();
-
-        ui.label("Name");
-        let name_response = ui.text_edit_singleline(&mut self.selected_zone_name);
-        
-        // Save zone name when user presses Enter or loses focus
-        if name_response.lost_focus() {
-            self.update_selected_zone_properties();
-        }
-
-        ui.horizontal(|ui| {
-            ui.label("Color");
-            if ui
-                .color_edit_button_srgba(&mut self.selected_zone_color)
-                .changed()
-            {
-                self.update_selected_zone_properties();
-            }
-        });
-
-        let mut render_priority = self.selected_zone_render_priority;
-        if ui
-            .add(
-                egui::DragValue::new(&mut render_priority)
-                    .speed(1.0)
-                    .prefix("Render priority "),
-            )
-            .changed()
-        {
-            self.selected_zone_render_priority = render_priority;
-            self.update_selected_zone_properties();
-        }
-
-        ui.separator();
-
-        // Parent zone picker
-        if let Some(zone_id) = self.selected_zone_id {
-            let parent_label = self
-                .selected_zone_parent_zone_id
-                .and_then(|id| {
-                    self.zones
-                        .iter()
-                        .find(|zone| zone.id == id)
-                        .map(|zone| zone.name.clone())
-                })
-                .unwrap_or_else(|| "No parent zone".to_owned());
-
-            let previous_parent = self.selected_zone_parent_zone_id;
-            let parent_candidates = self.zone_parent_candidates(zone_id);
-
-            egui::ComboBox::from_id_source(("zone_parent_zone_sidebar", zone_id))
-                .selected_text(parent_label)
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(
-                        &mut self.selected_zone_parent_zone_id,
-                        None,
-                        "No parent zone",
-                    );
-                    for (candidate_id, candidate_name) in parent_candidates {
-                        ui.selectable_value(
-                            &mut self.selected_zone_parent_zone_id,
-                            Some(candidate_id),
-                            candidate_name,
-                        );
-                    }
-                });
-
-            if self.selected_zone_parent_zone_id != previous_parent {
-                self.update_selected_zone_properties();
-            }
-        }
-
-        // Representative system picker
-        if let Some(zone_id) = self.selected_zone_id {
-            let representative_candidates = self.zone_representative_candidates(zone_id);
-            let unique_common = self.zone_unique_common_ancestor_system_id(zone_id);
-            let representative_locked = unique_common.is_some();
-
-            let representative_label = unique_common
-                .or(self.selected_zone_representative_system_id)
-                .map(|id| self.system_dropdown_label(id))
-                .unwrap_or_else(|| "Choose representative".to_owned());
-            let representative_label =
-                Self::clamp_text_to_width(&representative_label, ui.available_width());
-
-            egui::ComboBox::from_id_source(("zone_representative_sidebar", zone_id))
-                .selected_text(representative_label)
-                .show_ui(ui, |ui| {
-                    if representative_locked {
-                        if let Some(ancestor_id) = unique_common {
-                            let ancestor_name = self.system_dropdown_label(ancestor_id);
-                            ui.selectable_value(
-                                &mut self.selected_zone_representative_system_id,
-                                Some(ancestor_id),
-                                ancestor_name,
-                            );
-                        }
-                    } else {
-                        ui.selectable_value(
-                            &mut self.selected_zone_representative_system_id,
-                            None,
-                            "Choose representative",
-                        );
-                        for candidate_id in representative_candidates {
-                            let candidate_name = self.system_dropdown_label(candidate_id);
-                            ui.selectable_value(
-                                &mut self.selected_zone_representative_system_id,
-                                Some(candidate_id),
-                                candidate_name,
-                            );
-                        }
-                    }
-                });
-
-            if representative_locked && self.selected_zone_representative_system_id != unique_common
-            {
-                self.selected_zone_representative_system_id = unique_common;
-                self.update_selected_zone_properties();
-            }
-
-            if !representative_locked
-                && self
-                    .zones
-                    .iter()
-                    .find(|zone| zone.id == zone_id)
-                    .map(|zone| zone.representative_system_id)
-                    != Some(self.selected_zone_representative_system_id)
-            {
-                self.update_selected_zone_properties();
-            }
-        }
-
-        ui.separator();
-
-        ui.horizontal(|ui| {
-            if let Some(zone_id) = self.selected_zone_id {
-                let minimize_label = if self.selected_zone_minimized {
-                    "Maximize"
-                } else {
-                    "Minimize"
-                };
-                if ui.button(minimize_label).clicked() {
-                    self.toggle_zone_minimized(zone_id);
-                }
-            }
-
-            if ui.button("Delete Zone").clicked() {
-                self.delete_selected_zone();
-            }
-
-            if ui.button("Deselect Zone").clicked() {
-                self.selected_zone_id = None;
-                self.selected_zone_name.clear();
-                self.selected_zone_render_priority = 1;
-                self.selected_zone_parent_zone_id = None;
-                self.selected_zone_minimized = false;
-                self.selected_zone_representative_system_id = None;
-            }
-        });
-
-        ui.separator();
+        let _zone_entity = self.zone_render_entity().entity_key();
+        self.zone_render_entity().render_details_panel(self, ui);
     }
 
-    fn render_connection_style_menu(&mut self, ui: &mut egui::Ui) {
+    pub(super) fn render_connection_style_menu(&mut self, ui: &mut egui::Ui) {
         ui.menu_button("Connection Style", |ui| {
             ui.set_min_width(260.0);
             ui.with_layout(Layout::top_down_justified(Align::Min), |ui| {
@@ -2726,7 +2520,7 @@ impl SystemsCatalogApp {
         });
     }
 
-    fn render_stats_menu(&mut self, ui: &mut egui::Ui) {
+    pub(super) fn render_stats_menu(&mut self, ui: &mut egui::Ui) {
         let mut standard_count = 0usize;
         let mut pull_count = 0usize;
         let mut push_count = 0usize;
@@ -2978,93 +2772,12 @@ impl SystemsCatalogApp {
             });
         }
 
-        if self.selected_system_type == "api" {
-            ui.label("Route methods handled");
-            ui.horizontal_wrapped(|ui| {
-                for method in Self::supported_http_methods() {
-                    let mut enabled = self.selected_system_route_methods.contains(*method);
-                    if ui.checkbox(&mut enabled, *method).changed() {
-                        if enabled {
-                            self.selected_system_route_methods
-                                .insert((*method).to_owned());
-                        } else {
-                            self.selected_system_route_methods.remove(*method);
-                        }
-                    }
-                }
-            });
-        }
+        let system_entity = self.system_entity_for(&system);
+        let _entity_key = system_entity.entity_key();
+        let selectable_inputs = system_entity.selectable_inputs();
 
-        if self.selected_system_type == "database" {
-            ui.separator();
-            ui.label("Table columns");
-            ui.small("Format: name type constraints (optional)");
-
-            let mut row_to_remove: Option<usize> = None;
-            for (index, column) in self.selected_database_columns.iter_mut().enumerate() {
-                ui.horizontal(|ui| {
-                    ui.add(
-                        egui::TextEdit::singleline(&mut column.column_name)
-                            .hint_text("column name")
-                            .desired_width(120.0),
-                    );
-                    ui.add(
-                        egui::TextEdit::singleline(&mut column.column_type)
-                            .hint_text("type")
-                            .desired_width(90.0),
-                    );
-
-                    let constraints = column.constraints.get_or_insert_with(String::new);
-                    ui.add(
-                        egui::TextEdit::singleline(constraints)
-                            .hint_text("constraints")
-                            .desired_width(140.0),
-                    );
-
-                    if ui.button("Remove").clicked() {
-                        row_to_remove = Some(index);
-                    }
-                });
-            }
-
-            if let Some(index) = row_to_remove {
-                self.selected_database_columns.remove(index);
-            }
-
-            ui.horizontal(|ui| {
-                if ui.button("Add column").clicked() {
-                    self.selected_database_columns
-                        .push(crate::models::DatabaseColumnInput {
-                            position: self.selected_database_columns.len() as i64,
-                            column_name: String::new(),
-                            column_type: "string".to_owned(),
-                            constraints: None,
-                        });
-                }
-
-                if self.selected_database_columns.is_empty() && ui.button("Add common starter").clicked() {
-                    self.selected_database_columns = vec![
-                        crate::models::DatabaseColumnInput {
-                            position: 0,
-                            column_name: "id".to_owned(),
-                            column_type: "string".to_owned(),
-                            constraints: Some("primary".to_owned()),
-                        },
-                        crate::models::DatabaseColumnInput {
-                            position: 1,
-                            column_name: "name".to_owned(),
-                            column_type: "string".to_owned(),
-                            constraints: None,
-                        },
-                        crate::models::DatabaseColumnInput {
-                            position: 2,
-                            column_name: "title".to_owned(),
-                            column_type: "string".to_owned(),
-                            constraints: None,
-                        },
-                    ];
-                }
-            });
+        if selectable_inputs.can_select_route_methods || selectable_inputs.can_select_database_columns {
+            system_entity.render_details_panel(self, ui, &system);
         }
 
         ui.horizontal(|ui| {
@@ -3073,47 +2786,49 @@ impl SystemsCatalogApp {
             }
         });
 
-        ui.separator();
-        ui.label("Parent assignment");
+        if selectable_inputs.can_select_parent {
+            ui.separator();
+            ui.label("Parent assignment");
 
-        let selected_parent_label = self
-            .selected_system_parent_id
-            .map(|id| self.system_dropdown_label(id))
-            .unwrap_or_else(|| "No parent (root system)".to_owned());
-        let selected_parent_label = Self::clamp_text_to_width_with_limit(
-            &selected_parent_label,
-            ((ui.available_width().max(80.0) / 7.0).floor() as usize)
-                .clamp(12, DETAILS_LABEL_CHAR_LIMIT),
-        );
+            let selected_parent_label = self
+                .selected_system_parent_id
+                .map(|id| self.system_dropdown_label(id))
+                .unwrap_or_else(|| "No parent (root system)".to_owned());
+            let selected_parent_label = Self::clamp_text_to_width_with_limit(
+                &selected_parent_label,
+                ((ui.available_width().max(80.0) / 7.0).floor() as usize)
+                    .clamp(12, DETAILS_LABEL_CHAR_LIMIT),
+            );
 
-        let valid_parent_candidates = self
-            .zone_filtered_system_candidates(Some(system.id))
-            .into_iter()
-            .filter(|(candidate_id, _)| !self.would_create_parent_cycle(system.id, *candidate_id))
-            .collect::<Vec<_>>();
+            let valid_parent_candidates = self
+                .zone_filtered_system_candidates(Some(system.id))
+                .into_iter()
+                .filter(|(candidate_id, _)| !self.would_create_parent_cycle(system.id, *candidate_id))
+                .collect::<Vec<_>>();
 
-        let previous_parent_id = self.selected_system_parent_id;
-        egui::ComboBox::from_label("Set parent")
-            .selected_text(selected_parent_label)
-            .show_ui(ui, |ui| {
-                ui.selectable_value(
-                    &mut self.selected_system_parent_id,
-                    None,
-                    "No parent (root system)",
-                );
-
-                for (candidate_id, _) in &valid_parent_candidates {
-                    let option_label = self.system_dropdown_label(*candidate_id);
+            let previous_parent_id = self.selected_system_parent_id;
+            egui::ComboBox::from_label("Set parent")
+                .selected_text(selected_parent_label)
+                .show_ui(ui, |ui| {
                     ui.selectable_value(
                         &mut self.selected_system_parent_id,
-                        Some(*candidate_id),
-                        option_label,
+                        None,
+                        "No parent (root system)",
                     );
-                }
-            });
 
-        if self.selected_system_parent_id != previous_parent_id {
-            self.update_selected_system_parent();
+                    for (candidate_id, _) in &valid_parent_candidates {
+                        let option_label = self.system_dropdown_label(*candidate_id);
+                        ui.selectable_value(
+                            &mut self.selected_system_parent_id,
+                            Some(*candidate_id),
+                            option_label,
+                        );
+                    }
+                });
+
+            if self.selected_system_parent_id != previous_parent_id {
+                self.update_selected_system_parent();
+            }
         }
 
         ui.separator();
@@ -3987,23 +3702,18 @@ impl SystemsCatalogApp {
                     return None;
                 }
 
-                let fill_color = zone
-                    .color
-                    .as_deref()
-                    .and_then(Self::color_from_setting_value)
-                    .unwrap_or(Color32::from_rgba_unmultiplied(96, 140, 255, 40));
+                let fill_color = self.zone_render_entity().fill_color_for_map(self, zone);
 
                 Some(ZoneRenderItem {
                     id: zone.id,
                     rect: zone_rect,
                     logical_rect,
-                    name: if effective_minimized && !zone_overview_mode {
-                        resolved_representative
-                            .map(|id| self.system_name_by_id(id))
-                            .unwrap_or_else(|| zone.name.clone())
-                    } else {
-                        zone.name.clone()
-                    },
+                    name: self.zone_render_entity().render_name_for_map(
+                        self,
+                        zone,
+                        zone_overview_mode,
+                        resolved_representative,
+                    ),
                     fill_color,
                     render_priority: zone.render_priority,
                     parent_zone_id: zone.parent_zone_id,
@@ -5605,363 +5315,7 @@ impl eframe::App for SystemsCatalogApp {
             self.status_message = format!("State warning: {error}");
         }
 
-        egui::TopBottomPanel::top("header_panel").show(ctx, |ui| {
-            egui::menu::bar(ui, |ui| {
-                ui.menu_button("File", |ui| {
-                    if ui.button("New Project").clicked() {
-                        if self.new_catalog_name.trim().is_empty() {
-                            self.new_catalog_name = "new_project".to_owned();
-                        }
-                        if self.new_catalog_directory.trim().is_empty() {
-                            self.new_catalog_directory = self
-                                .recent_catalog_paths
-                                .first()
-                                .and_then(|path| Path::new(path).parent())
-                                .map(|path| path.to_string_lossy().to_string())
-                                .unwrap_or_else(|| ".".to_owned());
-                        }
-                        self.open_modal(AppModal::NewCatalogConfirm);
-                        ui.close_menu();
-                    }
-                    ui.separator();
-                    if ui.button("Save Project").clicked() {
-                        self.open_modal(AppModal::SaveCatalog);
-                        ui.close_menu();
-                    }
-                    if ui.button("Load Project").clicked() {
-                        self.open_modal(AppModal::LoadCatalog);
-                        ui.close_menu();
-                    }
-                    if ui.button("Import DDL File").clicked() {
-                        let mut dialog = FileDialog::new().add_filter("DDL", &["sql", "ddl", "txt"]);
-                        if !self.current_catalog_path.trim().is_empty() {
-                            dialog = dialog.set_directory(self.current_catalog_path.as_str());
-                        }
-                        if let Some(path) = dialog.pick_file() {
-                            self.import_database_tables_from_ddl_path(path.as_path());
-                        }
-                        ui.close_menu();
-                    }
-                    if ui.button("Import OpenAPI File").clicked() {
-                        let mut dialog = FileDialog::new().add_filter("OpenAPI", &["yaml", "yml", "json"]);
-                        if !self.current_catalog_path.trim().is_empty() {
-                            dialog = dialog.set_directory(self.current_catalog_path.as_str());
-                        }
-                        if let Some(path) = dialog.pick_file() {
-                            self.import_api_routes_from_openapi_path(path.as_path());
-                        }
-                        ui.close_menu();
-                    }
-                    if ui.button("Import LLM Systems File").clicked() {
-                        let mut dialog = FileDialog::new().add_filter("LLM Systems", &["json"]);
-                        if !self.current_catalog_path.trim().is_empty() {
-                            dialog = dialog.set_directory(self.current_catalog_path.as_str());
-                        }
-                        if let Some(path) = dialog.pick_file() {
-                            self.import_llm_systems_from_path(path.as_path());
-                        }
-                        ui.close_menu();
-                    }
-                    if ui.button("Import LLM Detailed Map").clicked() {
-                        let mut dialog = FileDialog::new().add_filter("LLM Detailed", &["json"]);
-                        if !self.current_catalog_path.trim().is_empty() {
-                            dialog = dialog.set_directory(self.current_catalog_path.as_str());
-                        }
-                        if let Some(path) = dialog.pick_file() {
-                            self.import_llm_detailed_map_from_path(path.as_path());
-                        }
-                        ui.close_menu();
-                    }
-                    ui.separator();
-                    if ui
-                        .checkbox(&mut self.project_autosave_enabled, "Autosave Project")
-                        .changed()
-                    {
-                        self.project_last_autosave_at_secs = None;
-                    }
-                    ui.checkbox(
-                        &mut self.manage_system_json_hierarchy,
-                        "Manage System JSON Hierarchy",
-                    );
-
-                    if !self.current_catalog_path.trim().is_empty() {
-                        let current_path = self.current_catalog_path.trim().to_owned();
-                        if self.git_repo_detect_path != current_path {
-                            self.git_repo_detect_path = current_path;
-                        }
-
-                        ui.separator();
-                        ui.label("Version control");
-                        match self.git_repo_detected_for_path {
-                            Some(true) => {
-                                if ui.button("Commit").clicked() {
-                                    self.commit_project_changes();
-                                    ui.close_menu();
-                                }
-                                if ui.button("Rollback").clicked() {
-                                    self.rollback_project_changes();
-                                    ui.close_menu();
-                                }
-                                if ui.button("Re-check Version Control").clicked() {
-                                    self.detect_version_control_status();
-                                }
-                            }
-                            Some(false) => {
-                                if ui.button("Enable Version Control").clicked() {
-                                    self.enable_version_control();
-                                    ui.close_menu();
-                                }
-                                if ui.button("Re-check Version Control").clicked() {
-                                    self.detect_version_control_status();
-                                }
-                            }
-                            None => {
-                                if ui.button("Check Version Control").clicked() {
-                                    self.detect_version_control_status();
-                                }
-                            }
-                        }
-                    }
-
-                    if !self.recent_catalog_paths.is_empty() {
-                        ui.separator();
-                        ui.label("Recent projects");
-                        let recent_paths = self.recent_catalog_paths.clone();
-                        for path in recent_paths {
-                            let project_name = SystemsCatalogApp::catalog_name_from_path(path.as_str());
-                            let label = format!("{} ({})", project_name, path);
-                            if ui.button(label).clicked() {
-                                self.pending_catalog_switch_path = Some(path.clone());
-                                ui.close_menu();
-                            }
-                        }
-                    }
-                });
-
-                ui.menu_button("Edit", |ui| {
-                    if ui.button("Add System          Ctrl+N").clicked() {
-                        self.open_add_system_modal_with_prefill(self.selected_system_id);
-                        ui.close_menu();
-                    }
-                    if ui.button("Bulk Add Systems    Ctrl+Shift+N").clicked() {
-                        self.open_bulk_add_systems_modal_with_prefill(self.selected_system_id);
-                        ui.close_menu();
-                    }
-                    ui.separator();
-                    if ui.button("Copy Selected       Alt+C").clicked() {
-                        self.copy_selected_systems_to_clipboard();
-                        ui.close_menu();
-                    }
-                    if ui.button("Paste Cards         Alt+V").clicked() {
-                        self.load_copied_systems_from_clipboard();
-                        self.paste_copied_systems();
-                        ui.close_menu();
-                    }
-                });
-
-                ui.menu_button("View", |ui| {
-                    if ui.button("Zoom In").clicked() {
-                        let target = (self.map_zoom + 0.1).min(MAP_MAX_ZOOM);
-                        self.map_zoom = target;
-                        self.settings_dirty = true;
-                        ui.close_menu();
-                    }
-                    if ui.button("Zoom Out").clicked() {
-                        let target = (self.map_zoom - 0.1).max(MAP_MIN_ZOOM);
-                        self.map_zoom = target;
-                        self.settings_dirty = true;
-                        ui.close_menu();
-                    }
-                    if ui.button("Reset Zoom").clicked() {
-                        self.map_zoom = 1.0;
-                        self.settings_dirty = true;
-                        ui.close_menu();
-                    }
-                    ui.separator();
-                    if ui.button("Reset Pan").clicked() {
-                        self.map_pan = Vec2::ZERO;
-                        self.settings_dirty = true;
-                        ui.close_menu();
-                    }
-                    if ui.button("Reset Layout").clicked() {
-                        self.reset_map_layout();
-                        ui.close_menu();
-                    }
-                    ui.separator();
-                    if ui.button("Show All").clicked() {
-                        self.clear_subset_visibility();
-                        ui.close_menu();
-                    }
-                    if ui.button("Clear Selection Set").clicked() {
-                        self.selected_map_system_ids.clear();
-                        ui.close_menu();
-                    }
-                    ui.separator();
-                    if ui
-                        .checkbox(&mut self.snap_to_grid, "Snap to Grid")
-                        .changed()
-                    {
-                        self.map_node_size_cache.clear();
-                        self.settings_dirty = true;
-                    }
-                    if ui
-                        .checkbox(
-                            &mut self.map_zoom_anchor_to_pointer,
-                            "Zoom Toward Mouse Pointer",
-                        )
-                        .changed()
-                    {
-                        self.settings_dirty = true;
-                    }
-                    ui.separator();
-                    ui.label("Canvas Size");
-                    ui.horizontal(|ui| {
-                        let mut width = self.map_world_size.x;
-                        if ui
-                            .add(
-                                egui::DragValue::new(&mut width)
-                                    .clamp_range(MAP_WORLD_MIN_SIZE.x..=MAP_WORLD_MAX_SIZE.x)
-                                    .speed(50.0)
-                                    .prefix("W "),
-                            )
-                            .changed()
-                        {
-                            self.map_world_size.x =
-                                width.clamp(MAP_WORLD_MIN_SIZE.x, MAP_WORLD_MAX_SIZE.x);
-                            self.settings_dirty = true;
-                        }
-                        let mut height = self.map_world_size.y;
-                        if ui
-                            .add(
-                                egui::DragValue::new(&mut height)
-                                    .clamp_range(MAP_WORLD_MIN_SIZE.y..=MAP_WORLD_MAX_SIZE.y)
-                                    .speed(50.0)
-                                    .prefix("H "),
-                            )
-                            .changed()
-                        {
-                            self.map_world_size.y =
-                                height.clamp(MAP_WORLD_MIN_SIZE.y, MAP_WORLD_MAX_SIZE.y);
-                            self.settings_dirty = true;
-                        }
-                    });
-                });
-
-                ui.menu_button("Tools", |ui| {
-                    if ui.button("Add Technology       Alt+N").clicked() {
-                        self.open_modal(AppModal::AddTech);
-                        self.focus_add_tech_name_on_open = true;
-                        ui.close_menu();
-                    }
-                    if ui.button("Flow Inspector").clicked() {
-                        self.open_modal(AppModal::FlowInspector);
-                        self.flow_inspector_pick_target = None;
-                        self.flow_inspector_last_seen_selected_system_id = self.selected_system_id;
-                        ui.close_menu();
-                    }
-                });
-
-                ui.menu_button("Debug", |ui| {
-                    ui.checkbox(&mut self.show_debug_inspection_window, "🔍 Inspection");
-                    ui.checkbox(&mut self.show_debug_memory_window, "📝 Memory");
-                });
-
-                self.render_connection_style_menu(ui);
-                self.render_stats_menu(ui);
-
-                ui.menu_button("Help", |ui| {
-                    if ui.button("Getting Started").clicked() {
-                        self.open_modal(AppModal::HelpGettingStarted);
-                        ui.close_menu();
-                    }
-                    if ui.button("Creating Interactions").clicked() {
-                        self.open_modal(AppModal::HelpCreatingInteractions);
-                        ui.close_menu();
-                    }
-                    if ui.button("Managing Technology").clicked() {
-                        self.open_modal(AppModal::HelpManagingTechnology);
-                        ui.close_menu();
-                    }
-                    if ui.button("Understanding the Map").clicked() {
-                        self.open_modal(AppModal::HelpUnderstandingMap);
-                        ui.close_menu();
-                    }
-                    if ui.button("Zones & Organization").clicked() {
-                        self.open_modal(AppModal::HelpZones);
-                        ui.close_menu();
-                    }
-                    ui.separator();
-                    if ui.button("Keyboard Shortcuts").clicked() {
-                        self.open_modal(AppModal::HelpKeyboardShortcuts);
-                        ui.close_menu();
-                    }
-                    if ui.button("Hotkeys              F1").clicked() {
-                        self.open_modal(AppModal::Hotkeys);
-                        ui.close_menu();
-                    }
-                    ui.separator();
-                    if ui.button("Troubleshooting & FAQ").clicked() {
-                        self.open_modal(AppModal::HelpTroubleshooting);
-                        ui.close_menu();
-                    }
-                });
-
-                ui.separator();
-                let systems_selected =
-                    self.show_left_sidebar && self.active_sidebar_tab == SidebarTab::Systems;
-                if ui.selectable_label(systems_selected, "Systems").clicked() {
-                    self.toggle_left_sidebar_tab(SidebarTab::Systems);
-                }
-                let tech_selected =
-                    self.show_left_sidebar && self.active_sidebar_tab == SidebarTab::TechCatalog;
-                if ui.selectable_label(tech_selected, "Tech").clicked() {
-                    self.toggle_left_sidebar_tab(SidebarTab::TechCatalog);
-                }
-
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let selected_recent_path = self
-                        .recent_catalog_paths
-                        .iter()
-                        .find(|path| path.as_str() == self.current_catalog_path.as_str())
-                        .cloned()
-                        .or_else(|| self.recent_catalog_paths.first().cloned());
-
-                    if let Some(selected_path) = selected_recent_path {
-                        egui::ComboBox::from_id_source("header_recent_projects")
-                            .selected_text(format!(
-                                "Project: {}",
-                                Self::catalog_name_from_path(selected_path.as_str())
-                            ))
-                            .show_ui(ui, |ui| {
-                                let recent_paths = self.recent_catalog_paths.clone();
-                                for path in recent_paths {
-                                    let project_name = Self::catalog_name_from_path(path.as_str());
-                                    let selected = path == self.current_catalog_path;
-                                    let label = format!("{} ({})", project_name, path);
-                                    if ui.selectable_label(selected, label).clicked() {
-                                        self.pending_catalog_switch_path = Some(path.clone());
-                                    }
-                                }
-                            });
-                        ui.separator();
-                    }
-
-                    ui.label(
-                        RichText::new(format!("Project: {}", self.current_catalog_name))
-                            .small()
-                            .strong(),
-                    );
-                    ui.separator();
-                    ui.label(
-                        RichText::new(format!("{:.0}%", self.map_zoom * 100.0))
-                            .weak()
-                            .small(),
-                    );
-                    ui.separator();
-                    ui.label(RichText::new(&self.status_message).italics().weak());
-                });
-            });
-        });
+        self.render_top_toolbar(ctx);
 
         if self.show_left_sidebar {
             egui::SidePanel::left("systems_panel")
