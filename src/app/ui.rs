@@ -30,6 +30,7 @@ const MAP_TEXT_MIN_LOW_ZOOM_MULTIPLIER: f32 = 0.7;
 const MAP_ZONE_OVERVIEW_HIDE_CARDS_ZOOM: f32 = 0.05;
 const INTERACTION_NOTE_POPUP_OPEN_DELAY_SECS: f64 = 0.2;
 const INTERACTION_NOTE_POPUP_CLOSE_DELAY_SECS: f64 = 0.2;
+const DETAILS_LABEL_CHAR_LIMIT: usize = 72;
 
 impl SystemsCatalogApp {
     fn copy_selected_systems_to_clipboard(&mut self) {
@@ -2152,6 +2153,10 @@ impl SystemsCatalogApp {
     fn clamp_text_to_width(text: &str, available_width: f32) -> String {
         let safe_width = available_width.max(80.0);
         let max_chars = ((safe_width / 7.0).floor() as usize).clamp(12, 120);
+        Self::clamp_text_to_width_with_limit(text, max_chars)
+    }
+
+    fn clamp_text_to_width_with_limit(text: &str, max_chars: usize) -> String {
         let char_count = text.chars().count();
         if char_count <= max_chars {
             return text.to_owned();
@@ -2175,6 +2180,10 @@ impl SystemsCatalogApp {
         match self.active_sidebar_tab {
             SidebarTab::Systems => {
                 ui.heading("Systems List");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.systems_sidebar_search)
+                        .hint_text("Search systems"),
+                );
                 ui.horizontal(|ui| {
                     if ui.small_button("Show all").clicked() {
                         self.clear_subset_visibility();
@@ -2183,12 +2192,26 @@ impl SystemsCatalogApp {
 
                 ui.separator();
 
+                let query = self.systems_sidebar_search.trim().to_lowercase();
                 let rows = self.visible_hierarchy_rows();
-                if rows.is_empty() {
-                    ui.label("No systems yet.");
+                let filtered_rows = if query.is_empty() {
+                    rows
+                } else {
+                    rows
+                        .into_iter()
+                        .filter(|(_, _, name, _, _)| name.to_lowercase().contains(query.as_str()))
+                        .collect::<Vec<_>>()
+                };
+
+                if filtered_rows.is_empty() {
+                    if query.is_empty() {
+                        ui.label("No systems yet.");
+                    } else {
+                        ui.label("No systems match the current search.");
+                    }
                 } else {
                     egui::ScrollArea::vertical().show(ui, |ui| {
-                        for (depth, system_id, name, has_children, is_collapsed) in rows {
+                        for (depth, system_id, name, has_children, is_collapsed) in filtered_rows {
                             let indent = "  ".repeat(depth);
                             let row_text = format!("{indent}• {name}");
                             let selected = self.selected_system_id == Some(system_id);
@@ -2222,6 +2245,7 @@ impl SystemsCatalogApp {
                                 );
                                 if row_response.clicked() {
                                     self.select_system(system_id);
+                                    self.pending_map_focus_system_id = Some(system_id);
                                 }
                             });
                         }
@@ -3056,8 +3080,11 @@ impl SystemsCatalogApp {
             .selected_system_parent_id
             .map(|id| self.system_dropdown_label(id))
             .unwrap_or_else(|| "No parent (root system)".to_owned());
-        let selected_parent_label =
-            Self::clamp_text_to_width(&selected_parent_label, ui.available_width());
+        let selected_parent_label = Self::clamp_text_to_width_with_limit(
+            &selected_parent_label,
+            ((ui.available_width().max(80.0) / 7.0).floor() as usize)
+                .clamp(12, DETAILS_LABEL_CHAR_LIMIT),
+        );
 
         let valid_parent_candidates = self
             .zone_filtered_system_candidates(Some(system.id))
@@ -3147,8 +3174,11 @@ impl SystemsCatalogApp {
             .new_link_target_id
             .map(|id| self.system_dropdown_label(id))
             .unwrap_or_else(|| "Select target system".to_owned());
-        let selected_target_label =
-            Self::clamp_text_to_width(&selected_target_label, ui.available_width());
+        let selected_target_label = Self::clamp_text_to_width_with_limit(
+            &selected_target_label,
+            ((ui.available_width().max(80.0) / 7.0).floor() as usize)
+                .clamp(12, DETAILS_LABEL_CHAR_LIMIT),
+        );
 
         egui::ComboBox::from_label("Target")
             .selected_text(selected_target_label)
@@ -3174,8 +3204,11 @@ impl SystemsCatalogApp {
             .selected_interaction_transfer_target_id
             .map(|id| self.system_dropdown_label(id))
             .unwrap_or_else(|| "Select destination system".to_owned());
-        let transfer_target_label =
-            Self::clamp_text_to_width(&transfer_target_label, ui.available_width());
+        let transfer_target_label = Self::clamp_text_to_width_with_limit(
+            &transfer_target_label,
+            ((ui.available_width().max(80.0) / 7.0).floor() as usize)
+                .clamp(12, DETAILS_LABEL_CHAR_LIMIT),
+        );
 
         egui::ComboBox::from_label("Transfer to")
             .selected_text(transfer_target_label)
@@ -3191,32 +3224,35 @@ impl SystemsCatalogApp {
             });
 
         let transfer_pick_active = self.interaction_transfer_pick_source_id == Some(system.id);
-        if ui
-            .button(if transfer_pick_active {
-                "Cancel map target pick"
-            } else {
-                "Select target on map"
-            })
-            .clicked()
-        {
-            if transfer_pick_active {
-                self.interaction_transfer_pick_source_id = None;
-                self.status_message = "Transfer target pick canceled".to_owned();
-            } else {
-                self.interaction_transfer_pick_source_id = Some(system.id);
-                self.selected_interaction_transfer_target_id = None;
-                self.status_message =
-                    "Click a destination system on the map for transfer".to_owned();
+        ui.group(|ui| {
+            if ui
+                .button(if transfer_pick_active {
+                    "Cancel map target pick"
+                } else {
+                    "Select target on map"
+                })
+                .clicked()
+            {
+                if transfer_pick_active {
+                    self.interaction_transfer_pick_source_id = None;
+                    self.status_message = "Transfer target pick canceled".to_owned();
+                } else {
+                    self.interaction_transfer_pick_source_id = Some(system.id);
+                    self.selected_interaction_transfer_target_id = None;
+                    self.status_message =
+                        "Click a destination system on the map for transfer".to_owned();
+                }
             }
-        }
 
-        if transfer_pick_active {
-            ui.label("Picking transfer target: click a destination card on the map.");
-        }
+            if ui.button("Transfer interactions").clicked() {
+                self.transfer_selected_system_interactions();
+            }
 
-        if ui.button("Transfer interactions").clicked() {
-            self.transfer_selected_system_interactions();
-        }
+            if transfer_pick_active {
+                ui.label("Picking transfer target: click a destination card on the map.");
+            }
+        });
+        ui.separator();
 
         if self.selected_links.is_empty() {
             ui.label("No interactions recorded.");
@@ -3237,8 +3273,11 @@ impl SystemsCatalogApp {
                         })
                 })
                 .unwrap_or_else(|| "Select interaction".to_owned());
-            let selected_link_label =
-                Self::clamp_text_to_width(&selected_link_label, ui.available_width());
+            let selected_link_label = Self::clamp_text_to_width_with_limit(
+                &selected_link_label,
+                ((ui.available_width().max(80.0) / 7.0).floor() as usize)
+                    .clamp(12, DETAILS_LABEL_CHAR_LIMIT),
+            );
 
             egui::ComboBox::from_label("Edit interaction")
                 .selected_text(selected_link_label)
@@ -3249,6 +3288,11 @@ impl SystemsCatalogApp {
                             link.id,
                             self.system_name_by_id(link.source_system_id),
                             self.system_name_by_id(link.target_system_id)
+                        );
+                        let label = Self::clamp_text_to_width_with_limit(
+                            &label,
+                            ((ui.available_width().max(80.0) / 7.0).floor() as usize)
+                                .clamp(12, DETAILS_LABEL_CHAR_LIMIT),
                         );
 
                         let was_selected = self.selected_link_id_for_edit == Some(link.id);
@@ -3649,34 +3693,58 @@ impl SystemsCatalogApp {
         self.show_flow_inspector_modal = open;
     }
 
-    fn apply_map_zoom_anchored_to_view_center(&mut self, map_rect: Rect, target_zoom: f32) {
+    fn apply_map_zoom_anchored_to_screen_point(
+        &mut self,
+        map_rect: Rect,
+        target_zoom: f32,
+        anchor_screen: Pos2,
+    ) {
         let old_zoom = self.map_zoom;
         let new_zoom = target_zoom.clamp(MAP_MIN_ZOOM, MAP_MAX_ZOOM);
         if (new_zoom - old_zoom).abs() <= f32::EPSILON {
             return;
         }
 
-        let center = map_rect.center();
-        let local_at_center = Pos2::new(
-            (center.x - map_rect.left() - self.map_pan.x) / old_zoom,
-            (center.y - map_rect.top() - self.map_pan.y) / old_zoom,
+        let local_at_anchor = Pos2::new(
+            (anchor_screen.x - map_rect.left() - self.map_pan.x) / old_zoom,
+            (anchor_screen.y - map_rect.top() - self.map_pan.y) / old_zoom,
         );
 
         self.map_zoom = new_zoom;
         self.map_pan = Vec2::new(
-            center.x - map_rect.left() - (local_at_center.x * new_zoom),
-            center.y - map_rect.top() - (local_at_center.y * new_zoom),
+            anchor_screen.x - map_rect.left() - (local_at_anchor.x * new_zoom),
+            anchor_screen.y - map_rect.top() - (local_at_anchor.y * new_zoom),
+        );
+        self.settings_dirty = true;
+    }
+
+    fn focus_map_on_system(&mut self, map_rect: Rect, system_id: i64, target_zoom: f32) {
+        let Some(local_position) = self.effective_map_position(system_id) else {
+            return;
+        };
+
+        let node_size = self.map_node_size_cached_by_id(system_id);
+        let local_center = Pos2::new(
+            local_position.x + (node_size.x * 0.5),
+            local_position.y + (node_size.y * 0.5),
+        );
+        let zoom = target_zoom.clamp(MAP_MIN_ZOOM, MAP_MAX_ZOOM);
+        self.map_zoom = zoom;
+        self.map_pan = Vec2::new(
+            map_rect.center().x - map_rect.left() - (local_center.x * zoom),
+            map_rect.center().y - map_rect.top() - (local_center.y * zoom),
         );
         self.settings_dirty = true;
     }
 
     fn render_map_canvas(&mut self, ui: &mut egui::Ui) {
         let mut requested_zoom: Option<f32> = None;
+        let mut requested_zoom_anchor: Option<Pos2> = None;
 
         ui.horizontal(|ui| {
             ui.heading("Mind Map");
 
-            let info_response = ui.small_button("(i)");
+            let info_response = ui.small_button(egui_material_icons::icons::ICON_DETAILS);
             if info_response.hovered() {
                 egui::show_tooltip(ui.ctx(), ui.id().with("map_help_tip"), |ui| {
                     ui.label("Space + drag -> Pan");
@@ -3754,10 +3822,18 @@ impl SystemsCatalogApp {
         let ctrl_down = ui.input(|input| input.modifiers.ctrl);
         if zoom_active {
             if ctrl_down {
+                let zoom_anchor = if self.map_zoom_anchor_to_pointer {
+                    ui.input(|input| input.pointer.hover_pos())
+                        .filter(|pointer| map_rect.contains(*pointer))
+                        .unwrap_or(map_rect.center())
+                } else {
+                    map_rect.center()
+                };
                 let zoom_factor = ui.input(|input| input.zoom_delta());
                 if (zoom_factor - 1.0).abs() > f32::EPSILON {
                     requested_zoom =
                         Some((self.map_zoom * zoom_factor).clamp(MAP_MIN_ZOOM, MAP_MAX_ZOOM));
+                    requested_zoom_anchor = Some(zoom_anchor);
                 } else {
                     let wheel_y = if raw_scroll_delta.y.abs() > f32::EPSILON {
                         raw_scroll_delta.y
@@ -3769,6 +3845,7 @@ impl SystemsCatalogApp {
                         let zoom_step = (wheel_y / 520.0).clamp(-0.10, 0.10);
                         requested_zoom =
                             Some((self.map_zoom + zoom_step).clamp(MAP_MIN_ZOOM, MAP_MAX_ZOOM));
+                        requested_zoom_anchor = Some(zoom_anchor);
                     }
                 }
             } else if smooth_scroll_delta.x.abs() > f32::EPSILON
@@ -3785,7 +3862,11 @@ impl SystemsCatalogApp {
         }
 
         if let Some(target_zoom) = requested_zoom {
-            self.apply_map_zoom_anchored_to_view_center(map_rect, target_zoom);
+            self.apply_map_zoom_anchored_to_screen_point(
+                map_rect,
+                target_zoom,
+                requested_zoom_anchor.unwrap_or_else(|| map_rect.center()),
+            );
         }
 
         painter.rect_filled(map_rect, 6.0, Color32::from_gray(24));
@@ -3793,6 +3874,10 @@ impl SystemsCatalogApp {
 
         self.ensure_map_positions();
         self.refresh_map_card_caches_if_needed();
+
+        if let Some(system_id) = self.pending_map_focus_system_id.take() {
+            self.focus_map_on_system(map_rect, system_id, 0.6);
+        }
 
         let zoom = self.map_zoom;
         let pan = self.map_pan;
@@ -5719,6 +5804,15 @@ impl eframe::App for SystemsCatalogApp {
                         self.map_node_size_cache.clear();
                         self.settings_dirty = true;
                     }
+                    if ui
+                        .checkbox(
+                            &mut self.map_zoom_anchor_to_pointer,
+                            "Zoom Toward Mouse Pointer",
+                        )
+                        .changed()
+                    {
+                        self.settings_dirty = true;
+                    }
                     ui.separator();
                     ui.label("Canvas Size");
                     ui.horizontal(|ui| {
@@ -5952,6 +6046,11 @@ impl eframe::App for SystemsCatalogApp {
         self.maybe_autosave_project(now_secs);
 
         self.save_ui_settings_if_dirty();
+    }
+
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        self.save_ui_settings_if_dirty();
+        eframe::set_value(storage, eframe::APP_KEY, &self.to_eframe_persisted_state());
     }
 
 }

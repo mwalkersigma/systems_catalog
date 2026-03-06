@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::{anyhow, Result};
 use eframe::egui::{Color32, Pos2, Rect, Vec2};
+use serde::{Deserialize, Serialize};
 
 use crate::db::Repository;
 use crate::models::{
@@ -133,6 +134,41 @@ pub struct CopiedSystemEntry {
     pub parent_index: Option<usize>,
     pub relative_x: f32,
     pub relative_y: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct EframePersistedUiState {
+    pub map_zoom: f32,
+    pub map_pan_x: f32,
+    pub map_pan_y: f32,
+    pub map_world_width: f32,
+    pub map_world_height: f32,
+    pub snap_to_grid: bool,
+    pub show_left_sidebar: bool,
+    pub active_sidebar_tab: String,
+    pub fast_add_selected_catalog_tech_on_map: bool,
+    pub new_child_spawn_mode: String,
+    pub map_zoom_anchor_to_pointer: bool,
+    pub systems_sidebar_search: String,
+}
+
+impl Default for EframePersistedUiState {
+    fn default() -> Self {
+        Self {
+            map_zoom: 1.0,
+            map_pan_x: 0.0,
+            map_pan_y: 0.0,
+            map_world_width: MAP_WORLD_SIZE.x,
+            map_world_height: MAP_WORLD_SIZE.y,
+            snap_to_grid: false,
+            show_left_sidebar: true,
+            active_sidebar_tab: "systems".to_owned(),
+            fast_add_selected_catalog_tech_on_map: false,
+            new_child_spawn_mode: "right_of_previous".to_owned(),
+            map_zoom_anchor_to_pointer: false,
+            systems_sidebar_search: String::new(),
+        }
+    }
 }
 
 /// Primary UI application state.
@@ -309,6 +345,9 @@ pub struct SystemsCatalogApp {
     project_last_autosave_at_secs: Option<f64>,
     show_left_sidebar: bool,
     active_sidebar_tab: SidebarTab,
+    systems_sidebar_search: String,
+    pending_map_focus_system_id: Option<i64>,
+    map_zoom_anchor_to_pointer: bool,
 
     parent_line_style: LineStyle,
     interaction_line_style: LineStyle,
@@ -492,6 +531,9 @@ impl SystemsCatalogApp {
             project_last_autosave_at_secs: None,
             show_left_sidebar: true,
             active_sidebar_tab: SidebarTab::Systems,
+            systems_sidebar_search: String::new(),
+            pending_map_focus_system_id: None,
+            map_zoom_anchor_to_pointer: false,
             parent_line_style: LineStyle {
                 width: 1.0,
                 color: Color32::from_gray(90),
@@ -1330,6 +1372,69 @@ impl SystemsCatalogApp {
         }
     }
 
+    fn sidebar_tab_to_setting_value(tab: SidebarTab) -> &'static str {
+        match tab {
+            SidebarTab::Systems => "systems",
+            SidebarTab::TechCatalog => "tech_catalog",
+        }
+    }
+
+    fn sidebar_tab_from_setting_value(value: &str) -> Option<SidebarTab> {
+        match value {
+            "systems" => Some(SidebarTab::Systems),
+            "tech_catalog" => Some(SidebarTab::TechCatalog),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn apply_eframe_persisted_state(&mut self, state: EframePersistedUiState) {
+        self.map_zoom = state.map_zoom.clamp(MAP_MIN_ZOOM, MAP_MAX_ZOOM);
+        self.map_pan = Vec2::new(state.map_pan_x, state.map_pan_y);
+        self.map_world_size = Vec2::new(
+            state
+                .map_world_width
+                .clamp(MAP_WORLD_MIN_SIZE.x, MAP_WORLD_MAX_SIZE.x),
+            state
+                .map_world_height
+                .clamp(MAP_WORLD_MIN_SIZE.y, MAP_WORLD_MAX_SIZE.y),
+        );
+        self.snap_to_grid = state.snap_to_grid;
+        self.show_left_sidebar = state.show_left_sidebar;
+        self.active_sidebar_tab = Self::sidebar_tab_from_setting_value(
+            state.active_sidebar_tab.as_str(),
+        )
+        .unwrap_or(SidebarTab::Systems);
+        self.fast_add_selected_catalog_tech_on_map = state.fast_add_selected_catalog_tech_on_map;
+        self.new_child_spawn_mode = Self::child_spawn_mode_from_setting_value(
+            state.new_child_spawn_mode.as_str(),
+        )
+        .unwrap_or(ChildSpawnMode::RightOfPrevious);
+        self.map_zoom_anchor_to_pointer = state.map_zoom_anchor_to_pointer;
+        self.systems_sidebar_search = state.systems_sidebar_search;
+        self.map_node_size_cache.clear();
+    }
+
+    pub(crate) fn to_eframe_persisted_state(&self) -> EframePersistedUiState {
+        EframePersistedUiState {
+            map_zoom: self.map_zoom,
+            map_pan_x: self.map_pan.x,
+            map_pan_y: self.map_pan.y,
+            map_world_width: self.map_world_size.x,
+            map_world_height: self.map_world_size.y,
+            snap_to_grid: self.snap_to_grid,
+            show_left_sidebar: self.show_left_sidebar,
+            active_sidebar_tab: Self::sidebar_tab_to_setting_value(self.active_sidebar_tab)
+                .to_owned(),
+            fast_add_selected_catalog_tech_on_map: self.fast_add_selected_catalog_tech_on_map,
+            new_child_spawn_mode: Self::child_spawn_mode_to_setting_value(
+                self.new_child_spawn_mode,
+            )
+            .to_owned(),
+            map_zoom_anchor_to_pointer: self.map_zoom_anchor_to_pointer,
+            systems_sidebar_search: self.systems_sidebar_search.clone(),
+        }
+    }
+
     fn interaction_kind_to_setting_value(kind: InteractionKind) -> &'static str {
         match kind {
             InteractionKind::Standard => "standard",
@@ -1518,36 +1623,6 @@ impl SystemsCatalogApp {
     }
 
     fn load_ui_settings(&mut self) -> Result<()> {
-        if let Some(value) = self.repo.get_setting("map_zoom")? {
-            if let Ok(parsed) = value.parse::<f32>() {
-                self.map_zoom = parsed.clamp(MAP_MIN_ZOOM, MAP_MAX_ZOOM);
-            }
-        }
-
-        if let Some(value) = self.repo.get_setting("map_world_width")? {
-            if let Ok(parsed) = value.parse::<f32>() {
-                self.map_world_size.x = parsed.clamp(MAP_WORLD_MIN_SIZE.x, MAP_WORLD_MAX_SIZE.x);
-            }
-        }
-
-        if let Some(value) = self.repo.get_setting("map_world_height")? {
-            if let Ok(parsed) = value.parse::<f32>() {
-                self.map_world_size.y = parsed.clamp(MAP_WORLD_MIN_SIZE.y, MAP_WORLD_MAX_SIZE.y);
-            }
-        }
-
-        if let Some(value) = self.repo.get_setting("map_pan_x")? {
-            if let Ok(parsed) = value.parse::<f32>() {
-                self.map_pan.x = parsed;
-            }
-        }
-
-        if let Some(value) = self.repo.get_setting("map_pan_y")? {
-            if let Ok(parsed) = value.parse::<f32>() {
-                self.map_pan.y = parsed;
-            }
-        }
-
         if let Some(value) = self.repo.get_setting("parent_line_width")? {
             if let Ok(parsed) = value.parse::<f32>() {
                 self.parent_line_style.width = parsed.clamp(0.5, 6.0);
@@ -1700,10 +1775,6 @@ impl SystemsCatalogApp {
             }
         }
 
-        if let Some(value) = self.repo.get_setting("snap_to_grid")? {
-            self.snap_to_grid = value == "true";
-        }
-
         if let Some(value) = self.repo.get_setting("show_tech_border_colors")? {
             self.show_tech_border_colors = value == "true";
         }
@@ -1744,16 +1815,6 @@ impl SystemsCatalogApp {
             self.new_catalog_directory = value.trim().to_owned();
         }
 
-        if let Some(value) = self.repo.get_setting("fast_add_selected_catalog_tech_on_map")? {
-            self.fast_add_selected_catalog_tech_on_map = value == "true";
-        }
-
-        if let Some(value) = self.repo.get_setting("new_child_spawn_mode")? {
-            if let Some(parsed) = Self::child_spawn_mode_from_setting_value(&value) {
-                self.new_child_spawn_mode = parsed;
-            }
-        }
-
         Ok(())
     }
 
@@ -1763,17 +1824,6 @@ impl SystemsCatalogApp {
         }
 
         let result = (|| -> Result<()> {
-            self.repo
-                .set_setting("map_zoom", &self.map_zoom.to_string())?;
-            self.repo
-                .set_setting("map_world_width", &self.map_world_size.x.to_string())?;
-            self.repo
-                .set_setting("map_world_height", &self.map_world_size.y.to_string())?;
-            self.repo
-                .set_setting("map_pan_x", &self.map_pan.x.to_string())?;
-            self.repo
-                .set_setting("map_pan_y", &self.map_pan.y.to_string())?;
-
             self.repo.set_setting(
                 "parent_line_width",
                 &self.parent_line_style.width.to_string(),
@@ -1900,11 +1950,6 @@ impl SystemsCatalogApp {
             )?;
 
             self.repo.set_setting(
-                "snap_to_grid",
-                if self.snap_to_grid { "true" } else { "false" },
-            )?;
-
-            self.repo.set_setting(
                 "show_tech_border_colors",
                 if self.show_tech_border_colors {
                     "true"
@@ -1945,20 +1990,6 @@ impl SystemsCatalogApp {
                 self.repo
                     .set_setting("new_catalog_directory", self.new_catalog_directory.trim())?;
             }
-
-            self.repo.set_setting(
-                "fast_add_selected_catalog_tech_on_map",
-                if self.fast_add_selected_catalog_tech_on_map {
-                    "true"
-                } else {
-                    "false"
-                },
-            )?;
-
-            self.repo.set_setting(
-                "new_child_spawn_mode",
-                Self::child_spawn_mode_to_setting_value(self.new_child_spawn_mode),
-            )?;
 
             Ok(())
         })();

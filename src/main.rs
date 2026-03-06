@@ -51,8 +51,16 @@ fn main() -> eframe::Result<()> {
                 .egui_ctx
                 .set_visuals(eframe::egui::Visuals::dark());
 
-            let app = SystemsCatalogApp::new(repository)
+            let mut app = SystemsCatalogApp::new(repository)
                 .expect("failed to initialize Systems Catalog application state");
+
+            if let Some(storage) = creation_context.storage {
+                if let Some(saved_state) =
+                    eframe::get_value::<app::EframePersistedUiState>(storage, eframe::APP_KEY)
+                {
+                    app.apply_eframe_persisted_state(saved_state);
+                }
+            }
 
             Box::new(app)
         }),
