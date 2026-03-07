@@ -854,6 +854,7 @@ impl Repository {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn list_links_for_system(&self, system_id: i64) -> Result<Vec<SystemLink>> {
         let mut stmt = self.conn.prepare(
             r#"

@@ -66,6 +66,13 @@ pub enum SidebarTab {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SystemDetailsTab {
+    Structure,
+    Interactions,
+    Notes,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChildSpawnMode {
     RightOfPrevious,
     BelowPrevious,
@@ -105,6 +112,7 @@ pub enum AppModal {
     HelpZones,
     HelpKeyboardShortcuts,
     HelpTroubleshooting,
+    StepProcessorConversionConfirm,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,6 +125,10 @@ pub enum FlowInspectorPickTarget {
 pub struct VisibleInteraction {
     pub source_system_id: i64,
     pub target_system_id: i64,
+    pub raw_source_system_id: i64,
+    pub raw_target_system_id: i64,
+    pub source_column_name: Option<String>,
+    pub target_column_name: Option<String>,
     pub note: String,
     pub kind: InteractionKind,
 }
@@ -189,6 +201,7 @@ pub struct SystemsCatalogApp {
     selected_cumulative_child_tech: Vec<String>,
     selected_notes: Vec<SystemNote>,
     selected_note_id_for_edit: Option<i64>,
+    pending_note_delete_id: Option<i64>,
     selected_system_line_color_override: Option<Color32>,
     note_text: String,
 
@@ -276,6 +289,7 @@ pub struct SystemsCatalogApp {
     zone_drag_moves_captured_systems: bool,
     map_link_drag_from: Option<i64>,
     map_interaction_drag_from: Option<i64>,
+    map_interaction_drag_from_reference: Option<String>,
     map_interaction_drag_kind: InteractionKind,
     map_link_click_source: Option<i64>,
     selected_map_system_ids: HashSet<i64>,
@@ -322,6 +336,7 @@ pub struct SystemsCatalogApp {
     show_help_zones_modal: bool,
     show_help_keyboard_shortcuts_modal: bool,
     show_help_troubleshooting_modal: bool,
+    show_step_processor_conversion_confirm_modal: bool,
     show_debug_inspection_window: bool,
     show_debug_memory_window: bool,
     modal_open_stack: Vec<AppModal>,
@@ -347,9 +362,13 @@ pub struct SystemsCatalogApp {
     project_last_autosave_at_secs: Option<f64>,
     show_left_sidebar: bool,
     active_sidebar_tab: SidebarTab,
+    active_system_details_tab: SystemDetailsTab,
     systems_sidebar_search: String,
     pending_map_focus_system_id: Option<i64>,
     map_zoom_anchor_to_pointer: bool,
+    pending_step_processor_conversion_target_type: Option<String>,
+    pending_step_processor_conversion_keep_steps_as_systems: bool,
+    pending_step_processor_conversion_single_details: bool,
 
     parent_line_style: LineStyle,
     interaction_line_style: LineStyle,
@@ -371,6 +390,23 @@ pub struct SystemsCatalogApp {
 }
 
 impl SystemsCatalogApp {
+    pub(crate) fn is_internal_step_system_type(system_type: &str) -> bool {
+        Self::normalize_system_type(system_type) == "step_internal"
+    }
+
+    pub(crate) fn is_internal_step_system(system: &SystemRecord) -> bool {
+        Self::is_internal_step_system_type(system.system_type.as_str())
+    }
+
+    pub(crate) fn internal_step_children_for_system(&self, system_id: i64) -> Vec<&SystemRecord> {
+        self.systems
+            .iter()
+            .filter(|candidate| {
+                candidate.parent_id == Some(system_id) && Self::is_internal_step_system(candidate)
+            })
+            .collect()
+    }
+
     fn finite_or_default(value: f32, default: f32) -> f32 {
         if value.is_finite() {
             value
@@ -392,6 +428,7 @@ impl SystemsCatalogApp {
             selected_cumulative_child_tech: Vec::new(),
             selected_notes: Vec::new(),
             selected_note_id_for_edit: None,
+            pending_note_delete_id: None,
             selected_system_line_color_override: None,
             note_text: String::new(),
             new_system_name: String::new(),
@@ -471,6 +508,7 @@ impl SystemsCatalogApp {
             zone_drag_moves_captured_systems: true,
             map_link_drag_from: None,
             map_interaction_drag_from: None,
+            map_interaction_drag_from_reference: None,
             map_interaction_drag_kind: InteractionKind::Standard,
             map_link_click_source: None,
             selected_map_system_ids: HashSet::new(),
@@ -516,6 +554,7 @@ impl SystemsCatalogApp {
             show_help_zones_modal: false,
             show_help_keyboard_shortcuts_modal: false,
             show_help_troubleshooting_modal: false,
+            show_step_processor_conversion_confirm_modal: false,
             show_debug_inspection_window: false,
             show_debug_memory_window: false,
             modal_open_stack: Vec::new(),
@@ -541,9 +580,13 @@ impl SystemsCatalogApp {
             project_last_autosave_at_secs: None,
             show_left_sidebar: true,
             active_sidebar_tab: SidebarTab::Systems,
+            active_system_details_tab: SystemDetailsTab::Structure,
             systems_sidebar_search: String::new(),
             pending_map_focus_system_id: None,
             map_zoom_anchor_to_pointer: false,
+            pending_step_processor_conversion_target_type: None,
+            pending_step_processor_conversion_keep_steps_as_systems: false,
+            pending_step_processor_conversion_single_details: false,
             parent_line_style: LineStyle {
                 width: 1.0,
                 color: Color32::from_gray(90),
@@ -626,6 +669,9 @@ impl SystemsCatalogApp {
             AppModal::HelpZones => self.show_help_zones_modal,
             AppModal::HelpKeyboardShortcuts => self.show_help_keyboard_shortcuts_modal,
             AppModal::HelpTroubleshooting => self.show_help_troubleshooting_modal,
+            AppModal::StepProcessorConversionConfirm => {
+                self.show_step_processor_conversion_confirm_modal
+            }
         }
     }
 
@@ -649,6 +695,9 @@ impl SystemsCatalogApp {
             AppModal::HelpZones => self.show_help_zones_modal = is_open,
             AppModal::HelpKeyboardShortcuts => self.show_help_keyboard_shortcuts_modal = is_open,
             AppModal::HelpTroubleshooting => self.show_help_troubleshooting_modal = is_open,
+            AppModal::StepProcessorConversionConfirm => {
+                self.show_step_processor_conversion_confirm_modal = is_open
+            }
         }
     }
 
@@ -765,7 +814,7 @@ impl SystemsCatalogApp {
 
         if let Some(selected) = self.selected_system_id {
             let visible = self.visible_system_ids();
-            if !visible.contains(&selected) {
+            if !self.is_selection_visible_or_step_endpoint(selected, &visible) {
                 self.clear_selection();
             }
         }
@@ -795,6 +844,29 @@ impl SystemsCatalogApp {
         Ok(())
     }
 
+    fn is_selection_visible_or_step_endpoint(
+        &self,
+        selected_system_id: i64,
+        visible_ids: &HashSet<i64>,
+    ) -> bool {
+        if visible_ids.contains(&selected_system_id) {
+            return true;
+        }
+
+        self.systems
+            .iter()
+            .find(|system| system.id == selected_system_id)
+            .and_then(|system| {
+                if Self::is_internal_step_system(system) {
+                    system.parent_id
+                } else {
+                    None
+                }
+            })
+            .map(|owner_id| visible_ids.contains(&owner_id))
+            .unwrap_or(false)
+    }
+
     fn select_zone(&mut self, zone_id: i64) {
         self.clear_selection();
         self.selected_zone_id = Some(zone_id);
@@ -816,7 +888,64 @@ impl SystemsCatalogApp {
     fn load_selected_data(&mut self, system_id: i64) -> Result<()> {
         self.selected_interaction_transfer_target_id = None;
         self.interaction_transfer_pick_source_id = None;
-        self.selected_links = self.repo.list_links_for_system(system_id)?;
+        let mut selected_step_reference: Option<String> = None;
+        let mut selected_step_owner_id: Option<i64> = None;
+        let mut selected_link_system_ids = HashSet::new();
+        selected_link_system_ids.insert(system_id);
+        if let Some(system) = self.systems.iter().find(|candidate| candidate.id == system_id) {
+            if self.system_entity_for(system).entity_key() == "step_processor" {
+                for child in self.internal_step_children_for_system(system_id) {
+                    selected_link_system_ids.insert(child.id);
+                }
+            } else if Self::is_internal_step_system(system) {
+                selected_step_owner_id = system.parent_id;
+                selected_step_reference = Some(system.description.trim().to_owned());
+            }
+        }
+
+        if let Some(owner_id) = selected_step_owner_id {
+            selected_link_system_ids.insert(owner_id);
+        }
+
+        self.selected_links = self
+            .repo
+            .list_links()?
+            .into_iter()
+            .filter(|link| {
+                let direct_match = selected_link_system_ids.contains(&link.source_system_id)
+                    || selected_link_system_ids.contains(&link.target_system_id);
+                if !direct_match {
+                    return false;
+                }
+
+                let Some(step_reference) = selected_step_reference.as_deref() else {
+                    return true;
+                };
+                let normalized_step_reference = step_reference.trim();
+                if normalized_step_reference.is_empty() {
+                    return true;
+                }
+
+                // For hidden step endpoints, keep links scoped to this step. This supports
+                // both internal endpoint links and older owner+reference links.
+                let direct_internal_match =
+                    link.source_system_id == system_id || link.target_system_id == system_id;
+                let legacy_reference_match = link
+                    .source_column_name
+                    .as_deref()
+                    .map(str::trim)
+                    .map(|value| value.eq_ignore_ascii_case(normalized_step_reference))
+                    .unwrap_or(false)
+                    || link
+                        .target_column_name
+                        .as_deref()
+                        .map(str::trim)
+                        .map(|value| value.eq_ignore_ascii_case(normalized_step_reference))
+                        .unwrap_or(false);
+
+                direct_internal_match || legacy_reference_match
+            })
+            .collect();
         self.selected_system_tech = self.repo.list_tech_for_system(system_id)?;
         self.selected_notes = self.repo.list_notes_for_system(system_id)?;
         self.selected_database_columns = self
@@ -924,19 +1053,22 @@ impl SystemsCatalogApp {
             }
         }
 
-        if self.selected_note_id_for_edit.is_none() {
-            self.selected_note_id_for_edit = self.selected_notes.first().map(|note| note.id);
-        }
+        self.note_text = if let Some(note_id) = self.selected_note_id_for_edit {
+            self.selected_notes
+                .iter()
+                .find(|note| note.id == note_id)
+                .map(|note| note.body.clone())
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
 
-        self.note_text = self
-            .selected_note_id_for_edit
-            .and_then(|note_id| {
-                self.selected_notes
-                    .iter()
-                    .find(|note| note.id == note_id)
-                    .map(|note| note.body.clone())
-            })
-            .unwrap_or_default();
+        if let Some(note_id) = self.pending_note_delete_id {
+            let exists = self.selected_notes.iter().any(|note| note.id == note_id);
+            if !exists {
+                self.pending_note_delete_id = None;
+            }
+        }
 
         self.selected_cumulative_child_tech = self.cumulative_child_tech_names(system_id);
         if self.flow_inspector_from_system_id.is_none() {
@@ -965,7 +1097,22 @@ impl SystemsCatalogApp {
         self.systems
             .iter()
             .find(|system| system.id == id)
-            .map(|system| system.name.clone())
+            .map(|system| {
+                if Self::is_internal_step_system(system) {
+                    let owner = system
+                        .parent_id
+                        .map(|owner_id| self.system_name_by_id(owner_id))
+                        .unwrap_or_else(|| "StepProcessor".to_owned());
+                    let step_name = system.description.trim();
+                    if step_name.is_empty() {
+                        format!("{owner}::step")
+                    } else {
+                        format!("{owner}::{step_name}")
+                    }
+                } else {
+                    system.name.clone()
+                }
+            })
             .unwrap_or_else(|| format!("Unknown ({id})"))
     }
 
@@ -1023,6 +1170,9 @@ impl SystemsCatalogApp {
     fn visible_hierarchy_rows(&self) -> Vec<(usize, i64, String, bool, bool)> {
         let mut children_by_parent: HashMap<Option<i64>, Vec<&SystemRecord>> = HashMap::new();
         for system in &self.systems {
+            if Self::is_internal_step_system(system) {
+                continue;
+            }
             children_by_parent
                 .entry(system.parent_id)
                 .or_default()
@@ -1085,6 +1235,9 @@ impl SystemsCatalogApp {
         self.parent_by_system_id.clear();
         for system in &self.systems {
             self.parent_by_system_id.insert(system.id, system.parent_id);
+            if Self::is_internal_step_system(system) {
+                continue;
+            }
             if let Some(parent_id) = system.parent_id {
                 self.parent_ids_with_children.insert(parent_id);
             }
@@ -1194,16 +1347,56 @@ impl SystemsCatalogApp {
 
     fn deduped_visible_interactions(&self) -> Vec<VisibleInteraction> {
         let representative_by_system = self.visible_representative_system_map();
-        let mut by_edge: HashMap<(i64, i64), (String, InteractionKind)> = HashMap::new();
+        let mut by_edge: HashMap<
+            (i64, i64, Option<String>, Option<String>, String),
+            (String, i64, i64),
+        > = HashMap::new();
 
         for link in &self.all_links {
-            let Some(source_id) = representative_by_system.get(&link.source_system_id).copied()
-            else {
+            let source_system = self
+                .systems
+                .iter()
+                .find(|system| system.id == link.source_system_id);
+            let target_system = self
+                .systems
+                .iter()
+                .find(|system| system.id == link.target_system_id);
+
+            let source_base_id = self
+                .systems
+                .iter()
+                .find(|system| system.id == link.source_system_id)
+                .map(|system| {
+                    if Self::is_internal_step_system(system) {
+                        system.parent_id.unwrap_or(system.id)
+                    } else {
+                        system.id
+                    }
+                });
+            let Some(source_base_id) = source_base_id else {
                 continue;
             };
 
-            let Some(target_id) = representative_by_system.get(&link.target_system_id).copied()
-            else {
+            let target_base_id = self
+                .systems
+                .iter()
+                .find(|system| system.id == link.target_system_id)
+                .map(|system| {
+                    if Self::is_internal_step_system(system) {
+                        system.parent_id.unwrap_or(system.id)
+                    } else {
+                        system.id
+                    }
+                });
+            let Some(target_base_id) = target_base_id else {
+                continue;
+            };
+
+            let Some(source_id) = representative_by_system.get(&source_base_id).copied() else {
+                continue;
+            };
+
+            let Some(target_id) = representative_by_system.get(&target_base_id).copied() else {
                 continue;
             };
 
@@ -1211,29 +1404,84 @@ impl SystemsCatalogApp {
                 continue;
             }
 
+            let mut source_reference = link
+                .source_column_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned);
+            let mut target_reference = link
+                .target_column_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned);
+
+            if source_reference.is_none() {
+                source_reference = source_system.and_then(|system| {
+                    if !Self::is_internal_step_system(system) {
+                        return None;
+                    }
+
+                    let reference = system.description.trim();
+                    if reference.is_empty() {
+                        None
+                    } else {
+                        Some(reference.to_owned())
+                    }
+                });
+            }
+
+            if target_reference.is_none() {
+                target_reference = target_system.and_then(|system| {
+                    if !Self::is_internal_step_system(system) {
+                        return None;
+                    }
+
+                    let reference = system.description.trim();
+                    if reference.is_empty() {
+                        None
+                    } else {
+                        Some(reference.to_owned())
+                    }
+                });
+            }
+            let kind_key = link.kind.trim().to_ascii_lowercase();
+
             by_edge
-                .entry((source_id, target_id))
-                .and_modify(|(note, _kind)| {
+                .entry((
+                    source_id,
+                    target_id,
+                    source_reference,
+                    target_reference,
+                    kind_key,
+                ))
+                .and_modify(|(note, _, _)| {
                     if note.trim().is_empty() && !link.note.trim().is_empty() {
                         *note = link.note.clone();
                     }
                 })
                 .or_insert_with(|| {
-                    (
-                        link.note.clone(),
-                        Self::interaction_kind_from_setting_value(link.kind.as_str()),
-                    )
+                    (link.note.clone(), link.source_system_id, link.target_system_id)
                 });
         }
 
         let mut interactions = by_edge
             .into_iter()
-            .map(|((source_system_id, target_system_id), (note, kind))| VisibleInteraction {
+            .map(
+                |((source_system_id, target_system_id, source_column_name, target_column_name, kind_key), (note, raw_source_system_id, raw_target_system_id))| {
+                    VisibleInteraction {
                 source_system_id,
                 target_system_id,
+                raw_source_system_id,
+                raw_target_system_id,
+                source_column_name,
+                target_column_name,
                 note,
-                kind,
-            })
+                kind: Self::interaction_kind_from_setting_value(kind_key.as_str()),
+                    }
+                },
+            )
             .collect::<Vec<_>>();
 
         interactions.sort_by_key(|interaction| {
@@ -1310,6 +1558,7 @@ impl SystemsCatalogApp {
         self.selected_cumulative_child_tech.clear();
         self.selected_notes.clear();
         self.selected_note_id_for_edit = None;
+        self.pending_note_delete_id = None;
         self.selected_system_line_color_override = None;
         self.note_text.clear();
         self.selected_system_parent_id = None;
@@ -1329,6 +1578,7 @@ impl SystemsCatalogApp {
         self.interaction_transfer_pick_source_id = None;
         self.map_link_drag_from = None;
         self.map_interaction_drag_from = None;
+        self.map_interaction_drag_from_reference = None;
         self.map_interaction_drag_kind = InteractionKind::Standard;
         self.map_link_click_source = None;
         self.interaction_popup_pending = None;
@@ -1477,10 +1727,18 @@ impl SystemsCatalogApp {
     }
 
     fn normalize_system_type(value: &str) -> String {
-        match value.trim().to_lowercase().as_str() {
+        let normalized = value
+            .trim()
+            .to_ascii_lowercase()
+            .replace('-', "_")
+            .replace(' ', "_");
+
+        match normalized.as_str() {
+            "" => "service".to_owned(),
             "route" | "api" => "api".to_owned(),
             "database" => "database".to_owned(),
-            _ => "service".to_owned(),
+            "stepprocessor" | "step_processor" => "step_processor".to_owned(),
+            _ => normalized,
         }
     }
 
@@ -2269,11 +2527,19 @@ impl SystemsCatalogApp {
 
     fn mark_system_as_dirty(&mut self, system_id: i64) {
         self.project_dirty = true;
+        self.map_card_label_cache.remove(&system_id);
+        self.map_node_size_cache.remove(&system_id);
         if self.new_system_ids.contains(&system_id) {
             return;
         }
 
         self.dirty_system_ids.insert(system_id);
+    }
+
+    pub(super) fn clear_pending_step_processor_conversion_prompt(&mut self) {
+        self.pending_step_processor_conversion_target_type = None;
+        self.pending_step_processor_conversion_keep_steps_as_systems = false;
+        self.pending_step_processor_conversion_single_details = false;
     }
 
     fn mark_project_as_dirty(&mut self) {
@@ -2697,6 +2963,7 @@ impl SystemsCatalogApp {
             .systems
             .iter()
             .filter(|system| exclude_id != Some(system.id))
+            .filter(|system| !Self::is_internal_step_system(system))
             .filter(|system| {
                 zone_ids
                     .as_ref()
@@ -2715,6 +2982,9 @@ impl SystemsCatalogApp {
         let columns = 4usize;
 
         for system in &self.systems {
+            if Self::is_internal_step_system(system) {
+                continue;
+            }
             if self.map_positions.contains_key(&system.id) {
                 continue;
             }
@@ -2924,7 +3194,7 @@ impl SystemsCatalogApp {
 
         let visible_ids = self.visible_system_ids();
         if let Some(selected_system_id) = self.selected_system_id {
-            if !visible_ids.contains(&selected_system_id) {
+            if !self.is_selection_visible_or_step_endpoint(selected_system_id, &visible_ids) {
                 self.clear_selection();
             }
         }

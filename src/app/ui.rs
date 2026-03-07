@@ -5,12 +5,13 @@ use arboard::Clipboard;
 use eframe::egui::{
     self, Align, Color32, FontId, Layout, Pos2, Rect, RichText, Sense, Shape, Stroke, Vec2,
 };
-use egui_material_icons::icons::{ICON_ADD, ICON_DATABASE, ICON_REMOVE, ICON_ROUTE};
+use egui_material_icons::icons::{ICON_ADD, ICON_REMOVE};
 use rfd::FileDialog;
 
 use crate::app::{
     AppModal, ChildSpawnMode, FlowInspectorPickTarget, InteractionKind, LineLayerDepth,
-    LineLayerOrder, LinePattern, LineStyle, LineTerminator, SidebarTab, SystemsCatalogApp,
+    LineLayerOrder, LinePattern, LineStyle, LineTerminator, SidebarTab, SystemDetailsTab,
+    SystemsCatalogApp,
     ZoneDragKind, MAP_MAX_ZOOM, MAP_MIN_ZOOM, MAP_NODE_SIZE,
 };
 use crate::models::SystemRecord;
@@ -191,11 +192,7 @@ impl SystemsCatalogApp {
     }
 
     fn map_card_icon_for_system_type(system_type: &str) -> &'static str {
-        match system_type {
-            "route" | "api" => ICON_ROUTE,
-            "database" => ICON_DATABASE,
-            _ => ICON_ROUTE,
-        }
+        crate::app::entities::map_icon_for_system_type(system_type)
     }
 
     fn map_node_size_for(&self, system: &SystemRecord, label: &str) -> Vec2 {
@@ -286,7 +283,20 @@ impl SystemsCatalogApp {
             .unwrap_or(MAP_NODE_SIZE)
     }
 
-    fn database_column_names_for_system(&self, system_id: i64) -> Vec<String> {
+    fn endpoint_reference_names_for_system(&self, system_id: i64) -> Vec<String> {
+        let supports_references = self
+            .systems
+            .iter()
+            .find(|system| system.id == system_id)
+            .map(|system| {
+                self.entity_supports_row_references_for_type(system.system_type.as_str())
+            })
+            .unwrap_or(false);
+
+        if !supports_references {
+            return Vec::new();
+        }
+
         self.database_columns_by_system
             .get(&system_id)
             .map(|columns| {
@@ -301,6 +311,216 @@ impl SystemsCatalogApp {
                 names
             })
             .unwrap_or_default()
+    }
+
+    fn reference_term_for_system(&self, system_id: i64) -> &'static str {
+        let entity_key = self
+            .systems
+            .iter()
+            .find(|system| system.id == system_id)
+            .map(|system| self.system_entity_for(system).entity_key())
+            .unwrap_or("service");
+
+        if entity_key == "step_processor" {
+            "step"
+        } else {
+            "endpoint"
+        }
+    }
+
+    fn mapping_section_title_for_link(&self, link: &crate::models::SystemLink) -> String {
+        let source_term = self.reference_term_for_system(link.source_system_id);
+        let target_term = self.reference_term_for_system(link.target_system_id);
+
+        if source_term == "step" || target_term == "step" {
+            "Step-level mapping".to_owned()
+        } else {
+            "Endpoint-level mapping".to_owned()
+        }
+    }
+
+    fn row_reference_at_pointer_for_system(
+        &self,
+        system: &SystemRecord,
+        node_rect: Rect,
+        pointer_pos: Pos2,
+    ) -> Option<String> {
+        if !self.entity_supports_row_references_for_type(system.system_type.as_str()) {
+            return None;
+        }
+
+        let references = self
+            .database_columns_by_system
+            .get(&system.id)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|row| row.column_name.trim().to_owned())
+            .filter(|name| !name.is_empty())
+            .collect::<Vec<_>>();
+
+        if references.is_empty() {
+            return None;
+        }
+
+        let icon_only_zoom = self.map_zoom <= 0.20;
+        let compact_database_zoom = self.map_zoom <= 0.30;
+        let hide_service_content_zoom = self.map_zoom <= 0.10;
+        let is_api_type = self.system_entity_for(system).entity_key() == "api";
+        let is_service_like_type = !is_api_type;
+
+        // Row references only exist visually in the expanded card layout.
+        if icon_only_zoom || compact_database_zoom || (hide_service_content_zoom && is_service_like_type) {
+            return None;
+        }
+
+        let top_padding = (8.0 * self.map_zoom).clamp(4.0, 10.0);
+        let row_height = (22.0 * self.map_zoom).clamp(14.0, 30.0);
+        let separator_y = node_rect.top() + top_padding + row_height;
+        let mut row_y = separator_y + 4.0;
+
+        for reference_name in references {
+            if row_y + row_height > node_rect.bottom() - 2.0 {
+                break;
+            }
+
+            let row_rect = Rect::from_min_max(
+                Pos2::new(node_rect.left() + 4.0, row_y),
+                Pos2::new(node_rect.right() - 4.0, row_y + row_height),
+            );
+            if row_rect.contains(pointer_pos) {
+                return Some(reference_name);
+            }
+
+            row_y += row_height;
+        }
+
+        None
+    }
+
+    fn row_center_for_reference_in_rect(
+        &self,
+        system: &SystemRecord,
+        node_rect: Rect,
+        reference_name: &str,
+    ) -> Option<Pos2> {
+        if !self.entity_supports_row_references_for_type(system.system_type.as_str()) {
+            return None;
+        }
+
+        let references = self
+            .database_columns_by_system
+            .get(&system.id)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|row| row.column_name.trim().to_owned())
+            .filter(|name| !name.is_empty())
+            .collect::<Vec<_>>();
+
+        if references.is_empty() {
+            return None;
+        }
+
+        let icon_only_zoom = self.map_zoom <= 0.20;
+        let compact_database_zoom = self.map_zoom <= 0.30;
+        let hide_service_content_zoom = self.map_zoom <= 0.10;
+        let is_api_type = self.system_entity_for(system).entity_key() == "api";
+        let is_service_like_type = !is_api_type;
+        if icon_only_zoom || compact_database_zoom || (hide_service_content_zoom && is_service_like_type) {
+            return None;
+        }
+
+        let top_padding = (8.0 * self.map_zoom).clamp(4.0, 10.0);
+        let row_height = (22.0 * self.map_zoom).clamp(14.0, 30.0);
+        let separator_y = node_rect.top() + top_padding + row_height;
+        let mut row_y = separator_y + 4.0;
+
+        for candidate in references {
+            if row_y + row_height > node_rect.bottom() - 2.0 {
+                break;
+            }
+
+            if candidate == reference_name {
+                let row_center_y = row_y + (row_height * 0.5);
+                return Some(Pos2::new(node_rect.center().x, row_center_y));
+            }
+
+            row_y += row_height;
+        }
+
+        None
+    }
+
+    fn interaction_endpoint_owner_and_reference(
+        &self,
+        endpoint_system_id: i64,
+        fallback_reference: Option<&str>,
+    ) -> Option<(i64, Option<String>)> {
+        let normalized_reference = fallback_reference
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned);
+
+        let endpoint = self
+            .systems
+            .iter()
+            .find(|candidate| candidate.id == endpoint_system_id)?;
+
+        if Self::is_internal_step_system(endpoint) {
+            let owner_id = endpoint.parent_id?;
+            let owner_reference = normalized_reference
+                .or_else(|| {
+                    let name = endpoint.description.trim();
+                    if name.is_empty() {
+                        None
+                    } else {
+                        Some(name.to_owned())
+                    }
+                });
+            Some((owner_id, owner_reference))
+        } else {
+            Some((endpoint_system_id, normalized_reference))
+        }
+    }
+
+    fn interaction_endpoint_anchor_point(
+        &self,
+        endpoint_system_id: i64,
+        endpoint_reference: Option<&str>,
+        peer_point: Pos2,
+        pattern: LinePattern,
+        node_rects: &HashMap<i64, Rect>,
+    ) -> Option<(i64, Pos2)> {
+        let (owner_system_id, owner_reference) =
+            self.interaction_endpoint_owner_and_reference(endpoint_system_id, endpoint_reference)?;
+        let owner_rect = *node_rects.get(&owner_system_id)?;
+
+        let anchor = if let Some(reference) = owner_reference.as_deref() {
+            if let Some(owner_system) = self
+                .systems
+                .iter()
+                .find(|candidate| candidate.id == owner_system_id)
+            {
+                if let Some(row_center) =
+                    self.row_center_for_reference_in_rect(owner_system, owner_rect, reference)
+                {
+                    let row_anchor_rect = Rect::from_center_size(
+                        row_center,
+                        Vec2::new((owner_rect.width() - 10.0).max(10.0), 6.0),
+                    );
+                    Self::rect_anchor_point(row_anchor_rect, peer_point - row_center, pattern)
+                } else {
+                    self.rect_to_point_endpoint(owner_rect, peer_point, pattern)
+                }
+            } else {
+                self.rect_to_point_endpoint(owner_rect, peer_point, pattern)
+            }
+        } else {
+            self.rect_to_point_endpoint(owner_rect, peer_point, pattern)
+        };
+
+        Some((owner_system_id, anchor))
     }
 
     fn max_chars_per_line_for_width(&self, width: f32) -> usize {
@@ -923,27 +1143,88 @@ impl SystemsCatalogApp {
                 .find(|link| link.id == link_id)
                 .map(|link| (link.source_system_id, link.target_system_id))
         });
+        let selected_internal_step_id = selected_id.and_then(|id| {
+            self.systems
+                .iter()
+                .find(|system| system.id == id)
+                .and_then(|system| {
+                    if Self::is_internal_step_system(system) {
+                        Some(id)
+                    } else {
+                        None
+                    }
+                })
+        });
 
         for interaction in self.deduped_visible_interactions() {
-            let source_system_id = interaction.source_system_id;
-            let target_system_id = interaction.target_system_id;
+            let interaction_style = self.interaction_line_style_for_kind(
+                interaction.source_system_id,
+                interaction.target_system_id,
+                interaction.kind,
+            );
 
-            let Some(source_rect) = node_rects.get(&source_system_id) else {
+            let Some((rendered_source_system_id, _)) = self
+                .interaction_endpoint_owner_and_reference(
+                    interaction.source_system_id,
+                    interaction.source_column_name.as_deref(),
+                )
+            else {
                 continue;
             };
-            let Some(target_rect) = node_rects.get(&target_system_id) else {
+            let Some((rendered_target_system_id, _)) = self
+                .interaction_endpoint_owner_and_reference(
+                    interaction.target_system_id,
+                    interaction.target_column_name.as_deref(),
+                )
+            else {
                 continue;
             };
 
-            let in_primary_selection = selected_id
-                .map(|id| id == source_system_id || id == target_system_id)
-                .unwrap_or(false);
-            let in_selection_set = self.selected_map_system_ids.contains(&source_system_id)
-                || self.selected_map_system_ids.contains(&target_system_id);
+            let Some(source_rect) = node_rects.get(&rendered_source_system_id) else {
+                continue;
+            };
+            let Some(target_rect) = node_rects.get(&rendered_target_system_id) else {
+                continue;
+            };
+
+            let source_peer = target_rect.center();
+            let target_peer = source_rect.center();
+            let Some((_, source_anchor)) = self.interaction_endpoint_anchor_point(
+                interaction.source_system_id,
+                interaction.source_column_name.as_deref(),
+                source_peer,
+                interaction_style.pattern,
+                node_rects,
+            ) else {
+                continue;
+            };
+            let Some((_, target_anchor)) = self.interaction_endpoint_anchor_point(
+                interaction.target_system_id,
+                interaction.target_column_name.as_deref(),
+                target_peer,
+                interaction_style.pattern,
+                node_rects,
+            ) else {
+                continue;
+            };
+
+            let in_primary_selection = if let Some(internal_id) = selected_internal_step_id {
+                interaction.raw_source_system_id == internal_id
+                    || interaction.raw_target_system_id == internal_id
+            } else {
+                selected_id
+                    .map(|id| id == rendered_source_system_id || id == rendered_target_system_id)
+                    .unwrap_or(false)
+            };
+            let in_selection_set = self.selected_map_system_ids.contains(&rendered_source_system_id)
+                || self.selected_map_system_ids.contains(&rendered_target_system_id);
             let has_any_selection =
                 selected_id.is_some() || !self.selected_map_system_ids.is_empty();
             let is_selected_interaction = selected_interaction_match
-                .map(|(src, tgt)| src == source_system_id && tgt == target_system_id)
+                .map(|(src, tgt)| {
+                    src == interaction.raw_source_system_id
+                        && tgt == interaction.raw_target_system_id
+                })
                 .unwrap_or(false);
 
             let dimmed = has_any_selection && !(in_primary_selection || in_selection_set || is_selected_interaction);
@@ -951,49 +1232,37 @@ impl SystemsCatalogApp {
                 && tech_filter_active
                 && (!self
                     .systems_using_selected_catalog_tech
-                    .contains(&source_system_id)
+                    .contains(&rendered_source_system_id)
                     || !self
                         .systems_using_selected_catalog_tech
-                        .contains(&target_system_id));
+                        .contains(&rendered_target_system_id));
             let boosted = in_primary_selection || in_selection_set || is_selected_interaction;
             let in_focused_flow_path = match interaction.kind {
                 InteractionKind::Standard | InteractionKind::Push => {
-                    focused_flow_edges.contains(&(source_system_id, target_system_id))
+                    focused_flow_edges
+                        .contains(&(interaction.source_system_id, interaction.target_system_id))
                 }
                 InteractionKind::Pull => {
-                    focused_flow_edges.contains(&(target_system_id, source_system_id))
+                    focused_flow_edges
+                        .contains(&(interaction.target_system_id, interaction.source_system_id))
                 }
                 InteractionKind::Bidirectional => {
-                    focused_flow_edges.contains(&(source_system_id, target_system_id))
-                        || focused_flow_edges.contains(&(target_system_id, source_system_id))
+                    focused_flow_edges
+                        .contains(&(interaction.source_system_id, interaction.target_system_id))
+                        || focused_flow_edges.contains(&(
+                            interaction.target_system_id,
+                            interaction.source_system_id,
+                        ))
                 }
             };
             let dimmed_for_focused_flow = focused_flow_highlight_active && !in_focused_flow_path;
             let should_dim_interaction =
                 (dimmed || dimmed_for_tech || dimmed_for_focused_flow) && !in_focused_flow_path;
-
-            let interaction_style = self.interaction_line_style_for_kind(
-                source_system_id,
-                target_system_id,
-                interaction.kind,
-            );
-
             let (from, to) = match interaction.kind {
-                InteractionKind::Pull => self.card_to_card_endpoints(
-                    *target_rect,
-                    *source_rect,
-                    interaction_style.pattern,
-                ),
-                InteractionKind::Push | InteractionKind::Standard => self.card_to_card_endpoints(
-                    *source_rect,
-                    *target_rect,
-                    interaction_style.pattern,
-                ),
-                InteractionKind::Bidirectional => self.card_to_card_endpoints(
-                    *source_rect,
-                    *target_rect,
-                    interaction_style.pattern,
-                ),
+                InteractionKind::Pull => (target_anchor, source_anchor),
+                InteractionKind::Push | InteractionKind::Standard | InteractionKind::Bidirectional => {
+                    (source_anchor, target_anchor)
+                }
             };
 
             if interaction.kind == InteractionKind::Bidirectional {
@@ -1022,8 +1291,8 @@ impl SystemsCatalogApp {
                     let hover_threshold = (10.0 * self.map_zoom).clamp(8.0, 18.0);
                     if hover_distance <= hover_threshold {
                         let popup_state = crate::app::InteractionPopupState {
-                            source_system_name: self.system_name_by_id(source_system_id),
-                            target_system_name: self.system_name_by_id(target_system_id),
+                            source_system_name: self.system_name_by_id(interaction.source_system_id),
+                            target_system_name: self.system_name_by_id(interaction.target_system_id),
                             note: interaction.note.clone(),
                             anchor_screen: pointer,
                         };
@@ -1223,29 +1492,27 @@ impl SystemsCatalogApp {
 
                 ui.horizontal(|ui| {
                     ui.label("System type");
-                    let selected_type_label = match self.new_system_type.as_str() {
-                        "api" => "API",
-                        "database" => "Database",
-                        _ => "Service",
-                    };
+                    let selected_type_label =
+                        self.system_type_display_label(self.new_system_type.as_str());
+                    let system_types = self.supported_system_types();
                     egui::ComboBox::from_label("Type")
-                        .selected_text(selected_type_label)
+                        .selected_text(selected_type_label.as_str())
                         .show_ui(ui, |ui| {
-                            ui.selectable_value(
-                                &mut self.new_system_type,
-                                "service".to_owned(),
-                                "Service",
-                            );
-                            ui.selectable_value(&mut self.new_system_type, "api".to_owned(), "API");
-                            ui.selectable_value(
-                                &mut self.new_system_type,
-                                "database".to_owned(),
-                                "Database",
-                            );
+                            for option in system_types {
+                                ui.selectable_value(
+                                    &mut self.new_system_type,
+                                    option.key,
+                                    option.label,
+                                );
+                            }
                         });
                 });
 
-                if self.new_system_type == "api" {
+                if self
+                    .system_entity_for_type(self.new_system_type.as_str())
+                    .selectable_inputs()
+                    .can_select_route_methods
+                {
                     ui.label("Route methods handled");
                     ui.horizontal_wrapped(|ui| {
                         for method in Self::supported_http_methods() {
@@ -2005,6 +2272,73 @@ impl SystemsCatalogApp {
         self.show_new_catalog_confirm_modal = open;
     }
 
+    fn render_step_processor_conversion_confirm_modal(&mut self, ctx: &egui::Context) {
+        if !self.show_step_processor_conversion_confirm_modal {
+            return;
+        }
+
+        let mut open = self.show_step_processor_conversion_confirm_modal;
+        let mut confirm_requested = false;
+        let mut cancel_requested = false;
+
+        egui::Window::new("Convert Child Systems To Steps")
+            .collapsible(false)
+            .resizable(false)
+            .open(&mut open)
+            .default_width(460.0)
+            .show(ctx, |ui| {
+                ui.label(
+                    "This conversion found existing child systems. You can keep them as systems, or convert them into internal step endpoints.",
+                );
+                ui.small(
+                    "Converting them hides child cards and turns them into step-level endpoints behind the Step Processor.",
+                );
+                ui.separator();
+
+                ui.checkbox(
+                    &mut self.pending_step_processor_conversion_keep_steps_as_systems,
+                    "Keep steps as systems",
+                );
+
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("Convert").clicked() {
+                        confirm_requested = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel_requested = true;
+                    }
+                });
+            });
+
+        if confirm_requested {
+            self.show_step_processor_conversion_confirm_modal = false;
+            if self.pending_step_processor_conversion_single_details {
+                self.update_selected_system_details();
+            } else if let Some(target_type) =
+                self.pending_step_processor_conversion_target_type.clone()
+            {
+                self.bulk_convert_selected_system_types(target_type.as_str());
+            } else {
+                self.clear_pending_step_processor_conversion_prompt();
+                self.status_message =
+                    "No pending step processor conversion request found".to_owned();
+            }
+            return;
+        }
+
+        if cancel_requested || !open {
+            self.show_step_processor_conversion_confirm_modal = false;
+            self.clear_pending_step_processor_conversion_prompt();
+            if cancel_requested {
+                self.status_message = "Step processor conversion canceled".to_owned();
+            }
+            return;
+        }
+
+        self.show_step_processor_conversion_confirm_modal = open;
+    }
+
     fn render_ddl_table_mapping_modal(&mut self, ctx: &egui::Context) {
         if !self.show_ddl_table_mapping_modal {
             return;
@@ -2558,13 +2892,6 @@ impl SystemsCatalogApp {
             return;
         };
 
-        ui.label(RichText::new(system.name.clone()).strong());
-        if let Some(parent_id) = system.parent_id {
-            ui.label(format!("Parent: {}", self.system_name_by_id(parent_id)));
-        } else {
-            ui.label("Parent: none (root)");
-        }
-
         let mut incoming_connections = 0usize;
         let mut outgoing_connections = 0usize;
         let mut standard_connections = 0usize;
@@ -2707,6 +3034,7 @@ impl SystemsCatalogApp {
             });
 
         ui.separator();
+        ui.heading("Basics");
         ui.label("Name");
         ui.text_edit_singleline(&mut self.edited_system_name);
 
@@ -2714,41 +3042,19 @@ impl SystemsCatalogApp {
         ui.add(egui::TextEdit::multiline(&mut self.edited_system_description).desired_rows(3));
 
         ui.separator();
-        ui.label("Naming path");
-        ui.checkbox(
-            &mut self.selected_system_naming_root,
-            "Treat this system as naming root",
-        );
-        ui.horizontal(|ui| {
-            ui.label("Delimiter");
-            ui.text_edit_singleline(&mut self.selected_system_naming_delimiter);
-        });
-        ui.label(format!(
-            "Current path: {}",
-            self.naming_path_for_system(system.id)
-        ));
-
-        ui.separator();
         ui.label("System classification");
-        let selected_type_label = match self.selected_system_type.as_str() {
-            "api" => "API",
-            "database" => "Database",
-            _ => "Service",
-        };
+        let selected_type_label = self.system_type_display_label(self.selected_system_type.as_str());
+        let system_types = self.supported_system_types();
         egui::ComboBox::from_label("Type")
-            .selected_text(selected_type_label)
+            .selected_text(selected_type_label.as_str())
             .show_ui(ui, |ui| {
-                ui.selectable_value(
-                    &mut self.selected_system_type,
-                    "service".to_owned(),
-                    "Service",
-                );
-                ui.selectable_value(&mut self.selected_system_type, "api".to_owned(), "API");
-                ui.selectable_value(
-                    &mut self.selected_system_type,
-                    "database".to_owned(),
-                    "Database",
-                );
+                for option in system_types {
+                    ui.selectable_value(
+                        &mut self.selected_system_type,
+                        option.key,
+                        option.label,
+                    );
+                }
             });
 
         let selected_count = if self.selected_map_system_ids.is_empty() {
@@ -2773,88 +3079,142 @@ impl SystemsCatalogApp {
         }
 
         let system_entity = self.system_entity_for(&system);
-        let _entity_key = system_entity.entity_key();
         let selectable_inputs = system_entity.selectable_inputs();
 
-        if selectable_inputs.can_select_route_methods || selectable_inputs.can_select_database_columns {
-            system_entity.render_details_panel(self, ui, &system);
-        }
 
+
+        ui.separator();
+        ui.heading("System-Specific Settings");
+        ui.small("Custom fields from this system type.");
+        ui.group(|ui| {
+            system_entity.render_details_panel(self, ui, &system);
+        });
         ui.horizontal(|ui| {
-            if ui.button("Save details").clicked() {
+            if ui.button("Save system details").clicked() {
                 self.update_selected_system_details();
             }
         });
-
-        if selectable_inputs.can_select_parent {
-            ui.separator();
-            ui.label("Parent assignment");
-
-            let selected_parent_label = self
-                .selected_system_parent_id
-                .map(|id| self.system_dropdown_label(id))
-                .unwrap_or_else(|| "No parent (root system)".to_owned());
-            let selected_parent_label = Self::clamp_text_to_width_with_limit(
-                &selected_parent_label,
-                ((ui.available_width().max(80.0) / 7.0).floor() as usize)
-                    .clamp(12, DETAILS_LABEL_CHAR_LIMIT),
+        ui.separator();
+        ui.horizontal_wrapped(|ui| {
+            ui.selectable_value(
+                &mut self.active_system_details_tab,
+                SystemDetailsTab::Structure,
+                "Structure",
             );
+            ui.selectable_value(
+                &mut self.active_system_details_tab,
+                SystemDetailsTab::Interactions,
+                "Interactions",
+            );
+            ui.selectable_value(
+                &mut self.active_system_details_tab,
+                SystemDetailsTab::Notes,
+                "Notes",
+            );
+        });
 
-            let valid_parent_candidates = self
-                .zone_filtered_system_candidates(Some(system.id))
-                .into_iter()
-                .filter(|(candidate_id, _)| !self.would_create_parent_cycle(system.id, *candidate_id))
-                .collect::<Vec<_>>();
+        let show_structure_tab = self.active_system_details_tab == SystemDetailsTab::Structure;
+        let show_interactions_tab = self.active_system_details_tab == SystemDetailsTab::Interactions;
+        let show_notes_tab = self.active_system_details_tab == SystemDetailsTab::Notes;
 
-            let previous_parent_id = self.selected_system_parent_id;
-            egui::ComboBox::from_label("Set parent")
-                .selected_text(selected_parent_label)
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(
-                        &mut self.selected_system_parent_id,
-                        None,
-                        "No parent (root system)",
+        let tab_scroll_height = ui.available_height().max(140.0);
+        egui::ScrollArea::vertical()
+            .id_source("details_tab_content_scroll")
+            .max_height(tab_scroll_height)
+            .show(ui, |ui| {
+
+        if show_structure_tab {
+            let mut deleted_selected_system = false;
+            ui.separator();
+            ui.label("Structure & Layout");
+                ui.label("Naming");
+                ui.checkbox(
+                    &mut self.selected_system_naming_root,
+                    "Treat as naming root",
+                );
+                ui.horizontal(|ui| {
+                    ui.label("Delimiter");
+                    ui.text_edit_singleline(&mut self.selected_system_naming_delimiter);
+                });
+                ui.small(format!(
+                    "Current path: {}",
+                    self.naming_path_for_system(system.id)
+                ));
+
+                ui.separator();
+                if selectable_inputs.can_select_parent {
+                    ui.label("Parent assignment");
+
+                    let selected_parent_label = self
+                        .selected_system_parent_id
+                        .map(|id| self.system_dropdown_label(id))
+                        .unwrap_or_else(|| "No parent (root system)".to_owned());
+                    let selected_parent_label = Self::clamp_text_to_width_with_limit(
+                        &selected_parent_label,
+                        ((ui.available_width().max(80.0) / 7.0).floor() as usize)
+                            .clamp(12, DETAILS_LABEL_CHAR_LIMIT),
                     );
 
-                    for (candidate_id, _) in &valid_parent_candidates {
-                        let option_label = self.system_dropdown_label(*candidate_id);
-                        ui.selectable_value(
-                            &mut self.selected_system_parent_id,
-                            Some(*candidate_id),
-                            option_label,
-                        );
+                    let valid_parent_candidates = self
+                        .zone_filtered_system_candidates(Some(system.id))
+                        .into_iter()
+                        .filter(|(candidate_id, _)| {
+                            !self.would_create_parent_cycle(system.id, *candidate_id)
+                        })
+                        .collect::<Vec<_>>();
+
+                    let previous_parent_id = self.selected_system_parent_id;
+                    egui::ComboBox::from_label("Set parent")
+                        .selected_text(selected_parent_label)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut self.selected_system_parent_id,
+                                None,
+                                "No parent (root system)",
+                            );
+
+                            for (candidate_id, _) in &valid_parent_candidates {
+                                let option_label = self.system_dropdown_label(*candidate_id);
+                                ui.selectable_value(
+                                    &mut self.selected_system_parent_id,
+                                    Some(*candidate_id),
+                                    option_label,
+                                );
+                            }
+                        });
+
+                    if self.selected_system_parent_id != previous_parent_id {
+                        self.update_selected_system_parent();
+                    }
+
+                    ui.separator();
+                }
+
+                ui.label("Subsystem layout");
+                ui.horizontal(|ui| {
+                    if ui.button("File tree").clicked() {
+                        self.layout_selected_subsystem_file_tree();
+                    }
+                    if ui.button("Regular tree").clicked() {
+                        self.layout_selected_subsystem_regular_tree();
                     }
                 });
 
-            if self.selected_system_parent_id != previous_parent_id {
-                self.update_selected_system_parent();
-            }
-        }
+                ui.separator();
+                if ui.button("Delete system").clicked() {
+                    self.delete_selected_system();
+                    deleted_selected_system = true;
+                }
 
-        ui.separator();
-        ui.label("Subsystem layout");
-        ui.horizontal(|ui| {
-            if ui.button("File tree").clicked() {
-                self.layout_selected_subsystem_file_tree();
-            }
-            if ui.button("Regular tree").clicked() {
-                self.layout_selected_subsystem_regular_tree();
-            }
-        });
-
-        ui.horizontal(|ui| {
-            if ui.button("Delete system").clicked() {
-                self.delete_selected_system();
+            if deleted_selected_system {
                 return;
             }
-        });
 
-        ui.separator();
-        egui::CollapsingHeader::new("Line color override")
-            .default_open(false)
-            .show(ui, |ui| {
+            ui.separator();
+            ui.label("Line color override");
                 ui.horizontal(|ui| {
                     let mut use_override = self.selected_system_line_color_override.is_some();
+                    let mut changed = false;
                     if ui.checkbox(&mut use_override, "Enable override").changed() {
                         if use_override {
                             self.selected_system_line_color_override =
@@ -2862,116 +3222,140 @@ impl SystemsCatalogApp {
                         } else {
                             self.selected_system_line_color_override = None;
                         }
+                        changed = true;
                     }
 
                     if let Some(mut color) = self.selected_system_line_color_override {
                         if ui.color_edit_button_srgba(&mut color).changed() {
                             self.selected_system_line_color_override = Some(color);
+                            changed = true;
                         }
+                    }
+
+                    if changed {
+                        self.update_selected_system_line_color_override();
                     }
                 });
 
                 ui.horizontal(|ui| {
-                    if ui.button("Save line override").clicked() {
-                        self.update_selected_system_line_color_override();
-                    }
                     if ui.button("Clear override").clicked() {
                         self.selected_system_line_color_override = None;
                         self.update_selected_system_line_color_override();
                     }
                 });
-            });
-
-        ui.separator();
-        ui.label("Interactions");
-
-        let selected_target_label = self
-            .new_link_target_id
-            .map(|id| self.system_dropdown_label(id))
-            .unwrap_or_else(|| "Select target system".to_owned());
-        let selected_target_label = Self::clamp_text_to_width_with_limit(
-            &selected_target_label,
-            ((ui.available_width().max(80.0) / 7.0).floor() as usize)
-                .clamp(12, DETAILS_LABEL_CHAR_LIMIT),
-        );
-
-        egui::ComboBox::from_label("Target")
-            .selected_text(selected_target_label)
-            .show_ui(ui, |ui| {
-                for (candidate_id, _) in self.zone_filtered_system_candidates(Some(system.id)) {
-                    let option_label = self.system_dropdown_label(candidate_id);
-                    ui.selectable_value(
-                        &mut self.new_link_target_id,
-                        Some(candidate_id),
-                        option_label,
-                    );
-                }
-            });
-
-        ui.text_edit_singleline(&mut self.new_link_label);
-        if ui.button("Add interaction").clicked() {
-            self.create_link();
         }
 
+        if show_interactions_tab {
+            ui.separator();
+            ui.heading("Interactions");
+            ui.small("Create new links, transfer links, or edit existing links.");
+
+        if self.map_interaction_drag_from == Some(system.id) {
+            if let Some(reference_name) = self.map_interaction_drag_from_reference.as_deref() {
+                ui.small(format!(
+                    "Map source selected: {}:{} (click target card or row)",
+                    self.system_name_by_id(system.id),
+                    reference_name
+                ));
+            } else {
+                ui.small(format!(
+                    "Map source selected: {} (click target card or row)",
+                    self.system_name_by_id(system.id)
+                ));
+            }
+        }
+
+        ui.label("Create interaction");
+                let selected_target_label = self
+                    .new_link_target_id
+                    .map(|id| self.system_dropdown_label(id))
+                    .unwrap_or_else(|| "Select target system".to_owned());
+                let selected_target_label = Self::clamp_text_to_width_with_limit(
+                    &selected_target_label,
+                    ((ui.available_width().max(80.0) / 7.0).floor() as usize)
+                        .clamp(12, DETAILS_LABEL_CHAR_LIMIT),
+                );
+
+                egui::ComboBox::from_label("Target")
+                    .selected_text(selected_target_label)
+                    .show_ui(ui, |ui| {
+                        for (candidate_id, _) in self.zone_filtered_system_candidates(Some(system.id)) {
+                            let option_label = self.system_dropdown_label(candidate_id);
+                            ui.selectable_value(
+                                &mut self.new_link_target_id,
+                                Some(candidate_id),
+                                option_label,
+                            );
+                        }
+                    });
+
+                ui.text_edit_singleline(&mut self.new_link_label);
+                if ui.button("Add interaction").clicked() {
+                    self.create_link();
+                }
         ui.separator();
+
         ui.label("Transfer interactions");
-        let transfer_target_label = self
-            .selected_interaction_transfer_target_id
-            .map(|id| self.system_dropdown_label(id))
-            .unwrap_or_else(|| "Select destination system".to_owned());
-        let transfer_target_label = Self::clamp_text_to_width_with_limit(
-            &transfer_target_label,
-            ((ui.available_width().max(80.0) / 7.0).floor() as usize)
-                .clamp(12, DETAILS_LABEL_CHAR_LIMIT),
-        );
+                let transfer_target_label = self
+                    .selected_interaction_transfer_target_id
+                    .map(|id| self.system_dropdown_label(id))
+                    .unwrap_or_else(|| "Select destination system".to_owned());
+                let transfer_target_label = Self::clamp_text_to_width_with_limit(
+                    &transfer_target_label,
+                    ((ui.available_width().max(80.0) / 7.0).floor() as usize)
+                        .clamp(12, DETAILS_LABEL_CHAR_LIMIT),
+                );
 
-        egui::ComboBox::from_label("Transfer to")
-            .selected_text(transfer_target_label)
-            .show_ui(ui, |ui| {
-                for (candidate_id, _) in self.zone_filtered_system_candidates(Some(system.id)) {
-                    let option_label = self.system_dropdown_label(candidate_id);
-                    ui.selectable_value(
-                        &mut self.selected_interaction_transfer_target_id,
-                        Some(candidate_id),
-                        option_label,
-                    );
-                }
-            });
+                egui::ComboBox::from_label("Transfer to")
+                    .selected_text(transfer_target_label)
+                    .show_ui(ui, |ui| {
+                        for (candidate_id, _) in self.zone_filtered_system_candidates(Some(system.id)) {
+                            let option_label = self.system_dropdown_label(candidate_id);
+                            ui.selectable_value(
+                                &mut self.selected_interaction_transfer_target_id,
+                                Some(candidate_id),
+                                option_label,
+                            );
+                        }
+                    });
 
-        let transfer_pick_active = self.interaction_transfer_pick_source_id == Some(system.id);
-        ui.group(|ui| {
-            if ui
-                .button(if transfer_pick_active {
-                    "Cancel map target pick"
-                } else {
-                    "Select target on map"
-                })
-                .clicked()
-            {
-                if transfer_pick_active {
-                    self.interaction_transfer_pick_source_id = None;
-                    self.status_message = "Transfer target pick canceled".to_owned();
-                } else {
-                    self.interaction_transfer_pick_source_id = Some(system.id);
-                    self.selected_interaction_transfer_target_id = None;
-                    self.status_message =
-                        "Click a destination system on the map for transfer".to_owned();
-                }
-            }
+                let transfer_pick_active = self.interaction_transfer_pick_source_id == Some(system.id);
+                ui.group(|ui| {
+                    if ui
+                        .button(if transfer_pick_active {
+                            "Cancel map target pick"
+                        } else {
+                            "Select target on map"
+                        })
+                        .clicked()
+                    {
+                        if transfer_pick_active {
+                            self.interaction_transfer_pick_source_id = None;
+                            self.status_message = "Transfer target pick canceled".to_owned();
+                        } else {
+                            self.interaction_transfer_pick_source_id = Some(system.id);
+                            self.selected_interaction_transfer_target_id = None;
+                            self.status_message =
+                                "Click a destination system on the map for transfer".to_owned();
+                        }
+                    }
 
-            if ui.button("Transfer interactions").clicked() {
-                self.transfer_selected_system_interactions();
-            }
+                    if ui.button("Transfer interactions").clicked() {
+                        self.transfer_selected_system_interactions();
+                    }
 
-            if transfer_pick_active {
-                ui.label("Picking transfer target: click a destination card on the map.");
-            }
-        });
+                    if transfer_pick_active {
+                        ui.label("Picking transfer target: click a destination card on the map.");
+                    }
+                });
+
         ui.separator();
 
-        if self.selected_links.is_empty() {
-            ui.label("No interactions recorded.");
-        } else {
+            ui.label(format!("Manage existing ({})", self.selected_links.len()));
+            if self.selected_links.is_empty() {
+                ui.label("No interactions recorded.");
+            } else {
+
             let selected_link_label = self
                 .selected_link_id_for_edit
                 .and_then(|link_id| {
@@ -3056,18 +3440,25 @@ impl SystemsCatalogApp {
 
             if let Some(link_id) = self.selected_link_id_for_edit {
                 if let Some(link) = self.selected_links.iter().find(|link| link.id == link_id) {
-                    let source_columns = self.database_column_names_for_system(link.source_system_id);
-                    let target_columns = self.database_column_names_for_system(link.target_system_id);
+                    let source_columns =
+                        self.endpoint_reference_names_for_system(link.source_system_id);
+                    let target_columns =
+                        self.endpoint_reference_names_for_system(link.target_system_id);
 
                     if !source_columns.is_empty() || !target_columns.is_empty() {
                         ui.separator();
-                        ui.label("Column-level mapping (FK style)");
+                        ui.label(self.mapping_section_title_for_link(link));
+
+                        let source_term = self.reference_term_for_system(link.source_system_id);
+                        let target_term = self.reference_term_for_system(link.target_system_id);
+                        let source_label_text = format!("Source {}", source_term);
+                        let target_label_text = format!("Target {}", target_term);
 
                         let source_label = self
                             .edited_link_source_column_name
                             .clone()
                             .unwrap_or_else(|| "(none)".to_owned());
-                        egui::ComboBox::from_label("Source column")
+                        egui::ComboBox::from_label(source_label_text)
                             .selected_text(source_label)
                             .show_ui(ui, |ui| {
                                 ui.selectable_value(
@@ -3088,7 +3479,7 @@ impl SystemsCatalogApp {
                             .edited_link_target_column_name
                             .clone()
                             .unwrap_or_else(|| "(none)".to_owned());
-                        egui::ComboBox::from_label("Target column")
+                        egui::ComboBox::from_label(target_label_text)
                             .selected_text(target_label)
                             .show_ui(ui, |ui| {
                                 ui.selectable_value(
@@ -3116,127 +3507,190 @@ impl SystemsCatalogApp {
                     self.delete_selected_link();
                 }
             });
+            }
         }
 
-        ui.separator();
-        ui.label("System tech stack");
+        if show_structure_tab {
+            ui.separator();
+            ui.label("Technology");
+                ui.label("System tech stack");
 
-        let selected_tech_label = self
-            .selected_tech_id_for_assignment
-            .map(|id| self.tech_name_by_id(id))
-            .unwrap_or_else(|| "Select technology".to_owned());
+                let selected_tech_label = self
+                    .selected_tech_id_for_assignment
+                    .map(|id| self.tech_name_by_id(id))
+                    .unwrap_or_else(|| "Select technology".to_owned());
 
-        let previous_tech_id = self.selected_tech_id_for_assignment;
-        egui::ComboBox::from_label("Technology")
-            .selected_text(selected_tech_label)
-            .show_ui(ui, |ui| {
-                for tech in &self.tech_catalog {
-                    ui.selectable_value(
-                        &mut self.selected_tech_id_for_assignment,
-                        Some(tech.id),
-                        tech.name.as_str(),
-                    );
+                let previous_tech_id = self.selected_tech_id_for_assignment;
+                egui::ComboBox::from_label("Technology")
+                    .selected_text(selected_tech_label)
+                    .show_ui(ui, |ui| {
+                        for tech in &self.tech_catalog {
+                            ui.selectable_value(
+                                &mut self.selected_tech_id_for_assignment,
+                                Some(tech.id),
+                                tech.name.as_str(),
+                            );
+                        }
+                    });
+
+                if self.selected_tech_id_for_assignment != previous_tech_id
+                    && self.selected_tech_id_for_assignment.is_some()
+                {
+                    self.add_selected_tech_to_system();
+                }
+
+                if self.selected_system_tech.is_empty() {
+                    ui.label("No technologies assigned to this system.");
+                } else {
+                    let selected_system_tech = self.selected_system_tech.clone();
+                    ui.vertical(|ui| {
+                        for tech in selected_system_tech {
+                            ui.group(|ui| {
+                                ui.horizontal(|ui| {
+                                    if let Some(link) = tech
+                                        .documentation_link
+                                        .as_deref()
+                                        .map(str::trim)
+                                        .filter(|value| !value.is_empty())
+                                    {
+                                        ui.hyperlink_to(tech.name.as_str(), link);
+                                    } else {
+                                        ui.label(tech.name.to_string());
+                                    }
+
+                                    if ui.small_button("Remove").clicked() {
+                                        self.remove_tech_from_selected_system(tech.id);
+                                    }
+                                });
+                            });
+                        }
+                    });
+                }
+
+                ui.separator();
+                ui.label("Cumulative child tech stack");
+                if self.selected_cumulative_child_tech.is_empty() {
+                    ui.label("No child-system technologies found.");
+                } else {
+                    ui.vertical(|ui| {
+                        for tech_name in &self.selected_cumulative_child_tech {
+                            ui.label(format!("• {tech_name}"));
+                        }
+                    });
+                }
+        }
+
+        if show_notes_tab {
+            ui.separator();
+            ui.heading("Notes");
+            let editing_note_active = self.selected_note_id_for_edit.is_some();
+
+            ui.label("New note");
+            if editing_note_active {
+                ui.small("Finish or cancel the current edit before adding a new note.");
+            }
+            ui.add_enabled_ui(!editing_note_active, |ui| {
+                ui.add(egui::TextEdit::multiline(&mut self.note_text).desired_rows(4));
+                if ui.button("Add note").clicked() {
+                    self.create_note_for_selected_system();
                 }
             });
 
-        if self.selected_tech_id_for_assignment != previous_tech_id
-            && self.selected_tech_id_for_assignment.is_some()
-        {
-            self.add_selected_tech_to_system();
-        }
+            ui.separator();
 
-        if self.selected_system_tech.is_empty() {
-            ui.label("No technologies assigned to this system.");
-        } else {
-            let selected_system_tech = self.selected_system_tech.clone();
-            ui.vertical(|ui| {
-                for tech in selected_system_tech {
+            if self.selected_notes.is_empty() {
+                ui.label("No notes recorded.");
+            } else {
+                let notes_snapshot = self.selected_notes.clone();
+                for note in notes_snapshot {
+                    let is_editing = self.selected_note_id_for_edit == Some(note.id);
                     ui.group(|ui| {
                         ui.horizontal(|ui| {
-                            if let Some(link) = tech
-                                .documentation_link
-                                .as_deref()
-                                .map(str::trim)
-                                .filter(|value| !value.is_empty())
-                            {
-                                ui.hyperlink_to(tech.name.as_str(), link);
-                            } else {
-                                ui.label(tech.name.to_string());
-                            }
+                            ui.label(format!("#{} [{}]", note.id, note.updated_at));
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if is_editing {
+                                    if ui
+                                        .small_button(egui_material_icons::icons::ICON_CLOSE)
+                                        .clicked()
+                                    {
+                                        self.selected_note_id_for_edit = None;
+                                        self.note_text.clear();
+                                        self.status_message = "Note edit canceled".to_owned();
+                                    }
+                                    if ui
+                                        .small_button(egui_material_icons::icons::ICON_CHECK)
+                                        .clicked()
+                                    {
+                                        self.save_note();
+                                        if !self.status_message.starts_with("Failed") {
+                                            self.selected_note_id_for_edit = None;
+                                            self.note_text.clear();
+                                        }
+                                    }
+                                } else {
+                                    if ui
+                                        .small_button(egui_material_icons::icons::ICON_DELETE)
+                                        .clicked()
+                                    {
+                                        self.pending_note_delete_id = Some(note.id);
+                                    }
+                                    if ui
+                                        .small_button(egui_material_icons::icons::ICON_EDIT)
+                                        .clicked()
+                                    {
+                                        self.select_note_for_edit(note.id);
+                                    }
+                                }
+                            });
+                        });
 
-                            if ui.small_button("Remove").clicked() {
-                                self.remove_tech_from_selected_system(tech.id);
+                        if is_editing {
+                            ui.add(egui::TextEdit::multiline(&mut self.note_text).desired_rows(6));
+                        } else {
+                            let body = note.body.trim();
+                            if body.is_empty() {
+                                ui.small("(empty note)");
+                            } else {
+                                ui.label(body);
+                            }
+                        }
+                    });
+                }
+            }
+
+            if let Some(note_id) = self.pending_note_delete_id {
+                let mut open = true;
+                let mut confirm_delete = false;
+                let mut cancel_delete = false;
+
+                egui::Window::new("Delete note?")
+                    .collapsible(false)
+                    .resizable(false)
+                    .open(&mut open)
+                    .show(ui.ctx(), |ui| {
+                        ui.label("Are you sure you want to delete this note?");
+                        ui.horizontal(|ui| {
+                            if ui.button("Delete").clicked() {
+                                confirm_delete = true;
+                            }
+                            if ui.button("Cancel").clicked() {
+                                cancel_delete = true;
                             }
                         });
                     });
+
+                if confirm_delete {
+                    self.selected_note_id_for_edit = Some(note_id);
+                    self.delete_selected_note();
+                    self.selected_note_id_for_edit = None;
+                    self.note_text.clear();
+                    self.pending_note_delete_id = None;
+                } else if cancel_delete || !open {
+                    self.pending_note_delete_id = None;
                 }
-            });
+            }
         }
-
-        ui.separator();
-        ui.label("Cumulative child tech stack");
-        if self.selected_cumulative_child_tech.is_empty() {
-            ui.label("No child-system technologies found.");
-        } else {
-            ui.vertical(|ui| {
-                for tech_name in &self.selected_cumulative_child_tech {
-                    ui.label(format!("• {tech_name}"));
-                }
             });
-        }
-
-        ui.separator();
-        ui.label("Notes");
-        let selected_note_label = self
-            .selected_note_id_for_edit
-            .and_then(|id| {
-                self.selected_notes
-                    .iter()
-                    .find(|note| note.id == id)
-                    .map(|note| {
-                        let snippet = note.body.trim();
-                        let title = if snippet.is_empty() {
-                            "(empty note)".to_owned()
-                        } else {
-                            snippet.chars().take(28).collect::<String>()
-                        };
-                        format!("#{} {} [{}]", note.id, title, note.updated_at)
-                    })
-            })
-            .unwrap_or_else(|| "New note".to_owned());
-
-        egui::ComboBox::from_label("Select note")
-            .selected_text(selected_note_label)
-            .show_ui(ui, |ui| {
-                let notes_snapshot = self.selected_notes.clone();
-                for note in notes_snapshot {
-                    let snippet = note.body.trim();
-                    let title = if snippet.is_empty() {
-                        "(empty note)".to_owned()
-                    } else {
-                        snippet.chars().take(28).collect::<String>()
-                    };
-
-                    let label = format!("#{} {}", note.id, title);
-                    let was_selected = self.selected_note_id_for_edit == Some(note.id);
-                    if ui.selectable_label(was_selected, label).clicked() {
-                        self.select_note_for_edit(note.id);
-                    }
-                }
-            });
-
-        ui.add(egui::TextEdit::multiline(&mut self.note_text).desired_rows(8));
-        ui.horizontal(|ui| {
-            if ui.button("New note").clicked() {
-                self.create_note_for_selected_system();
-            }
-            if ui.button("Save note").clicked() {
-                self.save_note();
-            }
-            if ui.button("Delete note").clicked() {
-                self.delete_selected_note();
-            }
-        });
     }
 
     fn process_flow_inspector_pick_from_selection(&mut self) {
@@ -3513,6 +3967,7 @@ impl SystemsCatalogApp {
             || self.show_save_catalog_modal
             || self.show_load_catalog_modal
             || self.show_new_catalog_confirm_modal
+            || self.show_step_processor_conversion_confirm_modal
             || self.show_ddl_table_mapping_modal
             || self.show_help_getting_started_modal
             || self.show_help_creating_interactions_modal
@@ -3948,6 +4403,7 @@ impl SystemsCatalogApp {
         };
 
         let mut node_rects: HashMap<i64, Rect> = HashMap::new();
+        let mut card_row_hitboxes: Vec<(i64, String, Rect)> = Vec::new();
         for system in &visible_systems {
             // This is where rendering the system cards happens.
             if let Some(local_position) = self.effective_map_position(system.id) {
@@ -4535,6 +4991,24 @@ impl SystemsCatalogApp {
 
                 let ctrl_held = ui.input(|input| input.modifiers.ctrl);
                 let alt_held = ui.input(|input| input.modifiers.alt);
+                let clicked_reference = ui
+                    .input(|input| input.pointer.interact_pos())
+                    .and_then(|pointer_pos| {
+                        card_row_hitboxes
+                            .iter()
+                            .rev()
+                            .find(|(system_id, _, rect)| {
+                                *system_id == system.id && rect.contains(pointer_pos)
+                            })
+                            .map(|(_, reference_name, _)| reference_name.clone())
+                            .or_else(|| {
+                                self.row_reference_at_pointer_for_system(
+                                    &system,
+                                    node_rect,
+                                    pointer_pos,
+                                )
+                            })
+                    });
                 let interaction_chord_kind = ui.input(|input| {
                     if input.modifiers.ctrl && input.key_down(egui::Key::R) {
                         Some(InteractionKind::Standard)
@@ -4554,20 +5028,41 @@ impl SystemsCatalogApp {
                         self.status_message = "Select a different target system".to_owned();
                     } else {
                         let interaction_kind = self.map_interaction_drag_kind;
+                        let source_reference = self.map_interaction_drag_from_reference.clone();
                         self.map_interaction_drag_from = None;
-                        self.create_link_between_kind(source_id, system.id, "", interaction_kind);
+                        self.map_interaction_drag_from_reference = None;
+                        self.create_link_between_kind_with_references(
+                            source_id,
+                            system.id,
+                            "",
+                            interaction_kind,
+                            source_reference.as_deref(),
+                            clicked_reference.as_deref(),
+                        );
                     }
                 } else if let Some(kind) = interaction_chord_kind {
                     self.map_interaction_drag_from = Some(system.id);
+                    self.map_interaction_drag_from_reference = clicked_reference.clone();
                     self.map_interaction_drag_kind = kind;
                     self.select_system(system.id);
                     self.selected_map_system_ids.clear();
                     self.selected_map_system_ids.insert(system.id);
-                    self.status_message = format!(
-                        "Interaction source '{}' selected ({}) — click target",
-                        self.system_name_by_id(system.id),
-                        Self::interaction_kind_label(kind)
-                    );
+                    self.status_message = if let Some(reference_name) = clicked_reference {
+                        format!(
+                            "Interaction source '{}:{}' selected ({}) — click target",
+                            self.system_name_by_id(system.id),
+                            reference_name,
+                            Self::interaction_kind_label(kind)
+                        )
+                    } else {
+                        format!(
+                            "Interaction source '{}' selected ({}) — click target",
+                            self.system_name_by_id(system.id),
+                            Self::interaction_kind_label(kind)
+                        )
+                    };
+                } else if let Some(reference_name) = clicked_reference {
+                    self.select_step_reference_endpoint_from_map(system.id, reference_name.as_str());
                 } else if let Some(source_id) = self.map_link_click_source {
                     if source_id != system.id {
                         self.create_link_between(source_id, system.id, "");
@@ -4780,19 +5275,60 @@ impl SystemsCatalogApp {
             let font_size =
                 ((15.0 * self.map_zoom).clamp(8.0, 22.0) * text_scale_multiplier).clamp(6.0, 22.0);
 
-            let database_columns = self
-                .database_columns_by_system
-                .get(&system.id);
-            let has_database_columns = database_columns
-                .map(|cols| !cols.is_empty())
-                .unwrap_or(false);
+            let entity_key = self.system_entity_for(&system).entity_key();
+            let supports_row_references = self
+                .entity_supports_row_references_for_type(system.system_type.as_str());
+            let database_columns = self.database_columns_by_system.get(&system.id);
+
+            let endpoint_rows = if supports_row_references {
+                database_columns
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .enumerate()
+                    .filter_map(|(index, row)| {
+                        let reference_name = row.column_name.trim().to_owned();
+                        if reference_name.is_empty() {
+                            return None;
+                        }
+
+                        if entity_key == "step_processor" {
+                            Some((
+                                reference_name.clone(),
+                                format!("{} ) {}", index + 1, reference_name),
+                                None,
+                                None,
+                            ))
+                        } else {
+                            let right = row.column_type.trim();
+                            let secondary = row
+                                .constraints
+                                .as_deref()
+                                .map(str::trim)
+                                .filter(|value| !value.is_empty())
+                                .map(ToOwned::to_owned);
+
+                            Some((
+                                reference_name.clone(),
+                                reference_name,
+                                Some(right.to_owned()),
+                                secondary,
+                            ))
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
+
+            let has_endpoint_rows = !endpoint_rows.is_empty();
             let icon_only_zoom = self.map_zoom <= 0.20;
             let compact_database_zoom = self.map_zoom <= 0.30;
             let hide_service_content_zoom = self.map_zoom <= 0.10;
-            let is_service_type = !matches!(system.system_type.as_str(), "route" | "api" | "database");
-            let is_database_type = system.system_type == "database";
+            let is_api_type = entity_key == "api";
+            let is_service_like_type = !is_api_type;
 
-            if hide_service_content_zoom && (is_service_type || is_database_type) {
+            if hide_service_content_zoom && is_service_like_type {
                 let font_id = FontId::proportional(font_size);
                 let text_wrap_width =
                     (node_rect.width() - (MAP_CARD_HORIZONTAL_PADDING * self.map_zoom)).max(24.0);
@@ -4811,7 +5347,7 @@ impl SystemsCatalogApp {
                     wrapped_text,
                     text_color,
                 );
-            } else if (is_service_type || (is_database_type && !has_database_columns)) && compact_database_zoom {
+            } else if (is_service_like_type && !has_endpoint_rows) && compact_database_zoom {
                 let font_id = FontId::proportional(font_size);
                 let text_wrap_width =
                     (node_rect.width() - (MAP_CARD_HORIZONTAL_PADDING * self.map_zoom)).max(24.0);
@@ -4834,7 +5370,7 @@ impl SystemsCatalogApp {
                     wrapped_text,
                     text_color,
                 );
-            } else if system.system_type == "database" && has_database_columns && compact_database_zoom {
+            } else if supports_row_references && has_endpoint_rows && compact_database_zoom {
                 let font_id = FontId::proportional(font_size);
                 let text_wrap_width =
                     (node_rect.width() - (MAP_CARD_HORIZONTAL_PADDING * self.map_zoom)).max(24.0);
@@ -4859,7 +5395,7 @@ impl SystemsCatalogApp {
                 );
             } else if icon_only_zoom {
                 let icon = Self::map_card_icon_for_system_type(system.system_type.as_str());
-                let icon_font_size = if is_service_type {
+                let icon_font_size = if is_service_like_type {
                     (16.0 * self.map_zoom).clamp(6.0, 11.0)
                 } else {
                     (22.0 * self.map_zoom).clamp(8.0, 16.0)
@@ -4871,8 +5407,7 @@ impl SystemsCatalogApp {
                     FontId::proportional(icon_font_size),
                     text_color,
                 );
-            } else if system.system_type == "database" && has_database_columns {
-                let database_columns = database_columns.unwrap();
+            } else if supports_row_references && has_endpoint_rows {
                 let header_font = FontId::proportional(font_size);
                 let row_font = FontId::monospace((font_size * 0.86).clamp(6.0, 18.0));
                 let constraints_font = FontId::proportional((font_size * 0.68).clamp(6.0, 14.0));
@@ -4906,46 +5441,83 @@ impl SystemsCatalogApp {
                 );
 
                 let mut row_y = separator_y + 4.0;
-                for column in database_columns {
+                for (reference_name, left_text, right_text, secondary_text) in endpoint_rows {
                     if row_y + row_height > node_rect.bottom() - 2.0 {
                         break;
                     }
 
                     let row_center_y = row_y + (row_height * 0.5);
+                    let row_rect = Rect::from_min_max(
+                        Pos2::new(node_rect.left() + 4.0, row_y),
+                        Pos2::new(node_rect.right() - 4.0, row_y + row_height),
+                    );
+                    let row_is_selected_interaction_source = self.map_interaction_drag_from
+                        == Some(system.id)
+                        && self
+                            .map_interaction_drag_from_reference
+                            .as_deref()
+                            == Some(reference_name.as_str());
+                    let row_is_hovered = ui
+                        .input(|input| input.pointer.hover_pos())
+                        .map(|pointer_pos| row_rect.contains(pointer_pos))
+                        .unwrap_or(false);
 
-                    let column_name = column.column_name.trim();
-                    let column_type = column.column_type.trim();
+                    if row_is_hovered && !row_is_selected_interaction_source {
+                        painter.rect_filled(
+                            row_rect,
+                            3.0,
+                            Color32::from_rgba_unmultiplied(130, 130, 130, 32),
+                        );
+                    }
+
+                    if row_is_selected_interaction_source {
+                        painter.rect_filled(
+                            row_rect,
+                            3.0,
+                            Color32::from_rgba_unmultiplied(114, 194, 255, 56),
+                        );
+                        painter.rect_stroke(
+                            row_rect,
+                            3.0,
+                            Stroke::new(1.0, Color32::from_rgb(130, 210, 255)),
+                        );
+                    }
 
                     painter.text(
                         Pos2::new(node_rect.left() + left_padding, row_center_y),
                         egui::Align2::LEFT_CENTER,
-                        column_name,
+                        left_text,
                         row_font.clone(),
                         text_color,
                     );
 
-                    painter.text(
-                        Pos2::new(node_rect.right() - right_padding, row_center_y),
-                        egui::Align2::RIGHT_CENTER,
-                        column_type,
-                        row_font.clone(),
-                        text_color,
-                    );
+                    if let Some(value) = right_text {
+                        painter.text(
+                            Pos2::new(node_rect.right() - right_padding, row_center_y),
+                            egui::Align2::RIGHT_CENTER,
+                            value,
+                            row_font.clone(),
+                            text_color,
+                        );
+                    }
 
                     if !compact_database_zoom {
-                        if let Some(constraints) = column.constraints.as_deref() {
-                            let trimmed = constraints.trim();
-                            if !trimmed.is_empty() {
-                                painter.text(
-                                    Pos2::new(node_rect.center().x, row_y + row_height - row_vertical_padding),
-                                    egui::Align2::CENTER_BOTTOM,
-                                    trimmed,
-                                    constraints_font.clone(),
-                                    Color32::from_gray(176),
-                                );
-                            }
+                        if let Some(secondary) = secondary_text {
+                            painter.text(
+                                Pos2::new(node_rect.center().x, row_y + row_height - row_vertical_padding),
+                                egui::Align2::CENTER_BOTTOM,
+                                secondary,
+                                constraints_font.clone(),
+                                Color32::from_gray(176),
+                            );
                         }
                     }
+
+                    card_row_hitboxes.push((
+                        system.id,
+                        reference_name,
+                        row_rect.intersect(node_rect),
+                    ));
 
                     let line_y = row_y + row_height - 2.0;
                     painter.line_segment(
@@ -5324,8 +5896,10 @@ impl eframe::App for SystemsCatalogApp {
                 .default_width(180.0)
                 .max_width(560.0)
                 .show(ctx, |ui| {
-                    ui.set_width(ui.available_width());
-                    self.render_sidebar(ui);
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        self.render_sidebar(ui);
+                    });
                 });
         }
 
@@ -5369,6 +5943,7 @@ impl eframe::App for SystemsCatalogApp {
         self.render_save_catalog_modal(ctx);
         self.render_load_catalog_modal(ctx);
         self.render_new_catalog_confirm_modal(ctx);
+        self.render_step_processor_conversion_confirm_modal(ctx);
         self.render_llm_detailed_import_modal(ctx);
         self.render_ddl_table_mapping_modal(ctx);
         self.render_hotkeys_modal(ctx);

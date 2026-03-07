@@ -13,6 +13,314 @@ use crate::project_store::{
 };
 
 impl SystemsCatalogApp {
+    fn non_internal_child_step_names(&self, owner_system_id: i64) -> Vec<String> {
+        let mut children = self
+            .systems
+            .iter()
+            .filter(|candidate| {
+                candidate.parent_id == Some(owner_system_id) && !Self::is_internal_step_system(candidate)
+            })
+            .collect::<Vec<_>>();
+
+        // Keep conversion order deterministic and user-meaningful: map layout top-to-bottom,
+        // then left-to-right when positions exist, otherwise fallback to stable id ordering.
+        children.sort_by(|left, right| {
+            match (left.map_y, right.map_y, left.map_x, right.map_x) {
+                (Some(ly), Some(ry), Some(lx), Some(rx)) => ly
+                    .partial_cmp(&ry)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| lx.partial_cmp(&rx).unwrap_or(std::cmp::Ordering::Equal))
+                    .then_with(|| left.id.cmp(&right.id)),
+                _ => left.id.cmp(&right.id),
+            }
+        });
+
+        let mut seen = HashSet::new();
+        let mut names = Vec::new();
+        for candidate in children {
+            let primary = candidate.name.trim();
+            let name = if primary.is_empty() {
+                candidate.description.trim().to_owned()
+            } else {
+                primary.to_owned()
+            };
+            if name.is_empty() {
+                continue;
+            }
+
+            let normalized = name.to_ascii_lowercase();
+            if seen.insert(normalized) {
+                names.push(name);
+            }
+        }
+
+        names
+    }
+
+    fn merge_step_names_into_columns(
+        mut columns: Vec<DatabaseColumnInput>,
+        additional_steps: &[String],
+    ) -> Vec<DatabaseColumnInput> {
+        let mut existing = columns
+            .iter()
+            .map(|column| column.column_name.trim().to_ascii_lowercase())
+            .filter(|value| !value.is_empty())
+            .collect::<HashSet<_>>();
+
+        for step_name in additional_steps {
+            let normalized = step_name.trim();
+            if normalized.is_empty() {
+                continue;
+            }
+
+            let normalized_key = normalized.to_ascii_lowercase();
+            if existing.contains(&normalized_key) {
+                continue;
+            }
+
+            columns.push(DatabaseColumnInput {
+                position: columns.len() as i64,
+                column_name: normalized.to_owned(),
+                column_type: "step".to_owned(),
+                constraints: None,
+            });
+            existing.insert(normalized_key);
+        }
+
+        for (index, column) in columns.iter_mut().enumerate() {
+            column.position = index as i64;
+            if column.column_type.trim().is_empty() {
+                column.column_type = "step".to_owned();
+            }
+            column.constraints = None;
+        }
+
+        columns
+    }
+
+    fn database_column_records_to_inputs(
+        columns: Vec<crate::models::DatabaseColumnRecord>,
+    ) -> Vec<DatabaseColumnInput> {
+        columns
+            .into_iter()
+            .enumerate()
+            .map(|(index, column)| DatabaseColumnInput {
+                position: index as i64,
+                column_name: column.column_name,
+                column_type: column.column_type,
+                constraints: column.constraints,
+            })
+            .collect()
+    }
+
+    fn convert_direct_children_to_internal_step_endpoints(
+        &mut self,
+        owner_system_id: i64,
+    ) -> anyhow::Result<Vec<String>> {
+        let mut migrated_children = self
+            .systems
+            .iter()
+            .filter(|candidate| {
+                candidate.parent_id == Some(owner_system_id) && !Self::is_internal_step_system(candidate)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        migrated_children.sort_by_key(|child| child.id);
+
+        if migrated_children.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut step_names = Vec::with_capacity(migrated_children.len());
+
+        for child in migrated_children {
+            let child_step_name = {
+                let from_name = child.name.trim();
+                if from_name.is_empty() {
+                    child.description.trim().to_owned()
+                } else {
+                    from_name.to_owned()
+                }
+            };
+
+            if child_step_name.is_empty() {
+                continue;
+            }
+
+            self.repo.update_system_details(
+                child.id,
+                child.name.as_str(),
+                child_step_name.as_str(),
+                child.naming_root,
+                child.naming_delimiter.as_str(),
+                "step_internal",
+                None,
+            )?;
+            self.repo.replace_database_columns_for_system(child.id, &[])?;
+            self.mark_system_as_dirty(child.id);
+            step_names.push(child_step_name);
+        }
+
+        if !step_names.is_empty() {
+            self.refresh_systems()?;
+            self.mark_system_as_dirty(owner_system_id);
+        }
+
+        let mut seen = HashSet::new();
+        step_names.retain(|name| seen.insert(name.to_ascii_lowercase()));
+        Ok(step_names)
+    }
+
+    fn sanitize_step_slug(step_name: &str) -> String {
+        let mut slug = step_name
+            .trim()
+            .to_ascii_lowercase()
+            .chars()
+            .map(|character| if character.is_ascii_alphanumeric() { character } else { '_' })
+            .collect::<String>();
+        while slug.contains("__") {
+            slug = slug.replace("__", "_");
+        }
+        slug.trim_matches('_').to_owned()
+    }
+
+    fn next_available_internal_step_system_name(&self, owner_system_id: i64, step_name: &str) -> String {
+        let slug = Self::sanitize_step_slug(step_name);
+        let base = if slug.is_empty() {
+            format!("__step__{owner_system_id}")
+        } else {
+            format!("__step__{owner_system_id}__{slug}")
+        };
+
+        let mut candidate = base.clone();
+        let mut suffix = 2usize;
+        while self
+            .systems
+            .iter()
+            .any(|system| system.name.eq_ignore_ascii_case(candidate.as_str()))
+        {
+            candidate = format!("{base}__{suffix}");
+            suffix += 1;
+        }
+        candidate
+    }
+
+    fn ensure_internal_step_endpoint_system(
+        &mut self,
+        owner_system_id: i64,
+        step_name: &str,
+    ) -> anyhow::Result<i64> {
+        let normalized_step = step_name.trim();
+        if normalized_step.is_empty() {
+            return Ok(owner_system_id);
+        }
+
+        if let Some(existing) = self
+            .internal_step_children_for_system(owner_system_id)
+            .into_iter()
+            .find(|child| child.description.trim() == normalized_step)
+        {
+            return Ok(existing.id);
+        }
+
+        let internal_name = self.next_available_internal_step_system_name(owner_system_id, normalized_step);
+        let new_id = self.repo.create_system(
+            internal_name.as_str(),
+            normalized_step,
+            Some(owner_system_id),
+            "step_internal",
+            None,
+        )?;
+        self.mark_system_as_dirty(owner_system_id);
+        self.refresh_systems()?;
+        Ok(new_id)
+    }
+
+    fn sync_step_internal_systems_for_owner(
+        &mut self,
+        owner_system_id: i64,
+        owner_entity_key: &str,
+        desired_steps: &[String],
+    ) -> anyhow::Result<()> {
+        let existing_children = self
+            .internal_step_children_for_system(owner_system_id)
+            .into_iter()
+            .map(|child| (child.id, child.description.trim().to_owned()))
+            .collect::<Vec<_>>();
+
+        if owner_entity_key != "step_processor" {
+            for (child_id, _) in &existing_children {
+                self.repo.delete_system(*child_id)?;
+            }
+            if !existing_children.is_empty() {
+                self.mark_system_as_dirty(owner_system_id);
+            }
+            return Ok(());
+        }
+
+        let desired = desired_steps
+            .iter()
+            .map(|step| step.trim())
+            .filter(|step| !step.is_empty())
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+
+        for step_name in &desired {
+            let _ = self.ensure_internal_step_endpoint_system(owner_system_id, step_name)?;
+        }
+
+        let desired_set = desired
+            .iter()
+            .map(|step| step.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        for (child_id, existing_step_name) in existing_children {
+            if !desired_set.contains(existing_step_name.as_str()) {
+                self.repo.delete_system(child_id)?;
+                self.mark_system_as_dirty(owner_system_id);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn resolve_interaction_endpoint_system_id(
+        &mut self,
+        system_id: i64,
+        endpoint_reference: Option<&str>,
+    ) -> anyhow::Result<i64> {
+        let Some(reference) = endpoint_reference.map(str::trim).filter(|value| !value.is_empty()) else {
+            return Ok(system_id);
+        };
+
+        let Some(system) = self.systems.iter().find(|candidate| candidate.id == system_id) else {
+            return Ok(system_id);
+        };
+
+        if self.system_entity_for(system).entity_key() != "step_processor" {
+            return Ok(system_id);
+        }
+
+        self.ensure_internal_step_endpoint_system(system_id, reference)
+    }
+
+    fn step_reference_for_internal_endpoint_system(&self, system_id: i64) -> Option<String> {
+        self.systems
+            .iter()
+            .find(|candidate| candidate.id == system_id)
+            .and_then(|system| {
+                if !Self::is_internal_step_system(system) {
+                    return None;
+                }
+
+                let reference = system.description.trim();
+                if reference.is_empty() {
+                    None
+                } else {
+                    Some(reference.to_owned())
+                }
+            })
+    }
+
     fn spawn_position_for_new_system(
         &self,
         parent_id: Option<i64>,
@@ -64,6 +372,16 @@ impl SystemsCatalogApp {
 
     pub(super) fn bulk_convert_selected_system_types(&mut self, target_type: &str) {
         let normalized_target = Self::normalize_system_type(target_type);
+        let use_pending_choice = self
+            .pending_step_processor_conversion_target_type
+            .as_deref()
+            .map(|pending| pending.eq_ignore_ascii_case(normalized_target.as_str()))
+            .unwrap_or(false);
+        let keep_steps_as_systems = if use_pending_choice {
+            self.pending_step_processor_conversion_keep_steps_as_systems
+        } else {
+            false
+        };
 
         let mut target_ids = self.selected_map_system_ids.clone();
         if let Some(selected_id) = self.selected_system_id {
@@ -73,6 +391,22 @@ impl SystemsCatalogApp {
         if target_ids.is_empty() {
             self.status_message = "Select one or more systems first".to_owned();
             return;
+        }
+
+        if normalized_target == "step_processor" && !use_pending_choice {
+            let requires_confirmation = target_ids
+                .iter()
+                .any(|system_id| !self.non_internal_child_step_names(*system_id).is_empty());
+            if requires_confirmation {
+                self.pending_step_processor_conversion_target_type = Some(normalized_target.clone());
+                self.pending_step_processor_conversion_keep_steps_as_systems = false;
+                self.pending_step_processor_conversion_single_details = false;
+                self.open_modal(crate::app::AppModal::StepProcessorConversionConfirm);
+                self.status_message =
+                    "Choose how existing child systems should be handled before conversion"
+                        .to_owned();
+                return;
+            }
         }
 
         let systems_by_id = self
@@ -92,10 +426,23 @@ impl SystemsCatalogApp {
                     continue;
                 }
 
-                let route_methods = if normalized_target == "api" {
+                let target_entity = self.system_entity_for_type(normalized_target.as_str());
+                let target_inputs = target_entity.selectable_inputs();
+
+                let route_methods = if target_inputs.can_select_route_methods {
                     system.route_methods.as_deref()
                 } else {
                     None
+                };
+
+                let converting_to_step_processor =
+                    normalized_target == "step_processor"
+                        && Self::normalize_system_type(system.system_type.as_str()) != "step_processor";
+
+                let child_step_names = if converting_to_step_processor {
+                    self.non_internal_child_step_names(system.id)
+                } else {
+                    Vec::new()
                 };
 
                 self.repo.update_system_details(
@@ -108,10 +455,38 @@ impl SystemsCatalogApp {
                     route_methods,
                 )?;
 
-                if normalized_target != "database" {
+                let desired_steps = if target_inputs.can_select_database_columns {
+                    let mut columns = Self::database_column_records_to_inputs(
+                        self
+                        .database_columns_by_system
+                        .get(&system.id)
+                        .cloned()
+                        .unwrap_or_default(),
+                    );
+                    if normalized_target == "step_processor" {
+                        columns = Self::merge_step_names_into_columns(columns, &child_step_names);
+                    }
+                    self.repo
+                        .replace_database_columns_for_system(system.id, &columns)?;
+                    columns
+                        .iter()
+                        .map(|column| column.column_name.clone())
+                        .collect::<Vec<_>>()
+                } else {
                     self.repo
                         .replace_database_columns_for_system(system.id, &[])?;
+                    Vec::new()
+                };
+
+                if converting_to_step_processor && !keep_steps_as_systems {
+                    let _ = self.convert_direct_children_to_internal_step_endpoints(system.id)?;
                 }
+
+                self.sync_step_internal_systems_for_owner(
+                    system.id,
+                    normalized_target.as_str(),
+                    &desired_steps,
+                )?;
 
                 self.mark_system_as_dirty(system.id);
                 converted_count += 1;
@@ -126,6 +501,9 @@ impl SystemsCatalogApp {
 
         match result {
             Ok(_) => {
+                if use_pending_choice {
+                    self.clear_pending_step_processor_conversion_prompt();
+                }
                 self.status_message = format!(
                     "Converted {} system(s) to {}",
                     converted_count,
@@ -133,6 +511,9 @@ impl SystemsCatalogApp {
                 );
             }
             Err(error) => {
+                if use_pending_choice {
+                    self.clear_pending_step_processor_conversion_prompt();
+                }
                 self.status_message = format!("Failed bulk type conversion: {error}");
             }
         }
@@ -3015,6 +3396,20 @@ impl SystemsCatalogApp {
             return;
         };
 
+        let use_pending_choice = self.pending_step_processor_conversion_single_details;
+        let keep_steps_as_systems = if use_pending_choice {
+            self.pending_step_processor_conversion_keep_steps_as_systems
+        } else {
+            false
+        };
+
+        let previous_system_type = self
+            .systems
+            .iter()
+            .find(|system| system.id == system_id)
+            .map(|system| Self::normalize_system_type(system.system_type.as_str()))
+            .unwrap_or_else(|| "service".to_owned());
+
         let edited_name = self.edited_system_name.trim();
         if edited_name.is_empty() {
             self.status_message = "System name is required".to_owned();
@@ -3029,20 +3424,25 @@ impl SystemsCatalogApp {
         };
 
         let system_type = Self::normalize_system_type(self.selected_system_type.as_str());
-        let route_methods_set_for_spawn = if system_type == "api" {
+        let entity_inputs = self
+            .system_entity_for_type(system_type.as_str())
+            .selectable_inputs();
+        let entity_key = self.system_entity_for_type(system_type.as_str()).entity_key();
+
+        let route_methods_set_for_spawn = if entity_inputs.can_select_route_methods {
             let mut methods = self.selected_system_route_methods.clone();
             methods.extend(self.inferred_api_methods_from_children(system_id));
             methods
         } else {
             HashSet::new()
         };
-        let route_methods = if system_type == "api" {
+        let route_methods = if entity_inputs.can_select_route_methods {
             Self::route_methods_storage_from_set(&route_methods_set_for_spawn)
         } else {
             None
         };
 
-        let database_columns_for_save = if system_type == "database" {
+        let mut database_columns_for_save = if entity_inputs.can_select_database_columns {
             self.selected_database_columns
                 .iter()
                 .filter_map(|column| {
@@ -3073,6 +3473,28 @@ impl SystemsCatalogApp {
             Vec::new()
         };
 
+        let converting_to_step_processor =
+            entity_key == "step_processor" && previous_system_type != "step_processor";
+        let child_step_names = if converting_to_step_processor {
+            self.non_internal_child_step_names(system_id)
+        } else {
+            Vec::new()
+        };
+        if converting_to_step_processor && !child_step_names.is_empty() && !use_pending_choice {
+            self.pending_step_processor_conversion_target_type = None;
+            self.pending_step_processor_conversion_keep_steps_as_systems = false;
+            self.pending_step_processor_conversion_single_details = true;
+            self.open_modal(crate::app::AppModal::StepProcessorConversionConfirm);
+            self.status_message =
+                "Choose how existing child systems should be handled before conversion"
+                    .to_owned();
+            return;
+        }
+        if entity_key == "step_processor" {
+            database_columns_for_save =
+                Self::merge_step_names_into_columns(database_columns_for_save, &child_step_names);
+        }
+
         let result = self
             .repo
             .update_system_details(
@@ -3085,12 +3507,31 @@ impl SystemsCatalogApp {
                 route_methods.as_deref(),
             )
             .and_then(|_| {
-                if system_type == "database" {
+                if entity_inputs.can_select_database_columns {
                     self.repo
                         .replace_database_columns_for_system(system_id, &database_columns_for_save)
                 } else {
+                    self.repo.replace_database_columns_for_system(system_id, &[])
+                }
+            })
+            .and_then(|_| {
+                if converting_to_step_processor && !keep_steps_as_systems {
+                    self.convert_direct_children_to_internal_step_endpoints(system_id)
+                        .map(|_| ())
+                } else {
                     Ok(())
                 }
+            })
+            .and_then(|_| {
+                let desired_steps = if entity_key == "step_processor" {
+                    database_columns_for_save
+                        .iter()
+                        .map(|column| column.column_name.clone())
+                        .collect::<Vec<_>>()
+                } else {
+                    Vec::new()
+                };
+                self.sync_step_internal_systems_for_owner(system_id, entity_key, &desired_steps)
             })
             .and_then(|_| self.refresh_systems())
             .and_then(|_| self.load_selected_data(system_id))
@@ -3099,10 +3540,16 @@ impl SystemsCatalogApp {
 
         match result {
             Ok(_) => {
+                if use_pending_choice {
+                    self.clear_pending_step_processor_conversion_prompt();
+                }
                 self.mark_system_as_dirty(system_id);
                 self.status_message = "System details updated".to_owned();
             }
             Err(error) => {
+                if use_pending_choice {
+                    self.clear_pending_step_processor_conversion_prompt();
+                }
                 self.status_message = format!("Failed to update system details: {error}")
             }
         }
@@ -3124,16 +3571,20 @@ impl SystemsCatalogApp {
             return;
         };
 
-        match self.repo.create_note(system_id, "") {
+        let body = self.note_text.trim();
+        if body.is_empty() {
+            self.status_message = "Note text is required".to_owned();
+            return;
+        }
+
+        match self.repo.create_note(system_id, body) {
             Ok(_) => {
                 if let Err(error) = self.load_selected_data(system_id) {
                     self.status_message = format!("Failed to load notes: {error}");
                     return;
                 }
 
-                if let Some(first_note) = self.selected_notes.first() {
-                    self.select_note_for_edit(first_note.id);
-                }
+                self.note_text.clear();
 
                 self.status_message = "Note created".to_owned();
             }
@@ -3847,6 +4298,19 @@ impl SystemsCatalogApp {
             return;
         }
 
+        let step_internal_descendants = target_ids
+            .iter()
+            .flat_map(|system_id| {
+                self.internal_step_children_for_system(*system_id)
+                    .into_iter()
+                    .map(|child| child.id)
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        for child_id in step_internal_descendants {
+            target_ids.insert(child_id);
+        }
+
         let mut ordered_ids = target_ids.iter().copied().collect::<Vec<_>>();
         ordered_ids.sort_unstable();
 
@@ -3873,6 +4337,7 @@ impl SystemsCatalogApp {
                 self.map_link_click_source = None;
                 self.map_link_drag_from = None;
                 self.map_interaction_drag_from = None;
+                self.map_interaction_drag_from_reference = None;
                 self.selected_map_system_ids.clear();
 
                 if let Some(name) = deleted_name {
@@ -3962,12 +4427,15 @@ impl SystemsCatalogApp {
         let parent_id = self.new_system_parent_id;
         let description = self.new_system_description.trim();
         let system_type = Self::normalize_system_type(self.new_system_type.as_str());
-        let route_methods = if system_type == "api" {
+        let entity_inputs = self
+            .system_entity_for_type(system_type.as_str())
+            .selectable_inputs();
+        let route_methods = if entity_inputs.can_select_route_methods {
             Self::route_methods_storage_from_set(&self.new_system_route_methods)
         } else {
             None
         };
-        let route_methods_set_for_spawn = if system_type == "api" {
+        let route_methods_set_for_spawn = if entity_inputs.can_select_route_methods {
             self.new_system_route_methods.clone()
         } else {
             HashSet::new()
@@ -4209,30 +4677,58 @@ impl SystemsCatalogApp {
         self.create_link_between_kind(source_id, target_id, label, InteractionKind::Standard);
     }
 
-    pub(super) fn create_link_between_kind(
+    pub(super) fn create_link_between_kind_with_references(
         &mut self,
         source_id: i64,
         target_id: i64,
         label: &str,
         kind: InteractionKind,
+        source_reference: Option<&str>,
+        target_reference: Option<&str>,
     ) {
         if source_id == target_id {
             self.status_message = "A system cannot link to itself".to_owned();
             return;
         }
 
-        let result = self
-            .repo
-            .create_link(
-                source_id,
-                target_id,
+        let normalized_source_reference = source_reference
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let normalized_target_reference = target_reference
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+
+        let result = (|| -> anyhow::Result<()> {
+            let effective_source_system_id =
+                self.resolve_interaction_endpoint_system_id(source_id, normalized_source_reference)?;
+            let effective_target_system_id =
+                self.resolve_interaction_endpoint_system_id(target_id, normalized_target_reference)?;
+
+            let mut stored_source_reference = normalized_source_reference.map(ToOwned::to_owned);
+            let mut stored_target_reference = normalized_target_reference.map(ToOwned::to_owned);
+
+            if stored_source_reference.is_none() {
+                stored_source_reference =
+                    self.step_reference_for_internal_endpoint_system(effective_source_system_id);
+            }
+            if stored_target_reference.is_none() {
+                stored_target_reference =
+                    self.step_reference_for_internal_endpoint_system(effective_target_system_id);
+            }
+
+            self.repo.create_link(
+                effective_source_system_id,
+                effective_target_system_id,
                 label,
                 Self::interaction_kind_to_setting_value(kind),
-                None,
-                None,
-            )
-            .and_then(|_| self.refresh_systems())
-            .and_then(|_| self.load_selected_data(source_id));
+                stored_source_reference.as_deref(),
+                stored_target_reference.as_deref(),
+            )?;
+
+            self.refresh_systems()?;
+            self.load_selected_data(source_id)?;
+            Ok(())
+        })();
 
         match result {
             Ok(_) => {
@@ -4246,6 +4742,69 @@ impl SystemsCatalogApp {
                 self.status_message = format!("Failed to create interaction: {error}");
             }
         }
+    }
+
+    pub(super) fn select_step_reference_endpoint_from_map(
+        &mut self,
+        owner_system_id: i64,
+        reference_name: &str,
+    ) {
+        let trimmed_reference = reference_name.trim();
+        if trimmed_reference.is_empty() {
+            if let Err(error) = self.load_selected_data(owner_system_id) {
+                self.status_message = format!("Failed to load selection: {error}");
+                return;
+            }
+            self.selected_system_id = Some(owner_system_id);
+            self.selected_map_system_ids.clear();
+            self.selected_map_system_ids.insert(owner_system_id);
+            return;
+        }
+
+        let result = (|| -> anyhow::Result<i64> {
+            let endpoint_system_id =
+                self.resolve_interaction_endpoint_system_id(owner_system_id, Some(trimmed_reference))?;
+            self.load_selected_data(endpoint_system_id)?;
+            Ok(endpoint_system_id)
+        })();
+
+        match result {
+            Ok(endpoint_system_id) => {
+                self.map_interaction_drag_from = None;
+                self.map_interaction_drag_from_reference = None;
+                self.selected_system_id = Some(endpoint_system_id);
+                self.selected_map_system_ids.clear();
+                self.status_message = format!(
+                    "Selected step endpoint '{}:{}'",
+                    self.system_name_by_id(owner_system_id),
+                    trimmed_reference
+                );
+            }
+            Err(error) => {
+                self.status_message = format!(
+                    "Failed to select step endpoint '{}:{}': {error}",
+                    self.system_name_by_id(owner_system_id),
+                    trimmed_reference
+                );
+            }
+        }
+    }
+
+    pub(super) fn create_link_between_kind(
+        &mut self,
+        source_id: i64,
+        target_id: i64,
+        label: &str,
+        kind: InteractionKind,
+    ) {
+        self.create_link_between_kind_with_references(
+            source_id,
+            target_id,
+            label,
+            kind,
+            None,
+            None,
+        );
     }
 
     pub(super) fn assign_parent_between(&mut self, child_id: i64, parent_id: i64) {
