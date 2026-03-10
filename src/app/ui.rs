@@ -718,6 +718,9 @@ impl SystemsCatalogApp {
 
     fn parent_line_style_for(&self, parent_system_id: i64) -> LineStyle {
         let mut style = self.parent_line_style;
+        if !Self::has_visible_color(style.color) {
+            style.color = Self::default_parent_line_color();
+        }
         if let Some(override_color) = self.system_line_override_color(parent_system_id) {
             style.color = override_color;
         }
@@ -737,6 +740,9 @@ impl SystemsCatalogApp {
             InteractionKind::Bidirectional => self.interaction_bidirectional_line_style,
         };
         style.width = self.interaction_line_style.width;
+        if !Self::has_visible_color(style.color) {
+            style.color = Self::default_interaction_line_color(kind);
+        }
 
         if let Some(override_color) = self.system_line_override_color(source_system_id) {
             style.color = override_color;
@@ -886,7 +892,12 @@ impl SystemsCatalogApp {
     }
 
     fn line_color(&self, style: LineStyle, dimmed: bool, boosted: bool) -> Color32 {
-        let mut color = Color32::from_rgb(style.color.r(), style.color.g(), style.color.b());
+        let mut color = Color32::from_rgba_unmultiplied(
+            style.color.r(),
+            style.color.g(),
+            style.color.b(),
+            style.color.a(),
+        );
 
         if boosted {
             color = self.brighten_color(color, self.selected_line_brightness_percent);
@@ -901,6 +912,44 @@ impl SystemsCatalogApp {
             .clamp(0.0, 255.0) as u8;
 
         Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), dimmed_alpha)
+    }
+
+    fn render_sidebar_section_heading(
+        ui: &mut egui::Ui,
+        title: &str,
+        subtitle: Option<&str>,
+    ) {
+        ui.label(
+            RichText::new(title)
+                .strong()
+                .size(17.0)
+                .color(Color32::from_rgb(218, 224, 236)),
+        );
+        if let Some(subtitle) = subtitle {
+            ui.label(
+                RichText::new(subtitle)
+                    .small()
+                    .color(Color32::from_rgb(148, 156, 174)),
+            );
+        }
+        ui.add_space(4.0);
+    }
+
+    fn render_details_section_heading(ui: &mut egui::Ui, title: &str, subtitle: Option<&str>) {
+        ui.label(
+            RichText::new(title)
+                .strong()
+                .size(18.0)
+                .color(Color32::from_rgb(222, 228, 240)),
+        );
+        if let Some(subtitle) = subtitle {
+            ui.label(
+                RichText::new(subtitle)
+                    .small()
+                    .color(Color32::from_rgb(150, 158, 176)),
+            );
+        }
+        ui.add_space(2.0);
     }
 
     fn draw_directed_connection(
@@ -1799,6 +1848,8 @@ impl SystemsCatalogApp {
             .show(ctx, |ui| {
                 ui.label("Ctrl+N  -> Add System");
                 ui.label("Ctrl+Shift+N  -> Bulk Add Systems");
+                ui.label("Ctrl+P  -> Open command palette");
+                ui.label("Ctrl+K  -> Focus systems search");
                 ui.label("Ctrl+S  -> Save Project");
                 ui.label("Alt+N  -> Add Technology");
                 ui.label("Hold Z + drag  -> Draw zone");
@@ -1822,6 +1873,121 @@ impl SystemsCatalogApp {
             });
 
         self.show_hotkeys_modal = open;
+    }
+
+    fn command_palette_matches(&self, query: &str) -> Vec<(i64, String)> {
+        let normalized_query = query.trim().to_ascii_lowercase();
+        let mut rows = self
+            .systems
+            .iter()
+            .filter(|system| !Self::is_internal_step_system(system))
+            .map(|system| {
+                let label = self.naming_path_for_system(system.id);
+                let normalized_label = label.to_ascii_lowercase();
+                (system.id, label, normalized_label)
+            })
+            .filter(|(_, _, normalized_label)| {
+                normalized_query.is_empty() || normalized_label.contains(normalized_query.as_str())
+            })
+            .collect::<Vec<_>>();
+
+        rows.sort_by(|left, right| {
+            let left_starts = !normalized_query.is_empty()
+                && left.2.starts_with(normalized_query.as_str());
+            let right_starts = !normalized_query.is_empty()
+                && right.2.starts_with(normalized_query.as_str());
+
+            right_starts
+                .cmp(&left_starts)
+                .then_with(|| left.1.to_ascii_lowercase().cmp(&right.1.to_ascii_lowercase()))
+        });
+
+        rows
+            .into_iter()
+            .map(|(system_id, label, _)| (system_id, label))
+            .collect()
+    }
+
+    fn render_command_palette_modal(&mut self, ctx: &egui::Context) {
+        if !self.show_command_palette_modal {
+            return;
+        }
+
+        let mut open = self.show_command_palette_modal;
+        let mut close_requested = false;
+        let mut activate_system_id = None;
+
+        egui::Window::new("Command Palette")
+            .collapsible(false)
+            .resizable(true)
+            .default_width(560.0)
+            .default_height(420.0)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.label("Jump to a system");
+
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut self.command_palette_query)
+                        .hint_text("Type system name or path..."),
+                );
+                if self.focus_command_palette_query {
+                    response.request_focus();
+                    self.focus_command_palette_query = false;
+                }
+
+                let matches = self.command_palette_matches(self.command_palette_query.as_str());
+                let enter_pressed = ui.input(|input| input.key_pressed(egui::Key::Enter));
+                if enter_pressed {
+                    if let Some((system_id, _)) = matches.first() {
+                        activate_system_id = Some(*system_id);
+                    }
+                }
+
+                ui.separator();
+
+                if matches.is_empty() {
+                    ui.label("No systems match your query.");
+                } else {
+                    egui::ScrollArea::vertical()
+                        .max_height(280.0)
+                        .show(ui, |ui| {
+                            for (system_id, label) in matches.iter().take(50) {
+                                let button = egui::Button::new(label.as_str()).fill(
+                                    if self.selected_system_id == Some(*system_id) {
+                                        Color32::from_rgba_unmultiplied(90, 120, 180, 64)
+                                    } else {
+                                        Color32::TRANSPARENT
+                                    },
+                                );
+                                if ui.add_sized([ui.available_width(), 24.0], button).clicked() {
+                                    activate_system_id = Some(*system_id);
+                                }
+                            }
+                        });
+                }
+
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("Close").clicked() {
+                        close_requested = true;
+                    }
+                });
+            });
+
+        if let Some(system_id) = activate_system_id {
+            self.select_system(system_id);
+            self.pending_map_focus_system_id = Some(system_id);
+            self.status_message = format!("Focused {}", self.system_name_by_id(system_id));
+            close_requested = true;
+        }
+
+        if close_requested {
+            open = false;
+            self.command_palette_query.clear();
+            self.focus_command_palette_query = false;
+        }
+
+        self.show_command_palette_modal = open;
     }
 
     fn render_help_modal(&mut self, ctx: &egui::Context, title: &str, content: &str, modal: crate::app::AppModal) {
@@ -2047,6 +2213,67 @@ impl SystemsCatalogApp {
         self.show_interaction_style_modal = open;
     }
 
+    fn render_parent_line_style_modal(&mut self, ctx: &egui::Context) {
+        if !self.show_parent_line_style_modal {
+            return;
+        }
+
+        let mut open = self.show_parent_line_style_modal;
+        egui::Window::new("Parent Line Style")
+            .collapsible(false)
+            .resizable(false)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                let mut changed = false;
+
+                changed |= ui
+                    .checkbox(&mut self.show_parent_lines, "Show parent lines")
+                    .changed();
+
+                changed |= ui
+                    .add(
+                        egui::Slider::new(&mut self.parent_line_style.width, 0.5..=6.0)
+                            .text("Width"),
+                    )
+                    .changed();
+
+                ui.horizontal(|ui| {
+                    ui.label("Color");
+                    changed |= ui
+                        .color_edit_button_srgba(&mut self.parent_line_style.color)
+                        .changed();
+                });
+
+                let old_terminator = self.parent_line_style.terminator;
+                Self::render_terminator_combo(
+                    ui,
+                    "modal_parent_terminator",
+                    "Arrow",
+                    &mut self.parent_line_style.terminator,
+                );
+                if old_terminator != self.parent_line_style.terminator {
+                    changed = true;
+                }
+
+                let old_pattern = self.parent_line_style.pattern;
+                Self::render_pattern_combo(
+                    ui,
+                    "modal_parent_pattern",
+                    "Pattern",
+                    &mut self.parent_line_style.pattern,
+                );
+                if old_pattern != self.parent_line_style.pattern {
+                    changed = true;
+                }
+
+                if changed {
+                    self.settings_dirty = true;
+                }
+            });
+
+        self.show_parent_line_style_modal = open;
+    }
+
     fn render_save_catalog_modal(&mut self, ctx: &egui::Context) {
         if !self.show_save_catalog_modal {
             return;
@@ -2227,29 +2454,6 @@ impl SystemsCatalogApp {
                 if self.new_catalog_directory.trim().is_empty() {
                     ui.label("Directory defaults to current workspace folder.");
                 }
-
-                ui.separator();
-                ui.label("Migration source DB (optional, one-time)");
-                ui.horizontal(|ui| {
-                    ui.text_edit_singleline(&mut self.new_catalog_migration_db_path);
-                    if ui.button("Browse DB...").clicked() {
-                        let mut dialog = FileDialog::new();
-                        if let Some(parent) = Path::new(&self.new_catalog_migration_db_path).parent() {
-                            if !parent.as_os_str().is_empty() {
-                                dialog = dialog.set_directory(parent);
-                            }
-                        }
-
-                        if let Some(path) = dialog
-                            .add_filter("Legacy SQLite DB", &["db", "sqlite", "sqlite3"])
-                            .pick_file()
-                        {
-                            self.new_catalog_migration_db_path =
-                                path.to_string_lossy().to_string();
-                        }
-                    }
-                });
-                ui.label("Leave empty to create a blank project.");
 
                 ui.horizontal(|ui| {
                     if ui.button("Create Project").clicked() {
@@ -2478,11 +2682,19 @@ impl SystemsCatalogApp {
     fn render_sidebar(&mut self, ui: &mut egui::Ui) {
         match self.active_sidebar_tab {
             SidebarTab::Systems => {
-                ui.heading("Systems List");
-                ui.add(
+                Self::render_sidebar_section_heading(
+                    ui,
+                    "Systems",
+                    Some("Search, focus, and navigate your map nodes"),
+                );
+                let search_response = ui.add(
                     egui::TextEdit::singleline(&mut self.systems_sidebar_search)
                         .hint_text("Search systems"),
                 );
+                if self.focus_systems_sidebar_search {
+                    search_response.request_focus();
+                    self.focus_systems_sidebar_search = false;
+                }
                 ui.horizontal(|ui| {
                     if ui.small_button("Show all").clicked() {
                         self.clear_subset_visibility();
@@ -2552,8 +2764,11 @@ impl SystemsCatalogApp {
                 }
             }
             SidebarTab::TechCatalog => {
-                ui.heading("Tech Catalog");
-                ui.label("Technologies");
+                Self::render_sidebar_section_heading(
+                    ui,
+                    "Tech Catalog",
+                    Some("Curated technologies and visual metadata"),
+                );
                 if ui
                     .checkbox(
                         &mut self.fast_add_selected_catalog_tech_on_map,
@@ -2673,40 +2888,9 @@ impl SystemsCatalogApp {
                         .checkbox(&mut self.show_parent_lines, "Show parent lines")
                         .changed();
 
-                    changed |= ui
-                        .add(
-                            egui::Slider::new(&mut self.parent_line_style.width, 0.5..=6.0)
-                                .text("Width"),
-                        )
-                        .changed();
-
-                    ui.horizontal(|ui| {
-                        ui.label("Color");
-                        changed |= ui
-                            .color_edit_button_srgba(&mut self.parent_line_style.color)
-                            .changed();
-                    });
-
-                    let old_terminator = self.parent_line_style.terminator;
-                    Self::render_terminator_combo(
-                        ui,
-                        "menu_parent_terminator",
-                        "Terminator",
-                        &mut self.parent_line_style.terminator,
-                    );
-                    if old_terminator != self.parent_line_style.terminator {
-                        changed = true;
-                    }
-
-                    let old_pattern = self.parent_line_style.pattern;
-                    Self::render_pattern_combo(
-                        ui,
-                        "menu_parent_pattern",
-                        "Pattern",
-                        &mut self.parent_line_style.pattern,
-                    );
-                    if old_pattern != self.parent_line_style.pattern {
-                        changed = true;
+                    if ui.button("Style...").clicked() {
+                        self.open_modal(crate::app::AppModal::ParentLineStyle);
+                        ui.close_menu();
                     }
 
                     if changed {
@@ -2733,6 +2917,19 @@ impl SystemsCatalogApp {
                     self.interaction_push_line_style.width = self.interaction_line_style.width;
                     self.interaction_bidirectional_line_style.width =
                         self.interaction_line_style.width;
+
+                    if ui.button("Reset line colors to defaults").clicked() {
+                        self.parent_line_style.color = Self::default_parent_line_color();
+                        self.interaction_standard_line_style.color =
+                            Self::default_interaction_line_color(InteractionKind::Standard);
+                        self.interaction_pull_line_style.color =
+                            Self::default_interaction_line_color(InteractionKind::Pull);
+                        self.interaction_push_line_style.color =
+                            Self::default_interaction_line_color(InteractionKind::Push);
+                        self.interaction_bidirectional_line_style.color =
+                            Self::default_interaction_line_color(InteractionKind::Bidirectional);
+                        changed = true;
+                    }
 
                     ui.separator();
                     ui.label("Type styles");
@@ -2885,10 +3082,14 @@ impl SystemsCatalogApp {
     fn render_details(&mut self, ui: &mut egui::Ui) {
         ui.set_max_width(ui.available_width());
 
-        ui.heading("System Details");
+        Self::render_details_section_heading(
+            ui,
+            "System Details",
+            Some("Core properties, structure, interactions, and notes for the selected system."),
+        );
 
         let Some(system) = self.selected_system().cloned() else {
-            ui.label("No System Selected");
+            ui.label("No system selected.");
             return;
         };
 
@@ -2971,6 +3172,11 @@ impl SystemsCatalogApp {
             }
         }
 
+        Self::render_details_section_heading(
+            ui,
+            "Overview",
+            Some("A quick connection snapshot for this system and its subtree."),
+        );
         let badge_bg = Color32::from_rgba_unmultiplied(65, 85, 120, 80);
         ui.horizontal_wrapped(|ui| {
             ui.label(
@@ -3001,8 +3207,9 @@ impl SystemsCatalogApp {
                 .background_color(badge_bg),
             );
         });
+        ui.add_space(4.0);
 
-        egui::CollapsingHeader::new("Stats")
+        egui::CollapsingHeader::new("Detailed connection counts")
             .default_open(false)
             .show(ui, |ui| {
                 ui.label("Direct system connections");
@@ -3034,7 +3241,12 @@ impl SystemsCatalogApp {
             });
 
         ui.separator();
-        ui.heading("Basics");
+        ui.add_space(4.0);
+        Self::render_details_section_heading(
+            ui,
+            "Basics",
+            Some("Edit the name, description, and classification for the selected system."),
+        );
         ui.label("Name");
         ui.text_edit_singleline(&mut self.edited_system_name);
 
@@ -3084,7 +3296,12 @@ impl SystemsCatalogApp {
 
 
         ui.separator();
-        ui.heading("System-Specific Settings");
+        ui.add_space(4.0);
+        Self::render_details_section_heading(
+            ui,
+            "System-Specific Settings",
+            Some("Fields and controls specific to this system type."),
+        );
         ui.small("Custom fields from this system type.");
         ui.group(|ui| {
             system_entity.render_details_panel(self, ui, &system);
@@ -3095,6 +3312,12 @@ impl SystemsCatalogApp {
             }
         });
         ui.separator();
+        ui.add_space(4.0);
+        Self::render_details_section_heading(
+            ui,
+            "Workspace",
+            Some("Switch between structure, interactions, and notes."),
+        );
         ui.horizontal_wrapped(|ui| {
             ui.selectable_value(
                 &mut self.active_system_details_tab,
@@ -3117,17 +3340,18 @@ impl SystemsCatalogApp {
         let show_interactions_tab = self.active_system_details_tab == SystemDetailsTab::Interactions;
         let show_notes_tab = self.active_system_details_tab == SystemDetailsTab::Notes;
 
-        let tab_scroll_height = ui.available_height().max(140.0);
-        egui::ScrollArea::vertical()
-            .id_source("details_tab_content_scroll")
-            .max_height(tab_scroll_height)
-            .show(ui, |ui| {
+        ui.vertical(|ui| {
 
         if show_structure_tab {
             let mut deleted_selected_system = false;
             ui.separator();
-            ui.label("Structure & Layout");
-                ui.label("Naming");
+            ui.add_space(4.0);
+            Self::render_details_section_heading(
+                ui,
+                "Structure & Layout",
+                Some("Define naming, hierarchy, layout, and display overrides."),
+            );
+                ui.label(RichText::new("Naming").strong());
                 ui.checkbox(
                     &mut self.selected_system_naming_root,
                     "Treat as naming root",
@@ -3143,7 +3367,7 @@ impl SystemsCatalogApp {
 
                 ui.separator();
                 if selectable_inputs.can_select_parent {
-                    ui.label("Parent assignment");
+                    ui.label(RichText::new("Parent assignment").strong());
 
                     let selected_parent_label = self
                         .selected_system_parent_id
@@ -3190,7 +3414,7 @@ impl SystemsCatalogApp {
                     ui.separator();
                 }
 
-                ui.label("Subsystem layout");
+                ui.label(RichText::new("Subsystem layout").strong());
                 ui.horizontal(|ui| {
                     if ui.button("File tree").clicked() {
                         self.layout_selected_subsystem_file_tree();
@@ -3211,7 +3435,7 @@ impl SystemsCatalogApp {
             }
 
             ui.separator();
-            ui.label("Line color override");
+            ui.label(RichText::new("Line color override").strong());
                 ui.horizontal(|ui| {
                     let mut use_override = self.selected_system_line_color_override.is_some();
                     let mut changed = false;
@@ -3247,8 +3471,12 @@ impl SystemsCatalogApp {
 
         if show_interactions_tab {
             ui.separator();
-            ui.heading("Interactions");
-            ui.small("Create new links, transfer links, or edit existing links.");
+            ui.add_space(4.0);
+            Self::render_details_section_heading(
+                ui,
+                "Interactions",
+                Some("Create new links, transfer existing ones, or edit the selected relationship."),
+            );
 
         if self.map_interaction_drag_from == Some(system.id) {
             if let Some(reference_name) = self.map_interaction_drag_from_reference.as_deref() {
@@ -3265,7 +3493,7 @@ impl SystemsCatalogApp {
             }
         }
 
-        ui.label("Create interaction");
+        ui.label(RichText::new("Create interaction").strong());
                 let selected_target_label = self
                     .new_link_target_id
                     .map(|id| self.system_dropdown_label(id))
@@ -3295,7 +3523,7 @@ impl SystemsCatalogApp {
                 }
         ui.separator();
 
-        ui.label("Transfer interactions");
+            ui.label(RichText::new("Transfer interactions").strong());
                 let transfer_target_label = self
                     .selected_interaction_transfer_target_id
                     .map(|id| self.system_dropdown_label(id))
@@ -3351,7 +3579,7 @@ impl SystemsCatalogApp {
 
         ui.separator();
 
-            ui.label(format!("Manage existing ({})", self.selected_links.len()));
+            ui.label(RichText::new(format!("Manage existing ({})", self.selected_links.len())).strong());
             if self.selected_links.is_empty() {
                 ui.label("No interactions recorded.");
             } else {
@@ -3512,8 +3740,13 @@ impl SystemsCatalogApp {
 
         if show_structure_tab {
             ui.separator();
-            ui.label("Technology");
-                ui.label("System tech stack");
+            ui.add_space(4.0);
+            Self::render_details_section_heading(
+                ui,
+                "Technology",
+                Some("Manage the selected system tech stack and inherited child technologies."),
+            );
+                ui.label(RichText::new("System tech stack").strong());
 
                 let selected_tech_label = self
                     .selected_tech_id_for_assignment
@@ -3568,7 +3801,7 @@ impl SystemsCatalogApp {
                 }
 
                 ui.separator();
-                ui.label("Cumulative child tech stack");
+                ui.label(RichText::new("Cumulative child tech stack").strong());
                 if self.selected_cumulative_child_tech.is_empty() {
                     ui.label("No child-system technologies found.");
                 } else {
@@ -3582,10 +3815,15 @@ impl SystemsCatalogApp {
 
         if show_notes_tab {
             ui.separator();
-            ui.heading("Notes");
+            ui.add_space(4.0);
+            Self::render_details_section_heading(
+                ui,
+                "Notes",
+                Some("Capture short-lived context, edits, and operational details for this system."),
+            );
             let editing_note_active = self.selected_note_id_for_edit.is_some();
 
-            ui.label("New note");
+            ui.label(RichText::new("New note").strong());
             if editing_note_active {
                 ui.small("Finish or cancel the current edit before adding a new note.");
             }
@@ -3689,8 +3927,10 @@ impl SystemsCatalogApp {
                     self.pending_note_delete_id = None;
                 }
             }
+
+            ui.add_space(32.0);
         }
-            });
+        });
     }
 
     fn process_flow_inspector_pick_from_selection(&mut self) {
@@ -3962,6 +4202,7 @@ impl SystemsCatalogApp {
             || self.show_bulk_add_systems_modal
             || self.show_add_tech_modal
             || self.show_hotkeys_modal
+            || self.show_parent_line_style_modal
             || self.show_interaction_style_modal
             || self.show_flow_inspector_modal
             || self.show_save_catalog_modal
@@ -4720,23 +4961,21 @@ impl SystemsCatalogApp {
                                     .collect::<Vec<_>>();
 
                                 for descendant_zone in descendants_to_persist {
-                                    if let Err(error) = self.repo.update_zone(
-                                        descendant_zone.id,
-                                        descendant_zone.name.as_str(),
-                                        descendant_zone.x,
-                                        descendant_zone.y,
-                                        descendant_zone.width,
-                                        descendant_zone.height,
-                                        descendant_zone.color.as_deref(),
-                                        descendant_zone.render_priority,
-                                        descendant_zone.parent_zone_id,
-                                        descendant_zone.minimized,
-                                        descendant_zone.representative_system_id,
-                                    ) {
-                                        self.status_message =
-                                            format!("Failed to update nested zone geometry: {error}");
-                                        break;
-                                    } else {
+                                    if let Some(zone) = self
+                                        .zones
+                                        .iter_mut()
+                                        .find(|zone| zone.id == descendant_zone.id)
+                                    {
+                                        zone.x = descendant_zone.x;
+                                        zone.y = descendant_zone.y;
+                                        zone.width = descendant_zone.width;
+                                        zone.height = descendant_zone.height;
+                                        zone.color = descendant_zone.color.clone();
+                                        zone.render_priority = descendant_zone.render_priority;
+                                        zone.parent_zone_id = descendant_zone.parent_zone_id;
+                                        zone.minimized = descendant_zone.minimized;
+                                        zone.representative_system_id =
+                                            descendant_zone.representative_system_id;
                                         self.mark_project_as_dirty();
                                     }
                                 }
@@ -5832,6 +6071,10 @@ impl eframe::App for SystemsCatalogApp {
             ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Delete));
         let open_hotkeys =
             ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::F1));
+        let open_command_palette =
+            ctx.input_mut(|input| input.consume_key(egui::Modifiers::CTRL, egui::Key::P));
+        let focus_system_search =
+            ctx.input_mut(|input| input.consume_key(egui::Modifiers::CTRL, egui::Key::K));
 
         if close_recent_modal && self.close_most_recent_open_modal() {
             self.status_message = "Closed dialog".to_owned();
@@ -5883,6 +6126,19 @@ impl eframe::App for SystemsCatalogApp {
             self.open_modal(AppModal::Hotkeys);
         }
 
+        if open_command_palette {
+            self.command_palette_query.clear();
+            self.focus_command_palette_query = true;
+            self.open_modal(AppModal::CommandPalette);
+        }
+
+        if focus_system_search {
+            self.show_left_sidebar = true;
+            self.active_sidebar_tab = SidebarTab::Systems;
+            self.focus_systems_sidebar_search = true;
+            self.status_message = "Focused systems search".to_owned();
+        }
+
         if let Err(error) = self.validate_before_render() {
             self.status_message = format!("State warning: {error}");
         }
@@ -5919,7 +6175,7 @@ impl eframe::App for SystemsCatalogApp {
         if self.selected_system_id.is_some() || self.selected_zone_id.is_some() {
             egui::SidePanel::right("details_panel")
                 .resizable(true)
-                .min_width(120.0)
+                .min_width(100.0)
                 .default_width(120.0)
                 .max_width(560.0)
                 .show(ctx, |ui| {
@@ -5947,6 +6203,8 @@ impl eframe::App for SystemsCatalogApp {
         self.render_llm_detailed_import_modal(ctx);
         self.render_ddl_table_mapping_modal(ctx);
         self.render_hotkeys_modal(ctx);
+        self.render_command_palette_modal(ctx);
+        self.render_parent_line_style_modal(ctx);
         self.render_interaction_style_modal(ctx);
         self.render_flow_inspector_modal(ctx);
         self.render_help_getting_started_modal(ctx);
@@ -5957,14 +6215,14 @@ impl eframe::App for SystemsCatalogApp {
         self.render_help_keyboard_shortcuts_modal(ctx);
         self.render_help_troubleshooting_modal(ctx);
 
-        egui::Window::new("🔍 Inspection")
+        egui::Window::new("Inspection")
             .open(&mut self.show_debug_inspection_window)
             .vscroll(true)
             .show(ctx, |ui| {
                 ctx.inspection_ui(ui);
             });
 
-        egui::Window::new("📝 Memory")
+        egui::Window::new("Memory")
             .open(&mut self.show_debug_memory_window)
             .resizable(false)
             .show(ctx, |ui| {
@@ -5983,3 +6241,4 @@ impl eframe::App for SystemsCatalogApp {
     }
 
 }
+

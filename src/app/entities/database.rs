@@ -20,6 +20,10 @@ impl SystemRenderEntity for DatabaseRenderEntity {
         }
     }
 
+    fn requires_eager_map_content(&self) -> bool {
+        true
+    }
+
     fn render_map_label(&self, app: &SystemsCatalogApp, system: &SystemRecord) -> String {
         let prefix = map_icon_for_system_type(system.system_type.as_str());
         let title = if prefix.is_empty() {
@@ -105,7 +109,8 @@ impl SystemRenderEntity for DatabaseRenderEntity {
                 });
             }
 
-            if app.selected_database_columns.is_empty() && ui.button("Add common starter").clicked() {
+            if app.selected_database_columns.is_empty() && ui.button("Add common starter").clicked()
+            {
                 app.selected_database_columns = vec![
                     DatabaseColumnInput {
                         position: 0,

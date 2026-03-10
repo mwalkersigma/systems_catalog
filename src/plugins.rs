@@ -138,11 +138,12 @@ impl CatalogPlugin for DdlPlugin {
 
             let table_name = Self::parse_table_name(trimmed).unwrap_or_else(|| "table".to_owned());
 
-            let columns_body = if let (Some(open), Some(close)) = (trimmed.find('('), trimmed.rfind(')')) {
-                &trimmed[open + 1..close]
-            } else {
-                ""
-            };
+            let columns_body =
+                if let (Some(open), Some(close)) = (trimmed.find('('), trimmed.rfind(')')) {
+                    &trimmed[open + 1..close]
+                } else {
+                    ""
+                };
 
             let mut column_position = 0_i64;
             let columns = columns_body
@@ -313,7 +314,10 @@ impl CatalogPlugin for LlmImportPlugin {
                 .unwrap_or("service")
                 .to_owned();
 
-            let route_methods = if let Some(array) = object.get("routeMethods").and_then(|value| value.as_array()) {
+            let route_methods = if let Some(array) = object
+                .get("routeMethods")
+                .and_then(|value| value.as_array())
+            {
                 let methods = array
                     .iter()
                     .filter_map(|value| value.as_str())
@@ -397,7 +401,11 @@ pub fn parse_llm_detailed_import_file(
                     Some(trimmed.to_owned())
                 }
             })
-            .or_else(|| path_key.as_deref().and_then(LlmImportPlugin::parent_key_from_path));
+            .or_else(|| {
+                path_key
+                    .as_deref()
+                    .and_then(LlmImportPlugin::parent_key_from_path)
+            });
 
         let inferred_name_from_path = path_key.as_deref().and_then(|path| {
             path.split('/')
@@ -431,7 +439,10 @@ pub fn parse_llm_detailed_import_file(
             .unwrap_or("service")
             .to_owned();
 
-        let route_methods = if let Some(array) = object.get("routeMethods").and_then(|value| value.as_array()) {
+        let route_methods = if let Some(array) = object
+            .get("routeMethods")
+            .and_then(|value| value.as_array())
+        {
             let methods = array
                 .iter()
                 .filter_map(|value| value.as_str())
@@ -562,12 +573,9 @@ impl CatalogPlugin for OpenApiPlugin {
                 continue;
             }
 
-            let normalized_path = format!(
-                "/{}",
-                trimmed_path.trim_matches('/').trim()
-            )
-            .trim_end_matches('/')
-            .to_owned();
+            let normalized_path = format!("/{}", trimmed_path.trim_matches('/').trim())
+                .trim_end_matches('/')
+                .to_owned();
             if normalized_path == "/" {
                 continue;
             }
@@ -590,8 +598,14 @@ impl CatalogPlugin for OpenApiPlugin {
 
         let mut levels = all_levels.into_iter().collect::<Vec<_>>();
         levels.sort_by(|left, right| {
-            let left_depth = left.split('/').filter(|segment| !segment.is_empty()).count();
-            let right_depth = right.split('/').filter(|segment| !segment.is_empty()).count();
+            let left_depth = left
+                .split('/')
+                .filter(|segment| !segment.is_empty())
+                .count();
+            let right_depth = right
+                .split('/')
+                .filter(|segment| !segment.is_empty())
+                .count();
             left_depth
                 .cmp(&right_depth)
                 .then_with(|| left.to_lowercase().cmp(&right.to_lowercase()))

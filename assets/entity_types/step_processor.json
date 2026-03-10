@@ -1,5 +1,6 @@
 {
   "key": "step_processor",
   "label": "Step Processor",
-  "baseType": "step_processor"
+  "baseType": "step_processor",
+  "eagerMapContent": true
 }

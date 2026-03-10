@@ -1,0 +1,97 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/yourusername/systems-catalog/schemas/project.schema.json",
+  "title": "Systems Catalog Project Manifest",
+  "description": "Lightweight project.json manifest for Systems Catalog workspace",
+  "type": "object",
+  "required": ["schemaVersion", "entities"],
+  "properties": {
+    "schemaVersion": {
+      "type": "integer",
+      "description": "Schema version for migration compatibility",
+      "minimum": 1,
+      "default": 2
+    },
+    "entities": {
+      "type": "array",
+      "description": "Map canvas entities with file references and positions",
+      "items": {
+        "$ref": "#/definitions/EntityReference"
+      }
+    }
+  },
+  "definitions": {
+    "EntityReference": {
+      "description": "Compact entity reference tuple: [entityTypeId, filePath, posX, posY]",
+      "oneOf": [
+        {
+          "type": "array",
+          "description": "Tuple format with entity type (4 elements)",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": [
+            {
+              "type": ["string", "null"],
+              "description": "Entity type identifier (api, service, database, zone, step_processor). Defaults to 'service' if null or blank."
+            },
+            {
+              "type": "string",
+              "description": "Relative file path from project root (e.g., 'systems/orders.json')"
+            },
+            {
+              "type": "number",
+              "description": "X position on map canvas"
+            },
+            {
+              "type": "number",
+              "description": "Y position on map canvas"
+            }
+          ]
+        },
+        {
+          "type": "array",
+          "description": "Tuple format without entity type (3 elements, defaults to 'service')",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": [
+            {
+              "type": "string",
+              "description": "Relative file path from project root"
+            },
+            {
+              "type": "number",
+              "description": "X position on map canvas"
+            },
+            {
+              "type": "number",
+              "description": "Y position on map canvas"
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "description": "Object format (verbose alternative)",
+          "required": ["filePath", "posX", "posY"],
+          "properties": {
+            "entityTypeId": {
+              "type": "string",
+              "description": "Entity type identifier. Defaults to 'service' if omitted."
+            },
+            "filePath": {
+              "type": "string",
+              "description": "Relative file path from project root"
+            },
+            "posX": {
+              "type": "number",
+              "description": "X position on map canvas"
+            },
+            "posY": {
+              "type": "number",
+              "description": "Y position on map canvas"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

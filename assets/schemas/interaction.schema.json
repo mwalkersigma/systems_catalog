@@ -1,0 +1,42 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/yourusername/systems-catalog/schemas/interaction.schema.json",
+  "title": "Interaction Schema",
+  "description": "Entity relationship/interaction file schema",
+  "type": "object",
+  "required": ["id", "sourceSystemId", "targetSystemId", "label", "note", "kind"],
+  "properties": {
+    "id": {
+      "type": "integer",
+      "description": "Unique interaction identifier"
+    },
+    "sourceSystemId": {
+      "type": "integer",
+      "description": "Source entity ID"
+    },
+    "targetSystemId": {
+      "type": "integer",
+      "description": "Target entity ID"
+    },
+    "label": {
+      "type": "string",
+      "description": "Interaction label/description"
+    },
+    "note": {
+      "type": "string",
+      "description": "Additional notes about interaction"
+    },
+    "kind": {
+      "type": "string",
+      "description": "Interaction type (e.g., 'http', 'database', 'message_queue')"
+    },
+    "sourceColumnName": {
+      "type": ["string", "null"],
+      "description": "Source database column or step name"
+    },
+    "targetColumnName": {
+      "type": ["string", "null"],
+      "description": "Target database column or step name"
+    }
+  }
+}

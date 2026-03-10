@@ -1,0 +1,19 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/yourusername/systems-catalog/schemas/entity-service.schema.json",
+  "title": "Service Entity",
+  "description": "Service/microservice entity file schema",
+  "allOf": [
+    {
+      "$ref": "entity-base.schema.json"
+    },
+    {
+      "type": "object",
+      "properties": {
+        "systemType": {
+          "const": "service"
+        }
+      }
+    }
+  ]
+}

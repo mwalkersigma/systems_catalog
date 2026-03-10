@@ -1,0 +1,54 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/yourusername/systems-catalog/schemas/entity-zone.schema.json",
+  "title": "Zone Entity",
+  "description": "Zone/region entity for grouping related systems (currently stored in Project.json, not as individual files)",
+  "type": "object",
+  "required": ["id", "name", "x", "y", "width", "height", "renderPriority", "minimized"],
+  "properties": {
+    "id": {
+      "type": "integer",
+      "description": "Unique zone identifier"
+    },
+    "name": {
+      "type": "string",
+      "description": "Zone display name"
+    },
+    "x": {
+      "type": "number",
+      "description": "Zone X position on canvas"
+    },
+    "y": {
+      "type": "number",
+      "description": "Zone Y position on canvas"
+    },
+    "width": {
+      "type": "number",
+      "description": "Zone width"
+    },
+    "height": {
+      "type": "number",
+      "description": "Zone height"
+    },
+    "color": {
+      "type": ["string", "null"],
+      "description": "Zone fill color (hex or CSS color)"
+    },
+    "renderPriority": {
+      "type": "integer",
+      "description": "Drawing order (higher = drawn later/on top)"
+    },
+    "parentZoneId": {
+      "type": ["integer", "null"],
+      "description": "ID of parent zone for nested zones"
+    },
+    "minimized": {
+      "type": "boolean",
+      "description": "Whether zone is collapsed to representative system"
+    },
+    "representativeSystemId": {
+      "type": ["integer", "null"],
+      "description": "System to show when zone is minimized"
+    }
+  }
+}

@@ -34,6 +34,7 @@ struct EntityTypePluginDefinition {
     key: String,
     label: String,
     base_type: String,
+    eager_map_content: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -42,6 +43,8 @@ struct EntityTypeManifestFile {
     key: String,
     label: Option<String>,
     base_type: Option<String>,
+    #[serde(default)]
+    eager_map_content: bool,
 }
 
 static ENTITY_TYPE_PLUGINS: OnceLock<HashMap<String, EntityTypePluginDefinition>> = OnceLock::new();
@@ -108,12 +111,7 @@ fn load_entity_type_plugins() -> HashMap<String, EntityTypePluginDefinition> {
         };
 
         let key = normalize_type_key(manifest.key.as_str());
-        let base_type = normalize_type_key(
-            manifest
-                .base_type
-                .as_deref()
-                .unwrap_or("service"),
-        );
+        let base_type = normalize_type_key(manifest.base_type.as_deref().unwrap_or("service"));
         let label = manifest
             .label
             .map(|value| value.trim().to_owned())
@@ -130,6 +128,7 @@ fn load_entity_type_plugins() -> HashMap<String, EntityTypePluginDefinition> {
                 key,
                 label,
                 base_type,
+                eager_map_content: manifest.eager_map_content,
             },
         );
     }
@@ -152,6 +151,9 @@ fn resolved_base_entity_key(system_type: &str) -> String {
 pub(crate) trait SystemRenderEntity {
     fn entity_key(&self) -> &'static str;
     fn selectable_inputs(&self) -> EntitySelectableInputs;
+    fn requires_eager_map_content(&self) -> bool {
+        false
+    }
     fn render_map_label(&self, app: &SystemsCatalogApp, system: &SystemRecord) -> String;
     fn render_details_panel(
         &self,
@@ -225,7 +227,22 @@ impl SystemsCatalogApp {
             .can_select_database_columns
     }
 
-    pub(crate) fn system_entity_for_type(&self, system_type: &str) -> &'static dyn SystemRenderEntity {
+    pub(crate) fn entity_requires_eager_map_content_for_type(&self, system_type: &str) -> bool {
+        let normalized = normalize_type_key(system_type);
+        if let Some(plugin) = entity_type_plugins().get(&normalized) {
+            if plugin.eager_map_content {
+                return true;
+            }
+        }
+
+        self.system_entity_for_type(system_type)
+            .requires_eager_map_content()
+    }
+
+    pub(crate) fn system_entity_for_type(
+        &self,
+        system_type: &str,
+    ) -> &'static dyn SystemRenderEntity {
         match resolved_base_entity_key(system_type).as_str() {
             "api" => &API_ENTITY,
             "database" => &DATABASE_ENTITY,
@@ -234,7 +251,10 @@ impl SystemsCatalogApp {
         }
     }
 
-    pub(crate) fn system_entity_for(&self, system: &SystemRecord) -> &'static dyn SystemRenderEntity {
+    pub(crate) fn system_entity_for(
+        &self,
+        system: &SystemRecord,
+    ) -> &'static dyn SystemRenderEntity {
         self.system_entity_for_type(system.system_type.as_str())
     }
 

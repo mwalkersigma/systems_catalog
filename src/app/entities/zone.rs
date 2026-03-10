@@ -71,7 +71,10 @@ impl ZoneRenderEntity for DefaultZoneRenderEntity {
 
         ui.horizontal(|ui| {
             ui.label("Color");
-            if ui.color_edit_button_srgba(&mut app.selected_zone_color).changed() {
+            if ui
+                .color_edit_button_srgba(&mut app.selected_zone_color)
+                .changed()
+            {
                 app.update_selected_zone_properties();
             }
         });
@@ -94,7 +97,12 @@ impl ZoneRenderEntity for DefaultZoneRenderEntity {
         if let Some(zone_id) = app.selected_zone_id {
             let parent_label = app
                 .selected_zone_parent_zone_id
-                .and_then(|id| app.zones.iter().find(|zone| zone.id == id).map(|zone| zone.name.clone()))
+                .and_then(|id| {
+                    app.zones
+                        .iter()
+                        .find(|zone| zone.id == id)
+                        .map(|zone| zone.name.clone())
+                })
                 .unwrap_or_else(|| "No parent zone".to_owned());
 
             let previous_parent = app.selected_zone_parent_zone_id;
@@ -103,7 +111,11 @@ impl ZoneRenderEntity for DefaultZoneRenderEntity {
             egui::ComboBox::from_id_source(("zone_parent_zone_sidebar", zone_id))
                 .selected_text(parent_label)
                 .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut app.selected_zone_parent_zone_id, None, "No parent zone");
+                    ui.selectable_value(
+                        &mut app.selected_zone_parent_zone_id,
+                        None,
+                        "No parent zone",
+                    );
                     for (candidate_id, candidate_name) in parent_candidates {
                         ui.selectable_value(
                             &mut app.selected_zone_parent_zone_id,
@@ -127,10 +139,8 @@ impl ZoneRenderEntity for DefaultZoneRenderEntity {
                 .or(app.selected_zone_representative_system_id)
                 .map(|id| app.system_dropdown_label(id))
                 .unwrap_or_else(|| "Choose representative".to_owned());
-            let representative_label = SystemsCatalogApp::clamp_text_to_width(
-                &representative_label,
-                ui.available_width(),
-            );
+            let representative_label =
+                SystemsCatalogApp::clamp_text_to_width(&representative_label, ui.available_width());
 
             egui::ComboBox::from_id_source(("zone_representative_sidebar", zone_id))
                 .selected_text(representative_label)
@@ -161,8 +171,7 @@ impl ZoneRenderEntity for DefaultZoneRenderEntity {
                     }
                 });
 
-            if representative_locked
-                && app.selected_zone_representative_system_id != unique_common
+            if representative_locked && app.selected_zone_representative_system_id != unique_common
             {
                 app.selected_zone_representative_system_id = unique_common;
                 app.update_selected_zone_properties();

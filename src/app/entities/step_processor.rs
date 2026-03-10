@@ -20,6 +20,10 @@ impl SystemRenderEntity for StepProcessorRenderEntity {
         }
     }
 
+    fn requires_eager_map_content(&self) -> bool {
+        true
+    }
+
     fn render_map_label(&self, app: &SystemsCatalogApp, system: &SystemRecord) -> String {
         let prefix = map_icon_for_system_type(system.system_type.as_str());
         let title = if prefix.is_empty() {
@@ -71,17 +75,11 @@ impl SystemRenderEntity for StepProcessorRenderEntity {
                         .desired_width(280.0),
                 );
 
-                if ui
-                    .add_enabled(index > 0, egui::Button::new("Up"))
-                    .clicked()
-                {
+                if ui.add_enabled(index > 0, egui::Button::new("Up")).clicked() {
                     row_to_move = Some((index, index - 1));
                 }
                 if ui
-                    .add_enabled(
-                        index + 1 < total_steps,
-                        egui::Button::new("Down"),
-                    )
+                    .add_enabled(index + 1 < total_steps, egui::Button::new("Down"))
                     .clicked()
                 {
                     row_to_move = Some((index, index + 1));

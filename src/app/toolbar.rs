@@ -38,7 +38,8 @@ impl SystemsCatalogApp {
                         ui.close_menu();
                     }
                     if ui.button("Import DDL File").clicked() {
-                        let mut dialog = FileDialog::new().add_filter("DDL", &["sql", "ddl", "txt"]);
+                        let mut dialog =
+                            FileDialog::new().add_filter("DDL", &["sql", "ddl", "txt"]);
                         if !self.current_catalog_path.trim().is_empty() {
                             dialog = dialog.set_directory(self.current_catalog_path.as_str());
                         }
@@ -48,7 +49,8 @@ impl SystemsCatalogApp {
                         ui.close_menu();
                     }
                     if ui.button("Import OpenAPI File").clicked() {
-                        let mut dialog = FileDialog::new().add_filter("OpenAPI", &["yaml", "yml", "json"]);
+                        let mut dialog =
+                            FileDialog::new().add_filter("OpenAPI", &["yaml", "yml", "json"]);
                         if !self.current_catalog_path.trim().is_empty() {
                             dialog = dialog.set_directory(self.current_catalog_path.as_str());
                         }
@@ -133,7 +135,8 @@ impl SystemsCatalogApp {
                         ui.label("Recent projects");
                         let recent_paths = self.recent_catalog_paths.clone();
                         for path in recent_paths {
-                            let project_name = SystemsCatalogApp::catalog_name_from_path(path.as_str());
+                            let project_name =
+                                SystemsCatalogApp::catalog_name_from_path(path.as_str());
                             let label = format!("{} ({})", project_name, path);
                             if ui.button(label).clicked() {
                                 self.pending_catalog_switch_path = Some(path.clone());
@@ -144,6 +147,13 @@ impl SystemsCatalogApp {
                 });
 
                 ui.menu_button("Edit", |ui| {
+                    if ui.button("Command Palette    Ctrl+P").clicked() {
+                        self.command_palette_query.clear();
+                        self.focus_command_palette_query = true;
+                        self.open_modal(AppModal::CommandPalette);
+                        ui.close_menu();
+                    }
+                    ui.separator();
                     if ui.button("Add System          Ctrl+N").clicked() {
                         self.open_add_system_modal_with_prefill(self.selected_system_id);
                         ui.close_menu();
@@ -363,7 +373,16 @@ impl SystemsCatalogApp {
                             .small(),
                     );
                     ui.separator();
-                    ui.label(RichText::new(&self.status_message).italics().weak());
+                    let status_text = RichText::new(&self.status_message)
+                        .small()
+                        .color(egui::Color32::from_rgb(196, 204, 222));
+                    egui::Frame::none()
+                        .fill(egui::Color32::from_rgba_unmultiplied(54, 72, 108, 84))
+                        .rounding(egui::Rounding::same(6.0))
+                        .inner_margin(egui::Margin::symmetric(8.0, 4.0))
+                        .show(ui, |ui| {
+                            ui.label(status_text);
+                        });
                 });
             });
         });

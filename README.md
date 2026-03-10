@@ -1,81 +1,66 @@
-# Systems Catalog (Rust Desktop App)
+# Systems Catalog
 
-Systems Catalog is a desktop GUI app for documenting the systems you maintain, linking systems together, and storing notes per system.
+Systems Catalog is a Rust desktop app for documenting systems, their relationships, notes, and technology usage in a file-native project format.
 
 ## Stack
 
-- **GUI:** `eframe` / `egui`
-- **Database:** SQLite via `rusqlite` (bundled SQLite)
-- **Error handling:** `anyhow`
+- GUI: `eframe` / `egui`
+- Persistence: file-native `FileStore`
+- Error handling: `anyhow`
 
-## Why this structure (learning-first)
+## Project structure
 
-The code is split into small modules with clear responsibilities:
+- `src/models.rs` - core data shapes such as systems, links, notes, tech items, and zones
+- `src/file_store.rs` - file-native persistence with atomic writes and lazy entity loading
+- `src/app.rs` - shared app state, synchronization logic, and helpers
+- `src/app/actions.rs` - write-side actions and workflows
+- `src/app/ui.rs` - rendering and interaction surfaces
+- `src/project_store.rs` - manifest and file format models
+- `src/main.rs` - startup and window bootstrap
 
-- `src/models.rs` — data shapes (`SystemRecord`, `SystemLink`, `SystemNote`)
-- `src/db.rs` — repository/data access layer and schema initialization
-- `src/app.rs` — shared app state, synchronization logic, and helpers
-- `src/app/actions.rs` — user actions (create system, assign tech, save notes, create links)
-- `src/app/ui.rs` — rendering for list/details and visual map-link mode
-- `src/main.rs` — startup/bootstrap
+## Features
 
-### TypeScript mental model
+- Hierarchical system catalog with service, database, API route, and step processor entities
+- Directed interactions between systems
+- Reusable tech catalog with per-system assignments
+- Multiple notes per system
+- Database column editing for database entities
+- Visual map editing with draggable nodes and relationship creation
+- Zone and grouping support in project metadata
+- YAML import and export flows
+- File-based project save and load
 
-- `models.rs` ≈ TypeScript `interface`/`type` definitions
-- `db.rs` ≈ service/repository class (e.g. `SystemsRepository`)
-- `app.rs` ≈ stateful UI component (like a React container) but explicit and strongly typed
+## Storage model
 
-## Features implemented
+Projects are stored on disk using a lightweight manifest plus per-entity and per-interaction files.
 
-- Dark theme by default
-- Create systems with optional parent system
-- Classify systems by kind (`service`, `database`, `api_route`)
-- Browse systems in hierarchy view
-- Select a system and view details
-- Create directed interactions (links) between systems
-- Maintain a reusable tech catalog (create once, reuse across systems)
-- Add optional technology description and documentation link
-- Assign tech stack items to each system
-- Show cumulative deduplicated tech used by all child/descendant systems
-- Visual map-link mode (mind-map style): drag system nodes, Shift+drag between nodes to create links
-- Collapsible parent groups in map view: collapsed cards retain de-duplicated dependency connections from hidden descendants
-- Two-way sync: map and list view reflect the same underlying systems and links
-- Create and manage multiple notes per system
-- Save catalog snapshots to a database file and load them back
-- Export/import catalog structure as YAML
-- YAML import supports both add/update mode and full replace mode
-- Restore previous window size/position on startup
+```text
+project-root/
+├── project.json
+├── systems/
+│   ├── service__users__2.json
+│   └── api__orders__5.json
+└── interactions/
+    └── 2__to__5__99.json
+```
 
-## Data model
+`project.json` stores the lightweight graph index. Entity files in `systems/` store system-specific content such as notes, database columns, route methods, and assigned tech IDs. Interaction files in `interactions/` store link metadata.
 
-SQLite tables:
+When a legacy `Project.json` manifest is present, it is still loaded for compatibility. Otherwise the app uses `project.json` and discovers interactions from `interactions/*.json`.
 
-- `systems`
-  - `id` (PK)
-  - `name` (unique)
-  - `kind` (`service` by default)
-  - `description`
-  - `parent_id` (nullable FK to `systems.id`)
-- `links`
-  - `id` (PK)
-  - `source_system_id` (FK)
-  - `target_system_id` (FK)
-  - `label`
-  - unique pair (`source_system_id`, `target_system_id`)
-- `notes`
-  - `id` (PK)
-  - `system_id` (FK)
-  - `body`
-  - `updated_at`
-- `tech_catalog`
-  - `id` (PK)
-  - `name` (unique)
-  - `description` (nullable)
-  - `documentation_link` (nullable)
-- `system_tech`
-  - `system_id` (FK)
-  - `tech_id` (FK)
-  - primary key (`system_id`, `tech_id`)
+## JSON schemas
+
+Schema definitions for project and entity files are available under `assets/schemas/`.
+
+- `project.schema.json` - lightweight project index
+- `entity-base.schema.json` - shared entity fields
+- `entity-service.schema.json` - service entities
+- `entity-api.schema.json` - API route entities
+- `entity-database.schema.json` - database entities
+- `entity-step-processor.schema.json` - step processor entities
+- `interaction.schema.json` - interaction files
+
+See `assets/schemas/README.md` for schema details.
 
 ## Run
 
@@ -83,39 +68,19 @@ SQLite tables:
 cargo run
 ```
 
-This creates/uses `systems_catalog.db` in the project root.
-
-## Compile / Build
-
-Debug build:
+## Build
 
 ```bash
 cargo build
-```
-
-Release build:
-
-```bash
 cargo build --release
 ```
 
-Release binary output:
-
-- Windows: `target/release/systems_catalog.exe`
-- macOS/Linux: `target/release/systems_catalog`
-
-Windows note:
-
-- The release executable is built as a GUI app (no extra console window).
-- An application icon is embedded into the `.exe`.
+Release binaries are written to `target/release/`.
 
 ## Quality checks
 
 ```bash
 cargo check
 cargo fmt --check
+cargo test
 ```
-
-## Scope Note
-
-See [PROJECT_SCOPE.md](PROJECT_SCOPE.md) for implementation scope details, including explicit exclusions for temporary tooling instruction files.

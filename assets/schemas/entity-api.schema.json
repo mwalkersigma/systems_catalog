@@ -1,0 +1,23 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/yourusername/systems-catalog/schemas/entity-api.schema.json",
+  "title": "API Entity",
+  "description": "API/route entity file schema with HTTP methods",
+  "allOf": [
+    {
+      "$ref": "entity-base.schema.json"
+    },
+    {
+      "type": "object",
+      "properties": {
+        "systemType": {
+          "const": "api"
+        },
+        "routeMethods": {
+          "type": ["string", "null"],
+          "description": "HTTP methods supported by this API endpoint (e.g., 'GET, POST')"
+        }
+      }
+    }
+  ]
+}

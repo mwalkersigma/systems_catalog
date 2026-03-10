@@ -41,7 +41,8 @@ impl SystemRenderEntity for ApiRenderEntity {
                 let mut enabled = app.selected_system_route_methods.contains(*method);
                 if ui.checkbox(&mut enabled, *method).changed() {
                     if enabled {
-                        app.selected_system_route_methods.insert((*method).to_owned());
+                        app.selected_system_route_methods
+                            .insert((*method).to_owned());
                     } else {
                         app.selected_system_route_methods.remove(*method);
                     }

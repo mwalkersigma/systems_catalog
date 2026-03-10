@@ -1,7 +1,7 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 mod app;
-mod db;
+mod file_store;
 mod models;
 mod plugins;
 mod project_store;
@@ -9,17 +9,43 @@ mod project_store;
 use std::path::PathBuf;
 
 use app::SystemsCatalogApp;
-use db::Repository;
-use eframe::egui::{FontData, FontDefinitions, FontFamily, Vec2, ViewportBuilder};
+use eframe::egui::{
+    FontData, FontDefinitions, FontFamily, Rounding, Style, Vec2, ViewportBuilder,
+};
+use file_store::FileStore;
+
+fn apply_phase6_style_tokens(context: &eframe::egui::Context) {
+    let rounding = 2.0;
+    let panel_rounding = Rounding::same(rounding);
+    let mut visuals = eframe::egui::Visuals::dark();
+    visuals.window_rounding = panel_rounding;
+    visuals.menu_rounding = panel_rounding;
+    visuals.panel_fill = eframe::egui::Color32::from_rgb(24, 26, 30);
+    visuals.extreme_bg_color = eframe::egui::Color32::from_rgb(18, 20, 24);
+    visuals.widgets.active.rounding = panel_rounding;
+    visuals.widgets.hovered.rounding = panel_rounding;
+    visuals.widgets.inactive.rounding = panel_rounding;
+    visuals.slider_trailing_fill = true;
+    
+    let mut style: Style = (*context.style()).clone();
+    style.spacing.item_spacing = Vec2::new(5.0, 3.0);
+    style.spacing.window_margin = eframe::egui::Margin::same(8.0);
+
+    style.spacing.button_padding = Vec2::new(15.0, 5.0);
+    style.spacing.menu_margin = eframe::egui::Margin::same(8.0);
+    style.visuals = visuals;
+    
+    
+
+    context.set_style(style);
+}
 
 fn main() -> eframe::Result<()> {
-    let database_path = PathBuf::from("systems_catalog.db");
-
-    // not recommended practice:
-    // docs say to prefer explicitly handling errors instead of using `expect` or `unwrap` in production code
-    // docs also specify that the error message for `expect`, should be the reason it 'should' succeed, " env variable `IMPORTANT_PATH` should be set by `wrapper_script.sh "
-    let repository = Repository::open(&database_path)
-        .expect("failed to open SQLite database for Systems Catalog");
+    // Use FileStore for file-native project storage
+    let project_dir = PathBuf::from(".");
+    let store = FileStore::open(&project_dir)
+        .unwrap_or_else(|_| FileStore::create(&project_dir)
+            .expect("failed to create FileStore for Systems Catalog"));
     let viewport = ViewportBuilder::default().with_inner_size(Vec2::new(1280.0, 820.0));
 
     let native_options = eframe::NativeOptions {
@@ -47,11 +73,9 @@ fn main() -> eframe::Result<()> {
                 .push("material_icons".to_owned());
             creation_context.egui_ctx.set_fonts(fonts);
 
-            creation_context
-                .egui_ctx
-                .set_visuals(eframe::egui::Visuals::dark());
+            apply_phase6_style_tokens(&creation_context.egui_ctx);
 
-            let mut app = SystemsCatalogApp::new(repository)
+            let mut app = SystemsCatalogApp::new(store)
                 .expect("failed to initialize Systems Catalog application state");
 
             if let Some(storage) = creation_context.storage {

@@ -1,0 +1,51 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/yourusername/systems-catalog/schemas/entity-database.schema.json",
+  "title": "Database Entity",
+  "description": "Database table/schema entity file with column definitions",
+  "allOf": [
+    {
+      "$ref": "entity-base.schema.json"
+    },
+    {
+      "type": "object",
+      "properties": {
+        "systemType": {
+          "const": "database"
+        },
+        "databaseColumns": {
+          "type": "array",
+          "description": "Table column definitions",
+          "items": {
+            "$ref": "#/definitions/DatabaseColumn"
+          },
+          "default": []
+        }
+      }
+    }
+  ],
+  "definitions": {
+    "DatabaseColumn": {
+      "type": "object",
+      "required": ["position", "columnName", "columnType"],
+      "properties": {
+        "position": {
+          "type": "integer",
+          "description": "Display order position"
+        },
+        "columnName": {
+          "type": "string",
+          "description": "Column name"
+        },
+        "columnType": {
+          "type": "string",
+          "description": "SQL data type"
+        },
+        "constraints": {
+          "type": ["string", "null"],
+          "description": "SQL constraints (PRIMARY KEY, NOT NULL, etc.)"
+        }
+      }
+    }
+  }
+}

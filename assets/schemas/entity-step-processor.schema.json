@@ -1,0 +1,52 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/yourusername/systems-catalog/schemas/entity-step-processor.schema.json",
+  "title": "Step Processor Entity",
+  "description": "Sequential workflow/process entity with ordered steps",
+  "allOf": [
+    {
+      "$ref": "entity-base.schema.json"
+    },
+    {
+      "type": "object",
+      "properties": {
+        "systemType": {
+          "const": "step_processor"
+        },
+        "databaseColumns": {
+          "type": "array",
+          "description": "Processing steps (stored in databaseColumns for backward compatibility)",
+          "items": {
+            "$ref": "#/definitions/ProcessingStep"
+          },
+          "default": []
+        }
+      }
+    }
+  ],
+  "definitions": {
+    "ProcessingStep": {
+      "type": "object",
+      "required": ["position", "columnName", "columnType"],
+      "properties": {
+        "position": {
+          "type": "integer",
+          "description": "Step execution order"
+        },
+        "columnName": {
+          "type": "string",
+          "description": "Step name/label"
+        },
+        "columnType": {
+          "type": "string",
+          "description": "Step type identifier (currently unused, set to 'step')",
+          "default": "step"
+        },
+        "constraints": {
+          "type": ["string", "null"],
+          "description": "Step-specific configuration (reserved for future use)"
+        }
+      }
+    }
+  }
+}

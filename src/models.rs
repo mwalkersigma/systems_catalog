@@ -66,16 +66,7 @@ pub struct ZoneRecord {
 }
 
 #[derive(Debug, Clone)]
-pub struct ZoneSystemOffset {
-    pub zone_id: i64,
-    pub system_id: i64,
-    pub offset_x: f32,
-    pub offset_y: f32,
-}
-
-#[derive(Debug, Clone)]
 pub struct DatabaseColumnRecord {
-    pub system_id: i64,
     pub position: i64,
     pub column_name: String,
     pub column_type: String,

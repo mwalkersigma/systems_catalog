@@ -5,14 +5,124 @@ use std::process::Command;
 use eframe::egui::{Pos2, Rect};
 
 use crate::app::{CopiedSystemEntry, InteractionKind, SystemsCatalogApp, MAP_GRID_SPACING, MAP_NODE_SIZE};
-use crate::models::DatabaseColumnInput;
+use crate::models::{DatabaseColumnInput, TechItem, ZoneRecord};
 use crate::plugins::{parse_llm_detailed_import_file, plugin_by_name};
 use crate::project_store::{
-    DatabaseColumnFile, InteractionFile, ProjectFile, ProjectSettings, ProjectTechItem,
+    filesystem_project_has_manifest, load_filesystem_project_manifest, DatabaseColumnFile,
+    InteractionFile, ProjectFile, ProjectSettings, ProjectTechItem,
     ProjectZone, ProjectZoneOffset, SystemFile, SystemNoteFile,
 };
 
 impl SystemsCatalogApp {
+    fn apply_loaded_project_metadata(
+        &mut self,
+        root: &Path,
+        project: &ProjectFile,
+        has_explicit_project_metadata: bool,
+    ) -> anyhow::Result<()> {
+        self.tech_catalog = project
+            .tech_catalog
+            .iter()
+            .map(|tech| TechItem {
+                id: tech.id,
+                name: tech.name.clone(),
+                description: tech.description.clone(),
+                documentation_link: tech.documentation_link.clone(),
+                color: tech.color.clone(),
+                display_priority: tech.display_priority,
+            })
+            .collect();
+
+        self.zones = project
+            .zones
+            .iter()
+            .map(|zone| ZoneRecord {
+                id: zone.id,
+                name: zone.name.clone(),
+                x: zone.x,
+                y: zone.y,
+                width: zone.width,
+                height: zone.height,
+                color: zone.color.clone(),
+                render_priority: zone.render_priority,
+                parent_zone_id: zone.parent_zone_id,
+                minimized: zone.minimized,
+                representative_system_id: zone.representative_system_id,
+            })
+            .collect();
+
+        self.zone_offsets_by_system.clear();
+        for offset in &project.zone_offsets {
+            self.zone_offsets_by_system.insert(
+                offset.system_id,
+                (offset.zone_id, Pos2::new(offset.offset_x, offset.offset_y)),
+            );
+        }
+
+        self.refresh_systems()?;
+        self.clear_selection();
+
+        if !has_explicit_project_metadata {
+            self.pending_map_focus_system_id = self
+                .systems
+                .iter()
+                .find(|system| !Self::is_internal_step_system(system))
+                .map(|system| system.id);
+            self.project_last_autosave_at_secs = None;
+            self.clear_system_change_flags();
+            self.settings_dirty = true;
+            return Ok(());
+        }
+
+        let safe_zoom = if project.settings.map_zoom.is_finite() {
+            project.settings.map_zoom
+        } else {
+            1.0
+        };
+        let safe_pan_x = if project.settings.map_pan_x.is_finite() {
+            project.settings.map_pan_x
+        } else {
+            0.0
+        };
+        let safe_pan_y = if project.settings.map_pan_y.is_finite() {
+            project.settings.map_pan_y
+        } else {
+            0.0
+        };
+        let safe_world_w = if project.settings.map_world_width.is_finite() {
+            project.settings.map_world_width
+        } else {
+            crate::app::MAP_WORLD_SIZE.x
+        };
+        let safe_world_h = if project.settings.map_world_height.is_finite() {
+            project.settings.map_world_height
+        } else {
+            crate::app::MAP_WORLD_SIZE.y
+        };
+
+        self.map_zoom = safe_zoom.clamp(crate::app::MAP_MIN_ZOOM, crate::app::MAP_MAX_ZOOM);
+        self.map_pan.x = safe_pan_x;
+        self.map_pan.y = safe_pan_y;
+        self.map_world_size.x = safe_world_w.clamp(
+            crate::app::MAP_WORLD_MIN_SIZE.x,
+            crate::app::MAP_WORLD_MAX_SIZE.x,
+        );
+        self.map_world_size.y = safe_world_h.clamp(
+            crate::app::MAP_WORLD_MIN_SIZE.y,
+            crate::app::MAP_WORLD_MAX_SIZE.y,
+        );
+        self.snap_to_grid = project.settings.snap_to_grid;
+        self.project_autosave_enabled = project.settings.autosave_enabled;
+        self.manage_system_json_hierarchy = project.settings.manage_system_json_hierarchy;
+        self.git_repo_detect_path = root.to_string_lossy().to_string();
+        self.git_repo_detected_for_path = Some(project.settings.has_git);
+        self.project_last_autosave_at_secs = None;
+        self.clear_system_change_flags();
+        self.settings_dirty = true;
+
+        Ok(())
+    }
+
     fn non_internal_child_step_names(&self, owner_system_id: i64) -> Vec<String> {
         let mut children = self
             .systems
@@ -147,7 +257,7 @@ impl SystemsCatalogApp {
                 continue;
             }
 
-            self.repo.update_system_details(
+            self.store.update_system_details(
                 child.id,
                 child.name.as_str(),
                 child_step_name.as_str(),
@@ -156,7 +266,7 @@ impl SystemsCatalogApp {
                 "step_internal",
                 None,
             )?;
-            self.repo.replace_database_columns_for_system(child.id, &[])?;
+            self.store.replace_database_columns_for_system(child.id, &[])?;
             self.mark_system_as_dirty(child.id);
             step_names.push(child_step_name);
         }
@@ -224,7 +334,7 @@ impl SystemsCatalogApp {
         }
 
         let internal_name = self.next_available_internal_step_system_name(owner_system_id, normalized_step);
-        let new_id = self.repo.create_system(
+        let new_id = self.store.create_system(
             internal_name.as_str(),
             normalized_step,
             Some(owner_system_id),
@@ -250,7 +360,7 @@ impl SystemsCatalogApp {
 
         if owner_entity_key != "step_processor" {
             for (child_id, _) in &existing_children {
-                self.repo.delete_system(*child_id)?;
+                self.store.delete_system(*child_id)?;
             }
             if !existing_children.is_empty() {
                 self.mark_system_as_dirty(owner_system_id);
@@ -275,7 +385,7 @@ impl SystemsCatalogApp {
             .collect::<std::collections::HashSet<_>>();
         for (child_id, existing_step_name) in existing_children {
             if !desired_set.contains(existing_step_name.as_str()) {
-                self.repo.delete_system(child_id)?;
+                self.store.delete_system(child_id)?;
                 self.mark_system_as_dirty(owner_system_id);
             }
         }
@@ -445,7 +555,7 @@ impl SystemsCatalogApp {
                     Vec::new()
                 };
 
-                self.repo.update_system_details(
+                self.store.update_system_details(
                     system.id,
                     system.name.as_str(),
                     system.description.as_str(),
@@ -466,14 +576,14 @@ impl SystemsCatalogApp {
                     if normalized_target == "step_processor" {
                         columns = Self::merge_step_names_into_columns(columns, &child_step_names);
                     }
-                    self.repo
+                    self.store
                         .replace_database_columns_for_system(system.id, &columns)?;
                     columns
                         .iter()
                         .map(|column| column.column_name.clone())
                         .collect::<Vec<_>>()
                 } else {
-                    self.repo
+                    self.store
                         .replace_database_columns_for_system(system.id, &[])?;
                     Vec::new()
                 };
@@ -949,7 +1059,7 @@ impl SystemsCatalogApp {
                     None => None,
                 };
 
-                let system_id = self.repo.create_system(
+                let system_id = self.store.create_system(
                     draft.name.as_str(),
                     draft.description.as_str(),
                     parent_id,
@@ -960,7 +1070,7 @@ impl SystemsCatalogApp {
                 self.mark_system_as_new(system_id);
 
                 if !draft.database_columns.is_empty() {
-                    self.repo
+                    self.store
                         .replace_database_columns_for_system(system_id, &draft.database_columns)?;
                     self.mark_system_as_dirty(system_id);
                 }
@@ -1193,7 +1303,7 @@ impl SystemsCatalogApp {
                     ));
                 };
 
-                self.repo.update_system_details(
+                self.store.update_system_details(
                     existing.id,
                     existing.name.as_str(),
                     draft.description.as_str(),
@@ -1207,13 +1317,13 @@ impl SystemsCatalogApp {
                 let merged_columns =
                     Self::merge_ddl_columns_preserving_references(draft.database_columns, &referenced_columns);
 
-                self.repo
+                self.store
                     .replace_database_columns_for_system(existing.id, &merged_columns)?;
 
                 self.mark_system_as_dirty(existing.id);
                 updated_count += 1;
             } else {
-                let new_id = self.repo.create_system(
+                let new_id = self.store.create_system(
                     draft.name.as_str(),
                     draft.description.as_str(),
                     None,
@@ -1224,7 +1334,7 @@ impl SystemsCatalogApp {
                 self.mark_system_as_new(new_id);
 
                 if !draft.database_columns.is_empty() {
-                    self.repo
+                    self.store
                         .replace_database_columns_for_system(new_id, &draft.database_columns)?;
                 }
 
@@ -1420,7 +1530,7 @@ impl SystemsCatalogApp {
                         || existing_methods != draft_methods
                         || existing.system_type != "api"
                     {
-                        self.repo.update_system_details(
+                        self.store.update_system_details(
                             existing.id,
                             existing.name.as_str(),
                             draft.description.as_str(),
@@ -1437,7 +1547,7 @@ impl SystemsCatalogApp {
                         id_by_source_key.insert(source_key, existing.id);
                     }
                 } else {
-                    let system_id = self.repo.create_system(
+                    let system_id = self.store.create_system(
                         draft.name.as_str(),
                         draft.description.as_str(),
                         parent_id,
@@ -1769,7 +1879,7 @@ impl SystemsCatalogApp {
 
         let result = (|| -> anyhow::Result<(usize, usize)> {
             let root_id = self
-                .repo
+                .store
                 .create_system(root_name.as_str(), "LLM detailed import root", None, "service", None)?;
             self.mark_system_as_new(root_id);
 
@@ -1793,7 +1903,7 @@ impl SystemsCatalogApp {
                         None => Some(root_id),
                     };
 
-                    let system_id = self.repo.create_system(
+                    let system_id = self.store.create_system(
                         draft.name.as_str(),
                         draft.description.as_str(),
                         parent_id,
@@ -1868,7 +1978,7 @@ impl SystemsCatalogApp {
 
             let mut created_interactions = 0usize;
             for ((source_id, target_id), (kind, label, note)) in aggregated {
-                self.repo.create_link(
+                self.store.create_link(
                     source_id,
                     target_id,
                     label.trim(),
@@ -1879,13 +1989,13 @@ impl SystemsCatalogApp {
 
                 if !note.trim().is_empty() {
                     if let Some(link_id) = self
-                        .repo
+                        .store
                         .list_links()?
                         .into_iter()
                         .find(|link| link.source_system_id == source_id && link.target_system_id == target_id)
                         .map(|link| link.id)
                     {
-                        self.repo.update_link_details(
+                        self.store.update_link_details(
                             link_id,
                             label.trim(),
                             note.trim(),
@@ -2093,7 +2203,7 @@ impl SystemsCatalogApp {
                 .unwrap_or((system.map_x, system.map_y));
 
             let notes = self
-                .repo
+                .store
                 .list_notes_for_system(system.id)?
                 .into_iter()
                 .map(|note| SystemNoteFile {
@@ -2251,9 +2361,8 @@ impl SystemsCatalogApp {
         root: &Path,
         force_full_sync: bool,
     ) -> anyhow::Result<()> {
-        let project_path = root.join("Project.json");
-        let project_text = std::fs::read_to_string(&project_path)?;
-        let project: ProjectFile = serde_json::from_str(project_text.as_str())?;
+        let loaded_manifest = load_filesystem_project_manifest(root)?;
+        let project = loaded_manifest.project;
 
         let git_changed_paths = Self::git_changed_paths(root);
         let git_changed_system_ids = Self::git_changed_system_ids(root);
@@ -2264,7 +2373,9 @@ impl SystemsCatalogApp {
         let project_changed_non_system = force_full_sync
             || (use_git_change_filter
             && git_changed_paths.iter().any(|path| {
-                path.eq_ignore_ascii_case("Project.json") || path.starts_with("interactions/")
+                path.eq_ignore_ascii_case("Project.json")
+                    || path.eq_ignore_ascii_case("project.json")
+                    || path.starts_with("interactions/")
             }));
 
         let path_by_system_id = project
@@ -2276,7 +2387,7 @@ impl SystemsCatalogApp {
             })
             .collect::<HashMap<_, _>>();
 
-        let existing_systems = self.repo.list_systems()?;
+        let existing_systems = self.store.list_systems()?;
         let existing_by_id = existing_systems
             .into_iter()
             .map(|system| (system.id, system))
@@ -2285,7 +2396,7 @@ impl SystemsCatalogApp {
 
         for existing_id in existing_by_id.keys().copied().collect::<Vec<_>>() {
             if !file_ids.contains(&existing_id) {
-                self.repo.delete_system(existing_id)?;
+                self.store.delete_system(existing_id)?;
             }
         }
 
@@ -2314,6 +2425,15 @@ impl SystemsCatalogApp {
             let file_text = std::fs::read_to_string(&absolute_path)?;
             let mut system: SystemFile = serde_json::from_str(file_text.as_str())?;
             self.normalize_loaded_system_file_for_entity(&mut system);
+            
+            // Add entity ref to store
+            self.store.upsert_entity_ref(crate::project_store::LightweightEntityRef::new(
+                system.system_type.as_str(),
+                relative_path.clone(),
+                system.map_x.unwrap_or(0.0),
+                system.map_y.unwrap_or(0.0),
+            ));
+            
             systems.push(system);
         }
 
@@ -2331,7 +2451,7 @@ impl SystemsCatalogApp {
                     || existing.line_color_override != system.line_color_override;
 
                 if changed {
-                    self.repo.update_system_details(
+                    self.store.update_system_details(
                         system.id,
                         system.name.as_str(),
                         system.description.as_str(),
@@ -2340,14 +2460,14 @@ impl SystemsCatalogApp {
                         system.system_type.as_str(),
                         system.route_methods.as_deref(),
                     )?;
-                    self.repo.update_system_position_optional(system.id, system.map_x, system.map_y)?;
-                    self.repo.update_system_line_color_override(
+                    self.store.update_system_position_optional(system.id, system.map_x, system.map_y)?;
+                    self.store.update_system_line_color_override(
                         system.id,
                         system.line_color_override.as_deref(),
                     )?;
                 }
             } else {
-                self.repo.insert_system_with_id(
+                self.store.insert_system_with_id(
                     system.id,
                     system.name.as_str(),
                     system.description.as_str(),
@@ -2367,7 +2487,7 @@ impl SystemsCatalogApp {
         for system in &systems {
             let current_parent = existing_by_id.get(&system.id).and_then(|existing| existing.parent_id);
             if inserted_ids.contains(&system.id) || current_parent != system.parent_id {
-                self.repo.update_system_parent(system.id, system.parent_id)?;
+                self.store.update_system_parent(system.id, system.parent_id)?;
             }
         }
 
@@ -2384,22 +2504,25 @@ impl SystemsCatalogApp {
                 }
             }
 
-            self.repo.clear_non_system_catalog_data()?;
-
-            for tech in &project.tech_catalog {
-                self.repo.insert_tech_item_with_id(
-                    tech.id,
-                    tech.name.as_str(),
-                    tech.description.as_deref(),
-                    tech.documentation_link.as_deref(),
-                    tech.color.as_deref(),
-                    tech.display_priority,
-                )?;
+            // Add all systems to the store's entity references
+            for relative_path in &project.systems_paths {
+                if let Some(system) = systems.iter().find(|s| {
+                    relative_path.contains(&format!("__{}.json", s.id))
+                }) {
+                    self.store.upsert_entity_ref(crate::project_store::LightweightEntityRef::new(
+                        system.system_type.as_str(),
+                        relative_path.clone(),
+                        system.map_x.unwrap_or(0.0),
+                        system.map_y.unwrap_or(0.0),
+                    ));
+                }
             }
+
+            self.store.clear_non_system_catalog_data()?;
 
             for system in &systems {
                 for note in &system.notes {
-                    self.repo.insert_note_with_id(
+                    self.store.insert_note_with_id(
                         note.id,
                         system.id,
                         note.body.as_str(),
@@ -2418,8 +2541,8 @@ impl SystemsCatalogApp {
                     })
                     .collect::<Vec<_>>();
 
-                self.repo.replace_database_columns_for_system(system.id, &columns)?;
-                self.repo
+                self.store.replace_database_columns_for_system(system.id, &columns)?;
+                self.store
                     .replace_system_tech_assignments(system.id, system.tech_ids.as_slice())?;
             }
 
@@ -2427,7 +2550,7 @@ impl SystemsCatalogApp {
                 let absolute_path = root.join(relative_path.replace('/', std::path::MAIN_SEPARATOR_STR));
                 let file_text = std::fs::read_to_string(&absolute_path)?;
                 let interaction: InteractionFile = serde_json::from_str(file_text.as_str())?;
-                self.repo.insert_link_with_id(
+                self.store.insert_link_with_id(
                     interaction.id,
                     interaction.source_system_id,
                     interaction.target_system_id,
@@ -2438,52 +2561,11 @@ impl SystemsCatalogApp {
                     interaction.target_column_name.as_deref(),
                 )?;
             }
-
-            for zone in &project.zones {
-                self.repo.insert_zone_with_id(
-                    zone.id,
-                    zone.name.as_str(),
-                    zone.x,
-                    zone.y,
-                    zone.width,
-                    zone.height,
-                    zone.color.as_deref(),
-                    zone.render_priority,
-                    None,
-                    false,
-                    zone.representative_system_id,
-                )?;
-            }
-
-            for zone in &project.zones {
-                self.repo.update_zone(
-                    zone.id,
-                    zone.name.as_str(),
-                    zone.x,
-                    zone.y,
-                    zone.width,
-                    zone.height,
-                    zone.color.as_deref(),
-                    zone.render_priority,
-                    zone.parent_zone_id,
-                    zone.minimized,
-                    zone.representative_system_id,
-                )?;
-            }
-
-            for offset in &project.zone_offsets {
-                self.repo.upsert_zone_system_offset(
-                    offset.zone_id,
-                    offset.system_id,
-                    offset.offset_x,
-                    offset.offset_y,
-                )?;
-            }
         } else {
             for system in &systems {
-                self.repo.delete_notes_for_system(system.id)?;
+                self.store.delete_notes_for_system(system.id)?;
                 for note in &system.notes {
-                    self.repo.insert_note_with_id(
+                    self.store.insert_note_with_id(
                         note.id,
                         system.id,
                         note.body.as_str(),
@@ -2501,62 +2583,13 @@ impl SystemsCatalogApp {
                         constraints: column.constraints.clone(),
                     })
                     .collect::<Vec<_>>();
-                self.repo.replace_database_columns_for_system(system.id, &columns)?;
-                self.repo
+                self.store.replace_database_columns_for_system(system.id, &columns)?;
+                self.store
                     .replace_system_tech_assignments(system.id, system.tech_ids.as_slice())?;
             }
         }
 
-        self.refresh_systems()?;
-        self.clear_selection();
-
-        let safe_zoom = if project.settings.map_zoom.is_finite() {
-            project.settings.map_zoom
-        } else {
-            1.0
-        };
-        let safe_pan_x = if project.settings.map_pan_x.is_finite() {
-            project.settings.map_pan_x
-        } else {
-            0.0
-        };
-        let safe_pan_y = if project.settings.map_pan_y.is_finite() {
-            project.settings.map_pan_y
-        } else {
-            0.0
-        };
-        let safe_world_w = if project.settings.map_world_width.is_finite() {
-            project.settings.map_world_width
-        } else {
-            crate::app::MAP_WORLD_SIZE.x
-        };
-        let safe_world_h = if project.settings.map_world_height.is_finite() {
-            project.settings.map_world_height
-        } else {
-            crate::app::MAP_WORLD_SIZE.y
-        };
-
-        self.map_zoom = safe_zoom.clamp(crate::app::MAP_MIN_ZOOM, crate::app::MAP_MAX_ZOOM);
-        self.map_pan.x = safe_pan_x;
-        self.map_pan.y = safe_pan_y;
-        self.map_world_size.x = safe_world_w.clamp(
-            crate::app::MAP_WORLD_MIN_SIZE.x,
-            crate::app::MAP_WORLD_MAX_SIZE.x,
-        );
-        self.map_world_size.y = safe_world_h.clamp(
-            crate::app::MAP_WORLD_MIN_SIZE.y,
-            crate::app::MAP_WORLD_MAX_SIZE.y,
-        );
-        self.snap_to_grid = project.settings.snap_to_grid;
-        self.project_autosave_enabled = project.settings.autosave_enabled;
-        self.manage_system_json_hierarchy = project.settings.manage_system_json_hierarchy;
-        self.git_repo_detect_path = root.to_string_lossy().to_string();
-        self.git_repo_detected_for_path = Some(project.settings.has_git);
-        self.project_last_autosave_at_secs = None;
-        self.clear_system_change_flags();
-        self.settings_dirty = true;
-
-        Ok(())
+        self.apply_loaded_project_metadata(root, &project, true)
     }
 
     pub(super) fn load_catalog_from_path_with_options(
@@ -2566,18 +2599,29 @@ impl SystemsCatalogApp {
     ) -> anyhow::Result<()> {
         let target = PathBuf::from(path);
 
-        let is_sqlite_catalog = target
+        let is_legacy_db_file = target
             .extension()
             .and_then(|ext| ext.to_str())
             .map(|ext| ext.eq_ignore_ascii_case("db"))
             .unwrap_or(false);
 
-        if is_sqlite_catalog {
+        if is_legacy_db_file {
             return Err(anyhow::anyhow!(
-                "Direct .db loading is disabled. Create a new project and use Migration source DB for one-time import."
+                "Direct .db loading is no longer supported. Open a filesystem project directory instead."
             ));
         } else {
-            self.import_filesystem_project_from_root(&target, force_full_sync)?;
+            self.store = crate::file_store::FileStore::open(&target)?;
+
+            if force_full_sync {
+                self.import_filesystem_project_from_root(&target, true)?;
+            } else {
+                let loaded_manifest = load_filesystem_project_manifest(&target)?;
+                self.apply_loaded_project_metadata(
+                    &target,
+                    &loaded_manifest.project,
+                    loaded_manifest.has_explicit_project_metadata,
+                )?;
+            }
         }
 
         Ok(())
@@ -2645,9 +2689,9 @@ impl SystemsCatalogApp {
                 continue;
             }
 
-            let child_id =
-                self.repo
-                    .create_system(method.as_str(), "", Some(route_system_id), "service", None)?;
+            let child_id = self
+                .store
+                .create_system(method.as_str(), "", Some(route_system_id), "service", None)?;
             self.mark_system_as_new(child_id);
 
             let base_x = route_position.x + (MAP_GRID_SPACING * 2.0);
@@ -2732,35 +2776,23 @@ impl SystemsCatalogApp {
         };
         let color_value = Some(Self::color_to_setting_value(self.selected_zone_color));
 
-        let result = self
-            .repo
-            .create_zone(
-                zone_name.as_str(),
-                x,
-                y,
-                clamped_width,
-                clamped_height,
-                color_value.as_deref(),
-                self.selected_zone_render_priority,
-                parent_zone_id,
-                false,
-                None,
-            )
-            .and_then(|new_zone_id| {
-                self.refresh_systems()?;
-                self.select_zone(new_zone_id);
-                Ok(())
-            });
-
-        match result {
-            Ok(_) => {
-                self.mark_project_as_dirty();
-                self.status_message = "Zone created".to_owned();
-            }
-            Err(error) => {
-                self.status_message = format!("Failed to create zone: {error}");
-            }
-        }
+        let new_zone_id = self.zones.iter().map(|zone| zone.id).max().unwrap_or(0) + 1;
+        self.zones.push(ZoneRecord {
+            id: new_zone_id,
+            name: zone_name,
+            x,
+            y,
+            width: clamped_width,
+            height: clamped_height,
+            color: color_value,
+            render_priority: self.selected_zone_render_priority,
+            parent_zone_id,
+            minimized: false,
+            representative_system_id: None,
+        });
+        self.select_zone(new_zone_id);
+        self.mark_project_as_dirty();
+        self.status_message = "Zone created".to_owned();
     }
 
     pub(super) fn update_selected_zone_properties(&mut self) {
@@ -2775,31 +2807,20 @@ impl SystemsCatalogApp {
         let name = self.selected_zone_name.trim();
         let name = if name.is_empty() { "Zone" } else { name };
 
-        let color_value = Some(Self::color_to_setting_value(self.selected_zone_color));
-        let result = self
-            .repo
-            .update_zone(
-                zone_id,
-                name,
-                existing.x,
-                existing.y,
-                existing.width,
-                existing.height,
-                color_value.as_deref(),
-                self.selected_zone_render_priority,
-                self.selected_zone_parent_zone_id,
-                self.selected_zone_minimized,
-                self.selected_zone_representative_system_id,
-            )
-            .and_then(|_| self.refresh_systems());
-
-        match result {
-            Ok(_) => {
-                self.mark_project_as_dirty();
-            }
-            Err(_) => {
-                self.status_message = "Failed to update zone".to_owned();
-            }
+        if let Some(zone) = self.zones.iter_mut().find(|zone| zone.id == zone_id) {
+            zone.name = name.to_owned();
+            zone.x = existing.x;
+            zone.y = existing.y;
+            zone.width = existing.width;
+            zone.height = existing.height;
+            zone.color = Some(Self::color_to_setting_value(self.selected_zone_color));
+            zone.render_priority = self.selected_zone_render_priority;
+            zone.parent_zone_id = self.selected_zone_parent_zone_id;
+            zone.minimized = self.selected_zone_minimized;
+            zone.representative_system_id = self.selected_zone_representative_system_id;
+            self.mark_project_as_dirty();
+        } else {
+            self.status_message = "Failed to update zone".to_owned();
         }
     }
 
@@ -2826,38 +2847,25 @@ impl SystemsCatalogApp {
         let max_x = (self.map_world_size.x - clamped_width).max(0.0);
         let max_y = (self.map_world_size.y - clamped_height).max(0.0);
 
-        let name = self.selected_zone_name.trim();
-        let name = if name.is_empty() { "Zone" } else { name };
-        let color_value = Some(Self::color_to_setting_value(self.selected_zone_color));
-
-        let result = self
-            .repo
-            .update_zone(
-                zone_id,
-                name,
-                clamped_x.min(max_x),
-                clamped_y.min(max_y),
-                clamped_width,
-                clamped_height,
-                color_value.as_deref(),
-                self.selected_zone_render_priority,
-                existing.parent_zone_id,
-                self.selected_zone_minimized,
-                self.selected_zone_representative_system_id,
-            )
-            .and_then(|_| self.refresh_systems())
-            .and_then(|_| {
-                self.select_zone(zone_id);
-                Ok(())
-            });
-
-        match result {
-            Ok(_) => {
-                self.mark_project_as_dirty();
-            }
-            Err(_) => {
-                self.status_message = "Failed to update zone geometry".to_owned();
-            }
+        if let Some(zone) = self.zones.iter_mut().find(|zone| zone.id == zone_id) {
+            zone.name = if self.selected_zone_name.trim().is_empty() {
+                "Zone".to_owned()
+            } else {
+                self.selected_zone_name.trim().to_owned()
+            };
+            zone.x = clamped_x.min(max_x);
+            zone.y = clamped_y.min(max_y);
+            zone.width = clamped_width;
+            zone.height = clamped_height;
+            zone.color = Some(Self::color_to_setting_value(self.selected_zone_color));
+            zone.render_priority = self.selected_zone_render_priority;
+            zone.parent_zone_id = existing.parent_zone_id;
+            zone.minimized = self.selected_zone_minimized;
+            zone.representative_system_id = self.selected_zone_representative_system_id;
+            self.select_zone(zone_id);
+            self.mark_project_as_dirty();
+        } else {
+            self.status_message = "Failed to update zone geometry".to_owned();
         }
     }
 
@@ -2893,68 +2901,33 @@ impl SystemsCatalogApp {
             }
         }
 
-        let result = self
-            .repo
-            .update_zone(
-                zone_id,
-                existing.name.as_str(),
-                existing.x,
-                existing.y,
-                existing.width,
-                existing.height,
-                existing.color.as_deref(),
-                existing.render_priority,
-                existing.parent_zone_id,
-                next_minimized,
-                next_representative,
-            )
-            .and_then(|_| {
-                for child in &nested_children {
-                    self.repo.update_zone(
-                        child.id,
-                        child.name.as_str(),
-                        child.x,
-                        child.y,
-                        child.width,
-                        child.height,
-                        child.color.as_deref(),
-                        child.render_priority,
-                        child.parent_zone_id,
-                        next_minimized,
-                        child.representative_system_id,
-                    )?;
-                }
-                Ok(())
-            })
-            .and_then(|_| self.refresh_systems())
-            .and_then(|_| {
-                if !next_minimized {
-                    for representative_id in &affected_representative_ids {
-                        self.auto_collapsed_zone_representative_ids
-                            .remove(representative_id);
-
-                        if self.collapsed_system_ids.contains(representative_id) {
-                            self.on_disclosure_click(*representative_id);
-                        }
-                    }
-                }
-                self.select_zone(zone_id);
-                Ok(())
-            });
-
-        match result {
-            Ok(_) => {
-                self.mark_project_as_dirty();
-                self.status_message = if next_minimized {
-                    "Zone minimized".to_owned()
-                } else {
-                    "Zone expanded".to_owned()
-                };
-            }
-            Err(error) => {
-                self.status_message = format!("Failed to toggle zone state: {error}");
+        if let Some(zone) = self.zones.iter_mut().find(|zone| zone.id == zone_id) {
+            zone.minimized = next_minimized;
+            zone.representative_system_id = next_representative;
+        }
+        for child in &nested_children {
+            if let Some(zone) = self.zones.iter_mut().find(|zone| zone.id == child.id) {
+                zone.minimized = next_minimized;
             }
         }
+
+        if !next_minimized {
+            for representative_id in &affected_representative_ids {
+                self.auto_collapsed_zone_representative_ids
+                    .remove(representative_id);
+
+                if self.collapsed_system_ids.contains(representative_id) {
+                    self.on_disclosure_click(*representative_id);
+                }
+            }
+        }
+        self.select_zone(zone_id);
+        self.mark_project_as_dirty();
+        self.status_message = if next_minimized {
+            "Zone minimized".to_owned()
+        } else {
+            "Zone expanded".to_owned()
+        };
     }
 
     pub(super) fn delete_selected_zone(&mut self) {
@@ -2984,23 +2957,17 @@ impl SystemsCatalogApp {
             }
         }
 
-        let result = self.repo.delete_zone(zone_id).and_then(|_| self.refresh_systems());
-
-        match result {
-            Ok(_) => {
-                self.mark_project_as_dirty();
-                self.selected_zone_id = None;
-                self.selected_zone_name.clear();
-                self.selected_zone_render_priority = 1;
-                self.selected_zone_parent_zone_id = None;
-                self.selected_zone_minimized = false;
-                self.selected_zone_representative_system_id = None;
-                self.status_message = "Zone deleted".to_owned();
-            }
-            Err(error) => {
-                self.status_message = format!("Failed to delete zone: {error}");
-            }
-        }
+        self.zones.retain(|zone| zone.id != zone_id);
+        self.zone_offsets_by_system
+            .retain(|_, (bound_zone_id, _)| *bound_zone_id != zone_id);
+        self.mark_project_as_dirty();
+        self.selected_zone_id = None;
+        self.selected_zone_name.clear();
+        self.selected_zone_render_priority = 1;
+        self.selected_zone_parent_zone_id = None;
+        self.selected_zone_minimized = false;
+        self.selected_zone_representative_system_id = None;
+        self.status_message = "Zone deleted".to_owned();
     }
 
     fn escape_clipboard_field(value: &str) -> String {
@@ -3151,7 +3118,7 @@ impl SystemsCatalogApp {
         }
 
         if let Ok(id) = self
-            .repo
+            .store
             .create_system(base, description, parent_id, "service", None)
         {
             self.mark_system_as_new(id);
@@ -3166,7 +3133,7 @@ impl SystemsCatalogApp {
             };
 
             if let Ok(id) = self
-                .repo
+                .store
                 .create_system(candidate.as_str(), description, parent_id, "service", None)
             {
                 self.mark_system_as_new(id);
@@ -3306,7 +3273,7 @@ impl SystemsCatalogApp {
 
                     if effective_parent_id == parent_id {
                         for tech_id in &parent_tech_ids {
-                            let _ = self.repo.add_tech_to_system(new_id, *tech_id);
+                            let _ = self.store.add_tech_to_system(new_id, *tech_id);
                         }
                     }
 
@@ -3496,7 +3463,7 @@ impl SystemsCatalogApp {
         }
 
         let result = self
-            .repo
+            .store
             .update_system_details(
                 system_id,
                 edited_name,
@@ -3508,10 +3475,10 @@ impl SystemsCatalogApp {
             )
             .and_then(|_| {
                 if entity_inputs.can_select_database_columns {
-                    self.repo
+                    self.store
                         .replace_database_columns_for_system(system_id, &database_columns_for_save)
                 } else {
-                    self.repo.replace_database_columns_for_system(system_id, &[])
+                    self.store.replace_database_columns_for_system(system_id, &[])
                 }
             })
             .and_then(|_| {
@@ -3577,7 +3544,7 @@ impl SystemsCatalogApp {
             return;
         }
 
-        match self.repo.create_note(system_id, body) {
+        match self.store.create_note(system_id, body) {
             Ok(_) => {
                 if let Err(error) = self.load_selected_data(system_id) {
                     self.status_message = format!("Failed to load notes: {error}");
@@ -3599,9 +3566,9 @@ impl SystemsCatalogApp {
         };
 
         let result = if let Some(note_id) = self.selected_note_id_for_edit {
-            self.repo.update_note(note_id, self.note_text.trim())
+            self.store.update_note(note_id, self.note_text.trim())
         } else {
-            self.repo.create_note(system_id, self.note_text.trim())
+            self.store.create_note(system_id, self.note_text.trim())
         }
         .and_then(|_| self.load_selected_data(system_id));
 
@@ -3623,7 +3590,7 @@ impl SystemsCatalogApp {
         };
 
         let result = self
-            .repo
+            .store
             .delete_note(note_id)
             .and_then(|_| self.load_selected_data(system_id));
 
@@ -3709,12 +3676,12 @@ impl SystemsCatalogApp {
             return;
         }
 
-        if target.is_dir() && !target.join("Project.json").exists() {
+        if target.is_dir() && !filesystem_project_has_manifest(&target) {
             self.recent_catalog_paths
                 .retain(|recent_path| recent_path.trim() != trimmed);
             self.settings_dirty = true;
             self.status_message = format!(
-                "Project folder is missing Project.json and was removed from recents: {}",
+                "Project folder is missing a project manifest and was removed from recents: {}",
                 trimmed
             );
             return;
@@ -3766,42 +3733,17 @@ impl SystemsCatalogApp {
             target_directory.clone()
         };
         let path_text = path.to_string_lossy().to_string();
-        let migration_source_db_path = self.new_catalog_migration_db_path.trim().to_owned();
-
-        let migration_requested = !migration_source_db_path.is_empty();
-        if migration_requested {
-            let migration_source = PathBuf::from(migration_source_db_path.as_str());
-            let looks_like_db = migration_source
-                .extension()
-                .and_then(|ext| ext.to_str())
-                .map(|ext| {
-                    ext.eq_ignore_ascii_case("db")
-                        || ext.eq_ignore_ascii_case("sqlite")
-                        || ext.eq_ignore_ascii_case("sqlite3")
-                })
-                .unwrap_or(false);
-            if !looks_like_db {
-                self.status_message = "Migration source must be a .db/.sqlite/.sqlite3 file"
-                    .to_owned();
-                return;
-            }
-
-            if !migration_source.exists() {
-                self.status_message = "Migration source DB path does not exist".to_owned();
-                return;
-            }
-        }
 
         let result = (|| -> anyhow::Result<()> {
-            if migration_requested {
-                self.repo.import_catalog_from_path(migration_source_db_path.as_str())?;
-                self.refresh_systems()?;
-            } else {
-                self.repo.clear_catalog_data()?;
-                self.refresh_systems()?;
-            }
-
+            std::fs::create_dir_all(&path)?;
+            self.store = crate::file_store::FileStore::create(&path)?;
+            self.store.clear_catalog_data()?;
+            self.tech_catalog.clear();
+            self.zones.clear();
+            self.zone_offsets_by_system.clear();
+            self.refresh_systems()?;
             self.export_catalog_to_filesystem_project(&path)?;
+
             Ok(())
         })();
 
@@ -3811,7 +3753,6 @@ impl SystemsCatalogApp {
                 self.current_catalog_name = project_name;
                 self.current_catalog_path = path_text.clone();
                 self.new_catalog_directory = target_directory.to_string_lossy().to_string();
-                self.new_catalog_migration_db_path.clear();
                 self.save_catalog_path = path_text.clone();
                 self.load_catalog_path = path_text.clone();
                 self.push_recent_catalog_path(path_text.as_str());
@@ -3821,14 +3762,7 @@ impl SystemsCatalogApp {
                 self.show_load_catalog_modal = false;
                 self.show_new_catalog_confirm_modal = false;
                 self.settings_dirty = true;
-                self.status_message = if migration_requested {
-                    format!(
-                        "Created project '{}' from DB migration",
-                        self.current_catalog_name
-                    )
-                } else {
-                    format!("Created project '{}'", self.current_catalog_name)
-                };
+                self.status_message = format!("Created project '{}'", self.current_catalog_name);
             }
             Err(error) => {
                 self.status_message = format!("Failed to create new project: {error}");
@@ -3847,7 +3781,7 @@ impl SystemsCatalogApp {
             .map(Self::color_to_setting_value);
 
         let result = self
-            .repo
+            .store
             .update_system_line_color_override(system_id, override_value.as_deref())
             .and_then(|_| self.refresh_systems())
             .and_then(|_| self.load_selected_data(system_id));
@@ -3947,7 +3881,7 @@ impl SystemsCatalogApp {
 
         let result = (|| -> anyhow::Result<()> {
             if endpoints_changed {
-                self.repo.update_link_endpoints(
+                self.store.update_link_endpoints(
                     link_id,
                     next_source_system_id,
                     next_target_system_id,
@@ -3956,7 +3890,7 @@ impl SystemsCatalogApp {
                 self.edited_link_target_column_name = None;
             }
 
-            self.repo.update_link_details(
+            self.store.update_link_details(
                 link_id,
                 label,
                 note,
@@ -4030,7 +3964,7 @@ impl SystemsCatalogApp {
         }
 
         let result = (|| -> anyhow::Result<(usize, usize, usize)> {
-            let mut links = self.repo.list_links()?;
+            let mut links = self.store.list_links()?;
             let mut moved_count = 0usize;
             let mut merged_count = 0usize;
             let mut dropped_self_count = 0usize;
@@ -4056,7 +3990,7 @@ impl SystemsCatalogApp {
                 };
 
                 if next_source == next_target {
-                    self.repo.delete_link(link.id)?;
+                    self.store.delete_link(link.id)?;
                     links.retain(|existing| existing.id != link.id);
                     dropped_self_count += 1;
                     continue;
@@ -4081,7 +4015,7 @@ impl SystemsCatalogApp {
                     let merged_note =
                         Self::merge_interaction_text(existing.note.as_str(), link.note.as_str(), "\n\n");
 
-                    self.repo.update_link_details(
+                    self.store.update_link_details(
                         existing.id,
                         merged_label.as_str(),
                         merged_note.as_str(),
@@ -4089,7 +4023,7 @@ impl SystemsCatalogApp {
                         existing.source_column_name.as_deref(),
                         existing.target_column_name.as_deref(),
                     )?;
-                    self.repo.delete_link(link.id)?;
+                    self.store.delete_link(link.id)?;
 
                     links.retain(|item| item.id != link.id);
                     if let Some(entry) = links.iter_mut().find(|item| item.id == existing.id) {
@@ -4100,7 +4034,7 @@ impl SystemsCatalogApp {
 
                     merged_count += 1;
                 } else {
-                    self.repo
+                    self.store
                         .update_link_endpoints(link.id, next_source, next_target)?;
                     if let Some(entry) = links.iter_mut().find(|item| item.id == link.id) {
                         entry.source_system_id = next_source;
@@ -4146,7 +4080,7 @@ impl SystemsCatalogApp {
         };
 
         let result = self
-            .repo
+            .store
             .delete_link(link_id)
             .and_then(|_| self.refresh_systems())
             .and_then(|_| self.load_selected_data(system_id));
@@ -4177,28 +4111,20 @@ impl SystemsCatalogApp {
         let color = self.edited_tech_color.map(Self::color_to_setting_value);
         let display_priority = self.edited_tech_display_priority;
 
-        let result = self
-            .repo
-            .update_tech_item(
-                tech_id,
-                name,
-                description,
-                documentation_link,
-                color.as_deref(),
-                display_priority,
-            )
-            .and_then(|_| {
-                self.refresh_systems().and_then(|_| {
-                    if let Some(system_id) = self.selected_system_id {
-                        self.load_selected_data(system_id)?;
-                    }
-                    Ok(())
-                })
-            });
-
-        match result {
-            Ok(_) => self.status_message = "Technology updated".to_owned(),
-            Err(error) => self.status_message = format!("Failed to update technology: {error}"),
+        if let Some(tech) = self.tech_catalog.iter_mut().find(|tech| tech.id == tech_id) {
+            tech.name = name.to_owned();
+            tech.description = description.map(ToOwned::to_owned);
+            tech.documentation_link = documentation_link.map(ToOwned::to_owned);
+            tech.color = color;
+            tech.display_priority = display_priority;
+            self.refresh_selected_tech_highlight();
+            if let Some(system_id) = self.selected_system_id {
+                let _ = self.load_selected_data(system_id);
+            }
+            self.mark_project_as_dirty();
+            self.status_message = "Technology updated".to_owned();
+        } else {
+            self.status_message = "Failed to update technology: technology not found".to_owned();
         }
     }
 
@@ -4208,17 +4134,24 @@ impl SystemsCatalogApp {
             return;
         };
 
-        let result = self.repo.delete_tech_item(tech_id).and_then(|_| {
-            self.refresh_systems().and_then(|_| {
-                if let Some(system_id) = self.selected_system_id {
-                    self.load_selected_data(system_id)?;
-                }
-                Ok(())
-            })
-        });
+        let result = (|| -> anyhow::Result<()> {
+            for system_id in self.systems.iter().map(|system| system.id).collect::<Vec<_>>() {
+                self.store.remove_tech_from_system(system_id, tech_id)?;
+            }
+            self.tech_catalog.retain(|tech| tech.id != tech_id);
+            self.selected_catalog_tech_id_for_edit = None;
+            self.refresh_systems()?;
+            if let Some(system_id) = self.selected_system_id {
+                self.load_selected_data(system_id)?;
+            }
+            Ok(())
+        })();
 
         match result {
-            Ok(_) => self.status_message = "Technology removed from catalog".to_owned(),
+            Ok(_) => {
+                self.mark_project_as_dirty();
+                self.status_message = "Technology removed from catalog".to_owned();
+            }
             Err(error) => self.status_message = format!("Failed to remove technology: {error}"),
         }
     }
@@ -4230,7 +4163,7 @@ impl SystemsCatalogApp {
         };
 
         let result = self
-            .repo
+            .store
             .remove_tech_from_system(system_id, tech_id)
             .and_then(|_| self.refresh_systems())
             .and_then(|_| self.load_selected_data(system_id));
@@ -4271,7 +4204,7 @@ impl SystemsCatalogApp {
         }
 
         let result = (|| -> anyhow::Result<()> {
-            self.repo
+            self.store
                 .update_system_parent(system_id, self.selected_system_parent_id)?;
             self.mark_system_as_dirty(system_id);
             self.refresh_systems()?;
@@ -4326,7 +4259,7 @@ impl SystemsCatalogApp {
 
         let result = (|| -> anyhow::Result<()> {
             for system_id in &ordered_ids {
-                self.repo.delete_system(*system_id)?;
+                self.store.delete_system(*system_id)?;
             }
             self.refresh_systems()?;
             Ok(())
@@ -4362,30 +4295,24 @@ impl SystemsCatalogApp {
         let color = self.new_tech_color.map(Self::color_to_setting_value);
         let display_priority = self.new_tech_display_priority;
 
-        let result = self
-            .repo
-            .create_tech_item(
-                name,
-                description,
-                documentation_link,
-                color.as_deref(),
-                display_priority,
-            )
-            .and_then(|_| self.refresh_systems());
+        let next_tech_id = self.tech_catalog.iter().map(|tech| tech.id).max().unwrap_or(0) + 1;
+        self.tech_catalog.push(TechItem {
+            id: next_tech_id,
+            name: name.to_owned(),
+            description: description.map(ToOwned::to_owned),
+            documentation_link: documentation_link.map(ToOwned::to_owned),
+            color,
+            display_priority,
+        });
+        self.refresh_selected_tech_highlight();
+        self.mark_project_as_dirty();
 
-        match result {
-            Ok(_) => {
-                self.new_tech_name.clear();
-                self.new_tech_description.clear();
-                self.new_tech_documentation_link.clear();
-                self.new_tech_color = None;
-                self.new_tech_display_priority = 0;
-                self.status_message = "Technology saved to catalog".to_owned();
-            }
-            Err(error) => {
-                self.status_message = format!("Failed to save technology: {error}");
-            }
-        }
+        self.new_tech_name.clear();
+        self.new_tech_description.clear();
+        self.new_tech_documentation_link.clear();
+        self.new_tech_color = None;
+        self.new_tech_display_priority = 0;
+        self.status_message = "Technology saved to catalog".to_owned();
     }
 
     pub(super) fn add_selected_tech_to_system(&mut self) {
@@ -4400,7 +4327,7 @@ impl SystemsCatalogApp {
         };
 
         let result = self
-            .repo
+            .store
             .add_tech_to_system(system_id, tech_id)
             .and_then(|_| self.refresh_systems())
             .and_then(|_| self.load_selected_data(system_id));
@@ -4447,7 +4374,7 @@ impl SystemsCatalogApp {
             .collect::<Vec<_>>();
 
         let result = self
-            .repo
+            .store
             .create_system(
                 name,
                 description,
@@ -4458,7 +4385,7 @@ impl SystemsCatalogApp {
             .and_then(|new_id| {
                 self.mark_system_as_new(new_id);
                 for tech_id in &assigned_tech_ids {
-                    self.repo.add_tech_to_system(new_id, *tech_id)?;
+                    self.store.add_tech_to_system(new_id, *tech_id)?;
                 }
 
                 self.refresh_systems()?;
@@ -4522,12 +4449,12 @@ impl SystemsCatalogApp {
             let mut created_ids = Vec::new();
             for name in &names {
                 let new_id = self
-                    .repo
+                    .store
                     .create_system(name, "", parent_id, "service", None)?;
                 self.mark_system_as_new(new_id);
 
                 for tech_id in &parent_tech_ids {
-                    let _ = self.repo.add_tech_to_system(new_id, *tech_id);
+                    let _ = self.store.add_tech_to_system(new_id, *tech_id);
                 }
 
                 created_ids.push(new_id);
@@ -4583,7 +4510,7 @@ impl SystemsCatalogApp {
         let system_name = self.system_name_by_id(system_id);
 
         let result = self
-            .repo
+            .store
             .add_tech_to_system(system_id, tech_id)
             .and_then(|_| self.refresh_systems())
             .and_then(|_| {
@@ -4628,7 +4555,7 @@ impl SystemsCatalogApp {
                     continue;
                 }
 
-                self.repo.add_tech_to_system(*system_id, tech_id)?;
+                self.store.add_tech_to_system(*system_id, tech_id)?;
                 added_count += 1;
             }
 
@@ -4716,7 +4643,7 @@ impl SystemsCatalogApp {
                     self.step_reference_for_internal_endpoint_system(effective_target_system_id);
             }
 
-            self.repo.create_link(
+            self.store.create_link(
                 effective_source_system_id,
                 effective_target_system_id,
                 label,
@@ -4832,7 +4759,7 @@ impl SystemsCatalogApp {
         let parent_name = self.system_name_by_id(parent_id);
 
         let result = (|| -> anyhow::Result<()> {
-            self.repo.update_system_parent(child_id, Some(parent_id))?;
+            self.store.update_system_parent(child_id, Some(parent_id))?;
             self.mark_system_as_dirty(child_id);
             self.refresh_systems()?;
             if self.selected_system_id == Some(child_id) {
@@ -4852,3 +4779,39 @@ impl SystemsCatalogApp {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::file_store::FileStore;
+
+    fn temp_test_dir(name: &str) -> std::path::PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time should be valid")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("systems_catalog_actions_{name}_{unique}"));
+        std::fs::create_dir_all(&directory).expect("temp test directory should be created");
+        directory
+    }
+
+    #[test]
+    fn create_system_adds_new_system_to_app_state() {
+        let root = temp_test_dir("create_system");
+        let store = FileStore::create(&root).expect("store should be created");
+        let mut app = SystemsCatalogApp::new(store).expect("app should initialize");
+
+        app.new_system_name = "Orders".to_owned();
+        app.new_system_description = "Order processing".to_owned();
+
+        app.create_system();
+
+        assert_eq!(app.status_message, "System created");
+        assert_eq!(app.systems.len(), 1);
+        assert_eq!(app.systems[0].name, "Orders");
+        assert!(app.map_positions.contains_key(&app.systems[0].id));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+}
+
