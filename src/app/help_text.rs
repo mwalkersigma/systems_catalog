@@ -284,8 +284,10 @@ FILE OPERATIONS
       • Load Catalog       Import backup
 
 MAP CANVAS
-   Shift+click   Start interaction line (sources system)
-   Shift+drag    Drag system positions on map
+   Ctrl+R/B/F/D + click   Select interaction source, then click target
+   Ctrl+R/B/F/D + drag    Drag interaction line source -> target
+   Ctrl+Shift+R/B/F/D     Open style modal for interaction type
+   Shift+drag             Assign parent (child -> parent)
    Alt+click     Multi-select systems
    Click+drag    Select multiple systems (box selection)
 "#

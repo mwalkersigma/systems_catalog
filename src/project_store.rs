@@ -159,7 +159,8 @@ pub fn load_filesystem_project_manifest(root: &Path) -> Result<LoadedFilesystemP
 }
 
 pub fn filesystem_project_has_manifest(root: &Path) -> bool {
-    root.join(LEGACY_PROJECT_FILE_NAME).is_file() || root.join(LIGHTWEIGHT_PROJECT_FILE_NAME).is_file()
+    root.join(LEGACY_PROJECT_FILE_NAME).is_file()
+        || root.join(LIGHTWEIGHT_PROJECT_FILE_NAME).is_file()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -455,7 +456,9 @@ impl<'de> Deserialize<'de> for LightweightEntityRef {
             } => Self {
                 entity_type_id: normalize_entity_type_id(entity_type_id),
                 system_id,
-                name: name.map(|value| value.trim().to_owned()).filter(|value| !value.is_empty()),
+                name: name
+                    .map(|value| value.trim().to_owned())
+                    .filter(|value| !value.is_empty()),
                 description,
                 parent_id,
                 file_path: normalize_manifest_relative_path(file_path.as_str()),
@@ -510,7 +513,12 @@ pub struct SystemFile {
 }
 
 impl LightweightEntityRef {
-    pub fn from_system_file(file_path: impl Into<String>, pos_x: f32, pos_y: f32, system: &SystemFile) -> Self {
+    pub fn from_system_file(
+        file_path: impl Into<String>,
+        pos_x: f32,
+        pos_y: f32,
+        system: &SystemFile,
+    ) -> Self {
         Self {
             entity_type_id: normalize_entity_type_id(Some(system.system_type.clone())),
             system_id: Some(system.id),
@@ -859,27 +867,50 @@ mod tests {
 
         let loaded = load_filesystem_project_manifest(&root).expect("manifest should load");
 
-        assert_eq!(loaded.project.schema_version, LIGHTWEIGHT_PROJECT_SCHEMA_VERSION);
+        assert_eq!(
+            loaded.project.schema_version,
+            LIGHTWEIGHT_PROJECT_SCHEMA_VERSION
+        );
         assert_eq!(loaded.project.systems_paths.len(), 4);
-        assert!(loaded.project.systems_paths.contains(&"systems/orders.json".to_owned()));
-        assert!(loaded.project.systems_paths.contains(&"systems/users.json".to_owned()));
-        assert!(loaded.project.systems_paths.contains(&"systems/inventory.json".to_owned()));
-        assert!(loaded.project.systems_paths.contains(&"systems/checkout.json".to_owned()));
+        assert!(loaded
+            .project
+            .systems_paths
+            .contains(&"systems/orders.json".to_owned()));
+        assert!(loaded
+            .project
+            .systems_paths
+            .contains(&"systems/users.json".to_owned()));
+        assert!(loaded
+            .project
+            .systems_paths
+            .contains(&"systems/inventory.json".to_owned()));
+        assert!(loaded
+            .project
+            .systems_paths
+            .contains(&"systems/checkout.json".to_owned()));
 
         assert_eq!(
-            loaded.lightweight_positions_by_file_path.get("systems/orders.json"),
+            loaded
+                .lightweight_positions_by_file_path
+                .get("systems/orders.json"),
             Some(&(10.0, 20.0))
         );
         assert_eq!(
-            loaded.lightweight_positions_by_file_path.get("systems/users.json"),
+            loaded
+                .lightweight_positions_by_file_path
+                .get("systems/users.json"),
             Some(&(30.0, 40.0))
         );
         assert_eq!(
-            loaded.lightweight_positions_by_file_path.get("systems/inventory.json"),
+            loaded
+                .lightweight_positions_by_file_path
+                .get("systems/inventory.json"),
             Some(&(50.0, 60.0))
         );
         assert_eq!(
-            loaded.lightweight_positions_by_file_path.get("systems/checkout.json"),
+            loaded
+                .lightweight_positions_by_file_path
+                .get("systems/checkout.json"),
             Some(&(70.0, 80.0))
         );
 
@@ -910,7 +941,9 @@ mod tests {
         assert_eq!(loaded.project.systems_paths[0], "systems/orders.json");
 
         assert_eq!(
-            loaded.lightweight_positions_by_file_path.get("systems/orders.json"),
+            loaded
+                .lightweight_positions_by_file_path
+                .get("systems/orders.json"),
             Some(&(50.0, 60.0)),
             "should preserve the last position when multiple entities reference the same file"
         );
@@ -934,7 +967,10 @@ mod tests {
 
         let loaded = load_filesystem_project_manifest(&root).expect("manifest should load");
 
-        assert_eq!(loaded.project.schema_version, LIGHTWEIGHT_PROJECT_SCHEMA_VERSION);
+        assert_eq!(
+            loaded.project.schema_version,
+            LIGHTWEIGHT_PROJECT_SCHEMA_VERSION
+        );
         assert_eq!(loaded.project.systems_paths.len(), 0);
         assert_eq!(loaded.lightweight_positions_by_file_path.len(), 0);
 
@@ -961,8 +997,14 @@ mod tests {
         let loaded = load_filesystem_project_manifest(&root).expect("manifest should load");
 
         assert_eq!(loaded.project.systems_paths.len(), 2);
-        assert!(loaded.project.systems_paths.contains(&"systems/valid.json".to_owned()));
-        assert!(loaded.project.systems_paths.contains(&"systems/another.json".to_owned()));
+        assert!(loaded
+            .project
+            .systems_paths
+            .contains(&"systems/valid.json".to_owned()));
+        assert!(loaded
+            .project
+            .systems_paths
+            .contains(&"systems/another.json".to_owned()));
         assert_eq!(loaded.lightweight_positions_by_file_path.len(), 2);
 
         let _ = std::fs::remove_dir_all(root);
@@ -1003,7 +1045,10 @@ mod tests {
 
         assert_eq!(reloaded_project.entities.len(), entity_types.len());
         for (index, entity_type) in entity_types.iter().enumerate() {
-            assert_eq!(reloaded_project.entities[index].entity_type_id, *entity_type);
+            assert_eq!(
+                reloaded_project.entities[index].entity_type_id,
+                *entity_type
+            );
             assert_eq!(
                 reloaded_project.entities[index].file_path,
                 format!("systems/entity_{index}.json")
@@ -1038,9 +1083,18 @@ mod tests {
         let loaded = load_filesystem_project_manifest(&root).expect("manifest should load");
 
         assert_eq!(loaded.project.systems_paths.len(), 3);
-        assert!(loaded.project.systems_paths.contains(&"systems/order-service.json".to_owned()));
-        assert!(loaded.project.systems_paths.contains(&"systems/user_auth.json".to_owned()));
-        assert!(loaded.project.systems_paths.contains(&"systems/inv.db.json".to_owned()));
+        assert!(loaded
+            .project
+            .systems_paths
+            .contains(&"systems/order-service.json".to_owned()));
+        assert!(loaded
+            .project
+            .systems_paths
+            .contains(&"systems/user_auth.json".to_owned()));
+        assert!(loaded
+            .project
+            .systems_paths
+            .contains(&"systems/inv.db.json".to_owned()));
 
         let _ = std::fs::remove_dir_all(root);
     }

@@ -77,6 +77,59 @@ cargo build --release
 
 Release binaries are written to `target/release/`.
 
+## Publish Releases
+
+This repo includes a release workflow and publish helpers that manage semantic version bumps and tagging.
+
+### One-command publish
+
+On macOS/Linux/Git Bash:
+
+```bash
+./publish --type major
+./publish --type minor
+./publish --type bugfix
+```
+
+On PowerShell:
+
+```powershell
+./publish.ps1 -Type major
+./publish.ps1 -Type minor
+./publish.ps1 -Type bugfix
+```
+
+What it does:
+
+- Validates a clean git working tree
+- Bumps `Cargo.toml` version
+- Runs `cargo check`
+- Commits version bump as `chore(release): vX.Y.Z`
+- Creates and pushes git tag `vX.Y.Z`
+
+### GitHub Actions release automation
+
+`.github/workflows/release.yml` listens for pushed tags matching `v*` and builds release binaries for:
+
+- Windows (`systems_catalog-windows-x86_64.exe`)
+- Linux (`systems_catalog-linux-x86_64`)
+- macOS Apple Silicon (`systems_catalog-macos-aarch64`)
+
+The workflow then creates or updates the GitHub Release for that tag and uploads all binaries.
+
+## Auto-update behavior
+
+The app now performs a lazy update check in the background after startup.
+
+- On startup it loads normally, then checks `https://api.github.com/repos/<owner>/<repo>/releases/latest`
+- If a newer version is available, an `Update <version>` badge appears in the top toolbar
+- Clicking the badge asks for confirmation
+- If confirmed, the app downloads the platform asset from the release, stages it, and schedules replacement
+- The app closes and restarts into the updated binary
+
+Current update source defaults to `mwalker/systems_catalog` in `src/app.rs` (`update_repo_owner` and `update_repo_name`).
+If your repository uses a different owner or name, update those values.
+
 ## Quality checks
 
 ```bash

@@ -9,9 +9,7 @@ mod project_store;
 use std::path::PathBuf;
 
 use app::SystemsCatalogApp;
-use eframe::egui::{
-    FontData, FontDefinitions, FontFamily, Rounding, Style, Vec2, ViewportBuilder,
-};
+use eframe::egui::{FontData, FontDefinitions, FontFamily, Rounding, Style, Vec2, ViewportBuilder};
 use file_store::FileStore;
 
 fn apply_phase6_style_tokens(context: &eframe::egui::Context) {
@@ -26,7 +24,7 @@ fn apply_phase6_style_tokens(context: &eframe::egui::Context) {
     visuals.widgets.hovered.rounding = panel_rounding;
     visuals.widgets.inactive.rounding = panel_rounding;
     visuals.slider_trailing_fill = true;
-    
+
     let mut style: Style = (*context.style()).clone();
     style.spacing.item_spacing = Vec2::new(5.0, 3.0);
     style.spacing.window_margin = eframe::egui::Margin::same(8.0);
@@ -34,8 +32,6 @@ fn apply_phase6_style_tokens(context: &eframe::egui::Context) {
     style.spacing.button_padding = Vec2::new(15.0, 5.0);
     style.spacing.menu_margin = eframe::egui::Margin::same(8.0);
     style.visuals = visuals;
-    
-    
 
     context.set_style(style);
 }
@@ -43,9 +39,9 @@ fn apply_phase6_style_tokens(context: &eframe::egui::Context) {
 fn main() -> eframe::Result<()> {
     // Use FileStore for file-native project storage
     let project_dir = PathBuf::from(".");
-    let store = FileStore::open(&project_dir)
-        .unwrap_or_else(|_| FileStore::create(&project_dir)
-            .expect("failed to create FileStore for Systems Catalog"));
+    let store = FileStore::open(&project_dir).unwrap_or_else(|_| {
+        FileStore::create(&project_dir).expect("failed to create FileStore for Systems Catalog")
+    });
     let viewport = ViewportBuilder::default().with_inner_size(Vec2::new(1280.0, 820.0));
 
     let native_options = eframe::NativeOptions {

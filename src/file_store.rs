@@ -80,7 +80,9 @@ impl FileStore {
     fn entity_file_path_for_system_id(&mut self, system_id: i64) -> Result<String> {
         for entity_ref in self.manifest.entities.clone() {
             let file_path = entity_ref.file_path;
-            if entity_ref.system_id == Some(system_id) || self.load_entity(file_path.as_str())?.id == system_id {
+            if entity_ref.system_id == Some(system_id)
+                || self.load_entity(file_path.as_str())?.id == system_id
+            {
                 return Ok(file_path);
             }
         }
@@ -113,7 +115,9 @@ impl FileStore {
         self.load_all_interactions()?;
         self.loaded_interactions
             .iter()
-            .find_map(|(file_path, interaction)| (interaction.id == link_id).then(|| file_path.clone()))
+            .find_map(|(file_path, interaction)| {
+                (interaction.id == link_id).then(|| file_path.clone())
+            })
             .ok_or_else(|| anyhow::anyhow!("Interaction not found: {link_id}"))
     }
 
@@ -210,8 +214,12 @@ impl FileStore {
 
         let systems_dir = root.join("systems");
         let interactions_dir = root.join("interactions");
-        fs::create_dir_all(&systems_dir)
-            .with_context(|| format!("Failed to create systems directory: {}", systems_dir.display()))?;
+        fs::create_dir_all(&systems_dir).with_context(|| {
+            format!(
+                "Failed to create systems directory: {}",
+                systems_dir.display()
+            )
+        })?;
         fs::create_dir_all(&interactions_dir).with_context(|| {
             format!(
                 "Failed to create interactions directory: {}",
@@ -253,7 +261,9 @@ impl FileStore {
     /// Uses lazy loading: loads from disk only if not already in memory.
     pub fn load_entity(&mut self, file_path: &str) -> Result<&SystemFile> {
         if !self.loaded_entities.contains_key(file_path) {
-            let absolute_path = self.root.join(file_path.replace('/', std::path::MAIN_SEPARATOR_STR));
+            let absolute_path = self
+                .root
+                .join(file_path.replace('/', std::path::MAIN_SEPARATOR_STR));
             let content = fs::read_to_string(&absolute_path).with_context(|| {
                 format!("Failed to read entity file: {}", absolute_path.display())
             })?;
@@ -263,13 +273,18 @@ impl FileStore {
             self.loaded_entities.insert(file_path.to_owned(), entity);
         }
 
-        Ok(self.loaded_entities.get(file_path).expect("entity should be loaded"))
+        Ok(self
+            .loaded_entities
+            .get(file_path)
+            .expect("entity should be loaded"))
     }
 
     /// Load an entity file mutably for editing.
     pub fn load_entity_mut(&mut self, file_path: &str) -> Result<&mut SystemFile> {
         if !self.loaded_entities.contains_key(file_path) {
-            let absolute_path = self.root.join(file_path.replace('/', std::path::MAIN_SEPARATOR_STR));
+            let absolute_path = self
+                .root
+                .join(file_path.replace('/', std::path::MAIN_SEPARATOR_STR));
             let content = fs::read_to_string(&absolute_path).with_context(|| {
                 format!("Failed to read entity file: {}", absolute_path.display())
             })?;
@@ -280,24 +295,37 @@ impl FileStore {
         }
 
         self.dirty_entities.insert(file_path.to_owned());
-        Ok(self.loaded_entities.get_mut(file_path).expect("entity should be loaded"))
+        Ok(self
+            .loaded_entities
+            .get_mut(file_path)
+            .expect("entity should be loaded"))
     }
 
     /// Add or update an entity reference in the manifest.
     pub fn upsert_entity_ref(&mut self, entity_ref: LightweightEntityRef) {
         let file_path = entity_ref.file_path.clone();
-        
-        if let Some(existing) = self.manifest.entities.iter_mut().find(|e| e.file_path == file_path) {
+
+        if let Some(existing) = self
+            .manifest
+            .entities
+            .iter_mut()
+            .find(|e| e.file_path == file_path)
+        {
             *existing = entity_ref;
         } else {
             self.manifest.entities.push(entity_ref);
         }
-        
+
         self.manifest_dirty = true;
     }
 
     /// Update entity position in the manifest (position-only edit).
-    pub fn update_entity_position(&mut self, file_path: &str, pos_x: f32, pos_y: f32) -> Result<()> {
+    pub fn update_entity_position(
+        &mut self,
+        file_path: &str,
+        pos_x: f32,
+        pos_y: f32,
+    ) -> Result<()> {
         if let Some(entity) = self.loaded_entities.get_mut(file_path) {
             entity.map_x = Some(pos_x);
             entity.map_y = Some(pos_y);
@@ -322,13 +350,16 @@ impl FileStore {
         self.manifest.entities.retain(|e| e.file_path != file_path);
         self.loaded_entities.remove(file_path);
         self.dirty_entities.remove(file_path);
-        
-        let absolute_path = self.root.join(file_path.replace('/', std::path::MAIN_SEPARATOR_STR));
+
+        let absolute_path = self
+            .root
+            .join(file_path.replace('/', std::path::MAIN_SEPARATOR_STR));
         if absolute_path.exists() {
-            fs::remove_file(&absolute_path)
-                .with_context(|| format!("Failed to delete entity file: {}", absolute_path.display()))?;
+            fs::remove_file(&absolute_path).with_context(|| {
+                format!("Failed to delete entity file: {}", absolute_path.display())
+            })?;
         }
-        
+
         self.manifest_dirty = true;
         Ok(())
     }
@@ -361,14 +392,15 @@ impl FileStore {
 
             if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
                 let relative_path = format!("interactions/{file_name}");
-                
+
                 use std::collections::hash_map::Entry;
-                if let Entry::Vacant(entry) = self.loaded_interactions.entry(relative_path.clone()) {
+                if let Entry::Vacant(entry) = self.loaded_interactions.entry(relative_path.clone())
+                {
                     let content = fs::read_to_string(&path).with_context(|| {
                         format!("Failed to read interaction file: {}", path.display())
                     })?;
-                    let interaction: InteractionFile =
-                        serde_json::from_str(&content).with_context(|| {
+                    let interaction: InteractionFile = serde_json::from_str(&content)
+                        .with_context(|| {
                             format!("Failed to parse interaction file: {}", path.display())
                         })?;
                     entry.insert(interaction);
@@ -386,7 +418,8 @@ impl FileStore {
         interaction: InteractionFile,
     ) {
         let file_path = file_path.into();
-        self.loaded_interactions.insert(file_path.clone(), interaction);
+        self.loaded_interactions
+            .insert(file_path.clone(), interaction);
         self.dirty_interactions.insert(file_path);
     }
 
@@ -394,8 +427,10 @@ impl FileStore {
     pub fn remove_interaction(&mut self, file_path: &str) -> Result<()> {
         self.loaded_interactions.remove(file_path);
         self.dirty_interactions.remove(file_path);
-        
-        let absolute_path = self.root.join(file_path.replace('/', std::path::MAIN_SEPARATOR_STR));
+
+        let absolute_path = self
+            .root
+            .join(file_path.replace('/', std::path::MAIN_SEPARATOR_STR));
         if absolute_path.exists() {
             fs::remove_file(&absolute_path).with_context(|| {
                 format!(
@@ -404,13 +439,15 @@ impl FileStore {
                 )
             })?;
         }
-        
+
         Ok(())
     }
 
     /// Check if there are any unsaved changes.
     pub fn has_unsaved_changes(&self) -> bool {
-        self.manifest_dirty || !self.dirty_entities.is_empty() || !self.dirty_interactions.is_empty()
+        self.manifest_dirty
+            || !self.dirty_entities.is_empty()
+            || !self.dirty_interactions.is_empty()
     }
 
     /// Save all dirty entities and manifest to disk with atomic writes.
@@ -491,7 +528,9 @@ impl FileStore {
         }
 
         Ok(LightweightProjectFile {
-            schema_version: project.schema_version.max(LIGHTWEIGHT_PROJECT_SCHEMA_VERSION),
+            schema_version: project
+                .schema_version
+                .max(LIGHTWEIGHT_PROJECT_SCHEMA_VERSION),
             entities,
         })
     }
@@ -499,14 +538,14 @@ impl FileStore {
     /// Atomically write entity file using temp file + rename strategy.
     fn write_entity_atomically(root: &Path, file_path: &str, entity: &SystemFile) -> Result<()> {
         let absolute_path = root.join(file_path.replace('/', std::path::MAIN_SEPARATOR_STR));
-        
+
         if let Some(parent) = absolute_path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create parent directory: {}", parent.display()))?;
+            fs::create_dir_all(parent).with_context(|| {
+                format!("Failed to create parent directory: {}", parent.display())
+            })?;
         }
 
-        let bytes = serde_json::to_vec_pretty(entity)
-            .context("Failed to serialize entity")?;
+        let bytes = serde_json::to_vec_pretty(entity).context("Failed to serialize entity")?;
 
         Self::atomic_write(&absolute_path, &bytes)
     }
@@ -518,14 +557,15 @@ impl FileStore {
         interaction: &InteractionFile,
     ) -> Result<()> {
         let absolute_path = root.join(file_path.replace('/', std::path::MAIN_SEPARATOR_STR));
-        
+
         if let Some(parent) = absolute_path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create parent directory: {}", parent.display()))?;
+            fs::create_dir_all(parent).with_context(|| {
+                format!("Failed to create parent directory: {}", parent.display())
+            })?;
         }
 
-        let bytes = serde_json::to_vec_pretty(interaction)
-            .context("Failed to serialize interaction")?;
+        let bytes =
+            serde_json::to_vec_pretty(interaction).context("Failed to serialize interaction")?;
 
         Self::atomic_write(&absolute_path, &bytes)
     }
@@ -549,8 +589,7 @@ impl FileStore {
         }
 
         let manifest_path = root.join(LIGHTWEIGHT_PROJECT_FILE_NAME);
-        let bytes = serde_json::to_vec_pretty(manifest)
-            .context("Failed to serialize manifest")?;
+        let bytes = serde_json::to_vec_pretty(manifest).context("Failed to serialize manifest")?;
 
         Self::atomic_write(&manifest_path, &bytes)
     }
@@ -561,10 +600,10 @@ impl FileStore {
     /// providing crash-safety guarantees.
     fn atomic_write(target_path: &Path, bytes: &[u8]) -> Result<()> {
         let temp_path = target_path.with_extension("tmp");
-        
+
         fs::write(&temp_path, bytes)
             .with_context(|| format!("Failed to write temp file: {}", temp_path.display()))?;
-        
+
         fs::rename(&temp_path, target_path).with_context(|| {
             format!(
                 "Failed to rename {} to {}",
@@ -629,7 +668,9 @@ impl FileStore {
         let summary = self
             .loaded_entities
             .get(file_path.as_str())
-            .map(|entity| LightweightEntityRef::from_system_file(file_path.clone(), 0.0, 0.0, entity))
+            .map(|entity| {
+                LightweightEntityRef::from_system_file(file_path.clone(), 0.0, 0.0, entity)
+            })
             .expect("inserted entity should exist");
         self.upsert_entity_ref(summary);
         self.save()?;
@@ -647,7 +688,8 @@ impl FileStore {
             .loaded_interactions
             .iter()
             .filter_map(|(path, interaction)| {
-                (interaction.source_system_id == system_id || interaction.target_system_id == system_id)
+                (interaction.source_system_id == system_id
+                    || interaction.target_system_id == system_id)
                     .then(|| path.clone())
             })
             .collect::<Vec<_>>();
@@ -664,7 +706,9 @@ impl FileStore {
         for entity_ref in self.manifest.entities.clone() {
             if entity_ref.has_cached_summary() {
                 systems.push(crate::models::SystemRecord {
-                    id: entity_ref.system_id.expect("cached summary should include id"),
+                    id: entity_ref
+                        .system_id
+                        .expect("cached summary should include id"),
                     name: entity_ref.name.clone().unwrap_or_default(),
                     description: entity_ref.description.clone().unwrap_or_default(),
                     parent_id: entity_ref.parent_id,
@@ -864,7 +908,7 @@ impl FileStore {
                 })
                 .collect();
         }
-            self.sync_entity_ref_summary(file_path.as_str())?;
+        self.sync_entity_ref_summary(file_path.as_str())?;
         self.save()
     }
 
@@ -973,7 +1017,10 @@ impl FileStore {
     }
 
     #[allow(dead_code)]
-    pub fn list_notes_for_system(&mut self, system_id: i64) -> anyhow::Result<Vec<crate::models::SystemNote>> {
+    pub fn list_notes_for_system(
+        &mut self,
+        system_id: i64,
+    ) -> anyhow::Result<Vec<crate::models::SystemNote>> {
         let file_path = self.entity_file_path_for_system_id(system_id)?;
         let entity = self.load_entity(file_path.as_str())?;
 
@@ -1071,7 +1118,8 @@ impl FileStore {
         source_column_name: Option<&str>,
         target_column_name: Option<&str>,
     ) -> anyhow::Result<()> {
-        let file_path = format!("interactions/{source_system_id}__to__{target_system_id}__{id}.json");
+        let file_path =
+            format!("interactions/{source_system_id}__to__{target_system_id}__{id}.json");
         self.upsert_interaction(
             file_path,
             InteractionFile {
@@ -1105,19 +1153,33 @@ impl FileStore {
         let interactions_dir = self.root.join("interactions");
 
         if systems_dir.exists() {
-            fs::remove_dir_all(&systems_dir)
-                .with_context(|| format!("Failed to clear systems directory: {}", systems_dir.display()))?;
+            fs::remove_dir_all(&systems_dir).with_context(|| {
+                format!(
+                    "Failed to clear systems directory: {}",
+                    systems_dir.display()
+                )
+            })?;
         }
         if interactions_dir.exists() {
             fs::remove_dir_all(&interactions_dir).with_context(|| {
-                format!("Failed to clear interactions directory: {}", interactions_dir.display())
+                format!(
+                    "Failed to clear interactions directory: {}",
+                    interactions_dir.display()
+                )
             })?;
         }
 
-        fs::create_dir_all(&systems_dir)
-            .with_context(|| format!("Failed to recreate systems directory: {}", systems_dir.display()))?;
+        fs::create_dir_all(&systems_dir).with_context(|| {
+            format!(
+                "Failed to recreate systems directory: {}",
+                systems_dir.display()
+            )
+        })?;
         fs::create_dir_all(&interactions_dir).with_context(|| {
-            format!("Failed to recreate interactions directory: {}", interactions_dir.display())
+            format!(
+                "Failed to recreate interactions directory: {}",
+                interactions_dir.display()
+            )
         })?;
 
         self.manifest.entities.clear();
@@ -1134,10 +1196,12 @@ impl FileStore {
         let interaction_paths = self
             .load_all_interactions()?
             .iter()
-            .map(|interaction| format!(
-                "interactions/{}__to__{}__{}.json",
-                interaction.source_system_id, interaction.target_system_id, interaction.id
-            ))
+            .map(|interaction| {
+                format!(
+                    "interactions/{}__to__{}__{}.json",
+                    interaction.source_system_id, interaction.target_system_id, interaction.id
+                )
+            })
             .collect::<Vec<_>>();
         for path in interaction_paths {
             self.remove_interaction(path.as_str())?;
@@ -1187,9 +1251,9 @@ mod tests {
     #[test]
     fn file_store_create_initializes_empty_project() {
         let root = temp_test_dir("create");
-        
+
         let store = FileStore::create(&root).expect("store should be created");
-        
+
         assert_eq!(store.root(), root.as_path());
         assert_eq!(store.entity_refs().len(), 0);
         assert!(root.join("project.json").exists());
@@ -1202,7 +1266,7 @@ mod tests {
     #[test]
     fn file_store_open_loads_existing_manifest() {
         let root = temp_test_dir("open");
-        
+
         let manifest = LightweightProjectFile {
             schema_version: LIGHTWEIGHT_PROJECT_SCHEMA_VERSION,
             entities: vec![
@@ -1210,13 +1274,14 @@ mod tests {
                 LightweightEntityRef::new("service", "systems/users.json", 30.0, 40.0),
             ],
         };
-        
+
         fs::create_dir_all(&root).expect("root should exist");
-        let manifest_bytes = serde_json::to_vec_pretty(&manifest).expect("manifest should serialize");
+        let manifest_bytes =
+            serde_json::to_vec_pretty(&manifest).expect("manifest should serialize");
         fs::write(root.join("project.json"), &manifest_bytes).expect("manifest should be written");
 
         let store = FileStore::open(&root).expect("store should open");
-        
+
         assert_eq!(store.entity_refs().len(), 2);
         assert_eq!(store.entity_refs()[0].file_path, "systems/orders.json");
         assert_eq!(store.entity_refs()[1].file_path, "systems/users.json");
@@ -1306,7 +1371,7 @@ mod tests {
             10.0,
             20.0,
         ));
-        
+
         store.upsert_entity_ref(LightweightEntityRef::new(
             "service",
             "systems/orders.json",
@@ -1393,7 +1458,15 @@ mod tests {
         let mut store = FileStore::open(&root).expect("store should open");
 
         store
-            .update_system_details(7, "Payments Service", "Updated", false, "/", "service", None)
+            .update_system_details(
+                7,
+                "Payments Service",
+                "Updated",
+                false,
+                "/",
+                "service",
+                None,
+            )
             .expect("details update should succeed");
 
         let updated_ref = store
@@ -1421,7 +1494,10 @@ mod tests {
 
         let reloaded = FileStore::open(&root).expect("store should reload");
         assert_eq!(reloaded.entity_refs().len(), 1);
-        assert_eq!(reloaded.entity_refs()[0].file_path, "systems/inventory.json");
+        assert_eq!(
+            reloaded.entity_refs()[0].file_path,
+            "systems/inventory.json"
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -1502,15 +1578,23 @@ mod tests {
 
         let manifest = LightweightProjectFile {
             schema_version: LIGHTWEIGHT_PROJECT_SCHEMA_VERSION,
-            entities: vec![LightweightEntityRef::new("service", "systems/test.json", 10.0, 20.0)],
+            entities: vec![LightweightEntityRef::new(
+                "service",
+                "systems/test.json",
+                10.0,
+                20.0,
+            )],
         };
-        let manifest_bytes = serde_json::to_vec_pretty(&manifest).expect("manifest should serialize");
+        let manifest_bytes =
+            serde_json::to_vec_pretty(&manifest).expect("manifest should serialize");
         fs::write(root.join("project.json"), &manifest_bytes).expect("manifest should be written");
 
         let mut store = FileStore::open(&root).expect("store should open");
 
         // First load
-        let loaded1 = store.load_entity("systems/test.json").expect("entity should load");
+        let loaded1 = store
+            .load_entity("systems/test.json")
+            .expect("entity should load");
         assert_eq!(loaded1.id, 42);
         assert_eq!(loaded1.name, "TestEntity");
 
@@ -1522,7 +1606,9 @@ mod tests {
         fs::write(&entity_path, &modified_bytes).expect("modified entity should be written");
 
         // Second load should return cached version (not reload from disk)
-        let loaded2 = store.load_entity("systems/test.json").expect("entity should load");
+        let loaded2 = store
+            .load_entity("systems/test.json")
+            .expect("entity should load");
         assert_eq!(
             loaded2.name, "TestEntity",
             "entity should be cached, not reloaded"
@@ -1624,7 +1710,12 @@ mod tests {
 
         let manifest = LightweightProjectFile {
             schema_version: LIGHTWEIGHT_PROJECT_SCHEMA_VERSION,
-            entities: vec![LightweightEntityRef::new("api", "systems/api.json", 5.0, 10.0)],
+            entities: vec![LightweightEntityRef::new(
+                "api",
+                "systems/api.json",
+                5.0,
+                10.0,
+            )],
         };
         fs::write(
             root.join("project.json"),
@@ -1633,9 +1724,11 @@ mod tests {
         .expect("manifest should be written");
 
         let mut store = FileStore::open(&root).expect("store should open");
-        
+
         {
-            let entity_mut = store.load_entity_mut("systems/api.json").expect("entity should load");
+            let entity_mut = store
+                .load_entity_mut("systems/api.json")
+                .expect("entity should load");
             entity_mut.name = "Updated API".to_owned();
         }
 
@@ -1643,7 +1736,8 @@ mod tests {
         assert!(!store.has_unsaved_changes());
 
         // Verify the file was updated on disk
-        let saved_content = fs::read_to_string(&entity_path).expect("saved file should be readable");
+        let saved_content =
+            fs::read_to_string(&entity_path).expect("saved file should be readable");
         let saved_entity: crate::project_store::SystemFile =
             serde_json::from_str(&saved_content).expect("saved file should parse");
         assert_eq!(saved_entity.name, "Updated API");
@@ -1732,7 +1826,9 @@ mod tests {
         store.upsert_interaction("interactions/1__to__2__100.json", interaction);
 
         assert!(store.has_unsaved_changes());
-        assert!(store.dirty_interactions.contains("interactions/1__to__2__100.json"));
+        assert!(store
+            .dirty_interactions
+            .contains("interactions/1__to__2__100.json"));
 
         let _ = std::fs::remove_dir_all(root);
     }

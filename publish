@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: ./publish --type major|minor|bugfix
+
+Bumps Cargo.toml semantic version, commits the change, creates a git tag, and pushes branch + tag.
+EOF
+}
+
+if [[ $# -ne 2 || "$1" != "--type" ]]; then
+  usage
+  exit 1
+fi
+
+bump_type="$2"
+if [[ "$bump_type" != "major" && "$bump_type" != "minor" && "$bump_type" != "bugfix" ]]; then
+  echo "Unsupported type: $bump_type"
+  usage
+  exit 1
+fi
+
+if ! git diff --quiet || ! git diff --cached --quiet; then
+  echo "Working tree is not clean. Commit or stash changes first."
+  exit 1
+fi
+
+current_version=$(grep -m1 '^version = "' Cargo.toml | sed -E 's/version = "([0-9]+\.[0-9]+\.[0-9]+)"/\1/')
+if [[ -z "$current_version" ]]; then
+  echo "Could not read version from Cargo.toml"
+  exit 1
+fi
+
+IFS='.' read -r major minor patch <<< "$current_version"
+case "$bump_type" in
+  major)
+    major=$((major + 1))
+    minor=0
+    patch=0
+    ;;
+  minor)
+    minor=$((minor + 1))
+    patch=0
+    ;;
+  bugfix)
+    patch=$((patch + 1))
+    ;;
+esac
+
+next_version="${major}.${minor}.${patch}"
+tag="v${next_version}"
+
+if git rev-parse "$tag" >/dev/null 2>&1; then
+  echo "Tag $tag already exists"
+  exit 1
+fi
+
+sed -i.bak -E "0,/^version = \"[0-9]+\.[0-9]+\.[0-9]+\"/{s/^version = \"[0-9]+\.[0-9]+\.[0-9]+\"/version = \"${next_version}\"/}" Cargo.toml
+rm -f Cargo.toml.bak
+
+cargo check
+
+git add Cargo.toml
+git commit -m "chore(release): ${tag}"
+git tag "$tag"
+git push
+git push origin "$tag"
+
+echo "Published $tag"

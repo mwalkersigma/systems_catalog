@@ -3,8 +3,10 @@ mod entities;
 mod help_text;
 mod toolbar;
 mod ui;
+mod updater;
 
 use std::collections::{HashMap, HashSet};
+use std::sync::mpsc::Receiver;
 
 use anyhow::{anyhow, Result};
 use eframe::egui::{Color32, Pos2, Rect, Vec2};
@@ -151,6 +153,30 @@ pub struct CopiedSystemEntry {
     pub relative_x: f32,
     pub relative_y: f32,
 }
+
+#[derive(Debug, Clone)]
+pub(crate) struct AvailableUpdate {
+    pub version: String,
+    pub tag_name: String,
+    pub release_url: String,
+    pub asset_name: Option<String>,
+    pub download_url: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum UpdateCheckState {
+    Disabled,
+    Idle,
+    Checking,
+    UpToDate,
+    UpdateAvailable(AvailableUpdate),
+    Applying,
+    ReadyToRestart,
+    Error(String),
+}
+
+pub(crate) type UpdateCheckResult = anyhow::Result<Option<AvailableUpdate>>;
+pub(crate) type UpdateApplyResult = anyhow::Result<()>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -356,6 +382,7 @@ pub struct SystemsCatalogApp {
     map_interaction_drag_from: Option<i64>,
     map_interaction_drag_from_reference: Option<String>,
     map_interaction_drag_kind: InteractionKind,
+    map_interaction_drag_active: bool,
     map_link_click_source: Option<i64>,
     selected_map_system_ids: HashSet<i64>,
     map_selection_start_screen: Option<Pos2>,
@@ -454,6 +481,14 @@ pub struct SystemsCatalogApp {
     show_tech_border_colors: bool,
     tech_border_max_colors: usize,
     settings_dirty: bool,
+
+    update_repo_owner: String,
+    update_repo_name: String,
+    update_check_started: bool,
+    update_check_receiver: Option<Receiver<UpdateCheckResult>>,
+    update_apply_receiver: Option<Receiver<UpdateApplyResult>>,
+    update_check_state: UpdateCheckState,
+    update_restart_requested: bool,
 
     status_message: String,
 }
@@ -631,6 +666,7 @@ impl SystemsCatalogApp {
             map_interaction_drag_from: None,
             map_interaction_drag_from_reference: None,
             map_interaction_drag_kind: InteractionKind::Standard,
+            map_interaction_drag_active: false,
             map_link_click_source: None,
             selected_map_system_ids: HashSet::new(),
             map_selection_start_screen: None,
@@ -736,6 +772,13 @@ impl SystemsCatalogApp {
             show_tech_border_colors: false,
             tech_border_max_colors: 2,
             settings_dirty: false,
+            update_repo_owner: "mwalkersigma".to_owned(),
+            update_repo_name: "systems_catalog".to_owned(),
+            update_check_started: false,
+            update_check_receiver: None,
+            update_apply_receiver: None,
+            update_check_state: UpdateCheckState::Idle,
+            update_restart_requested: false,
             status_message: "Ready".to_owned(),
         };
 
@@ -846,8 +889,7 @@ impl SystemsCatalogApp {
             let should_eager_load = !entity_ref.has_cached_summary()
                 || (self.entity_requires_eager_map_content_for_type(
                     entity_ref.entity_type_id.as_str(),
-                )
-                    && entity_ref.database_columns.is_empty());
+                ) && entity_ref.database_columns.is_empty());
 
             let maybe_system_data = if should_eager_load {
                 let file_path = entity_ref.file_path.clone();
@@ -886,7 +928,9 @@ impl SystemsCatalogApp {
             } else {
                 Some((
                     SystemRecord {
-                        id: entity_ref.system_id.expect("cached summary should include id"),
+                        id: entity_ref
+                            .system_id
+                            .expect("cached summary should include id"),
                         name: entity_ref.name.clone().unwrap_or_default(),
                         description: entity_ref.description.clone().unwrap_or_default(),
                         parent_id: entity_ref.parent_id,
@@ -916,8 +960,10 @@ impl SystemsCatalogApp {
                 continue;
             };
 
-            self.map_positions
-                .insert(system_record.id, Pos2::new(entity_ref.pos_x, entity_ref.pos_y));
+            self.map_positions.insert(
+                system_record.id,
+                Pos2::new(entity_ref.pos_x, entity_ref.pos_y),
+            );
 
             if !tech_ids.is_empty() {
                 self.system_tech_ids_by_system
@@ -1170,7 +1216,7 @@ impl SystemsCatalogApp {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        
+
         self.selected_database_columns = self
             .database_columns_by_system
             .get(&system_id)
@@ -1821,6 +1867,7 @@ impl SystemsCatalogApp {
         self.map_interaction_drag_from = None;
         self.map_interaction_drag_from_reference = None;
         self.map_interaction_drag_kind = InteractionKind::Standard;
+        self.map_interaction_drag_active = false;
         self.map_link_click_source = None;
         self.interaction_popup_pending = None;
         self.interaction_popup_pending_open_at_secs = None;
@@ -1911,36 +1958,36 @@ impl SystemsCatalogApp {
         if state.parent_line_width.is_finite() {
             self.parent_line_style.width = state.parent_line_width.clamp(0.5, 6.0);
         }
-        self.parent_line_style.color = Self::color_from_setting_value(state.parent_line_color.as_str())
-            .unwrap_or(Self::default_parent_line_color());
-        self.parent_line_style.terminator = Self::terminator_from_setting_value(
-            state.parent_line_terminator.as_str(),
-        )
-        .unwrap_or(LineTerminator::Arrow);
-        self.parent_line_style.pattern = Self::pattern_from_setting_value(
-            state.parent_line_pattern.as_str(),
-        )
-        .unwrap_or(LinePattern::Solid);
+        self.parent_line_style.color =
+            Self::color_from_setting_value(state.parent_line_color.as_str())
+                .unwrap_or(Self::default_parent_line_color());
+        self.parent_line_style.terminator =
+            Self::terminator_from_setting_value(state.parent_line_terminator.as_str())
+                .unwrap_or(LineTerminator::Arrow);
+        self.parent_line_style.pattern =
+            Self::pattern_from_setting_value(state.parent_line_pattern.as_str())
+                .unwrap_or(LinePattern::Solid);
 
         if state.interaction_line_width.is_finite() {
             self.interaction_line_style.width = state.interaction_line_width.clamp(0.5, 6.0);
         }
-        self.interaction_line_style.color = Self::color_from_setting_value(
-            state.interaction_line_color.as_str(),
-        )
-        .unwrap_or(Self::default_interaction_line_color(InteractionKind::Standard));
-        self.interaction_line_style.terminator = Self::terminator_from_setting_value(
-            state.interaction_line_terminator.as_str(),
-        )
-        .unwrap_or(LineTerminator::FilledArrow);
-        self.interaction_line_style.pattern = Self::pattern_from_setting_value(
-            state.interaction_line_pattern.as_str(),
-        )
-        .unwrap_or(LinePattern::Solid);
+        self.interaction_line_style.color =
+            Self::color_from_setting_value(state.interaction_line_color.as_str()).unwrap_or(
+                Self::default_interaction_line_color(InteractionKind::Standard),
+            );
+        self.interaction_line_style.terminator =
+            Self::terminator_from_setting_value(state.interaction_line_terminator.as_str())
+                .unwrap_or(LineTerminator::FilledArrow);
+        self.interaction_line_style.pattern =
+            Self::pattern_from_setting_value(state.interaction_line_pattern.as_str())
+                .unwrap_or(LinePattern::Solid);
 
-        self.interaction_standard_line_style = Self::default_interaction_kind_style(InteractionKind::Standard);
-        self.interaction_pull_line_style = Self::default_interaction_kind_style(InteractionKind::Pull);
-        self.interaction_push_line_style = Self::default_interaction_kind_style(InteractionKind::Push);
+        self.interaction_standard_line_style =
+            Self::default_interaction_kind_style(InteractionKind::Standard);
+        self.interaction_pull_line_style =
+            Self::default_interaction_kind_style(InteractionKind::Pull);
+        self.interaction_push_line_style =
+            Self::default_interaction_kind_style(InteractionKind::Push);
         self.interaction_bidirectional_line_style =
             Self::default_interaction_kind_style(InteractionKind::Bidirectional);
 
@@ -1949,15 +1996,19 @@ impl SystemsCatalogApp {
         {
             self.interaction_standard_line_style.color = color;
         }
-        if let Some(color) = Self::color_from_setting_value(state.interaction_pull_line_color.as_str()) {
+        if let Some(color) =
+            Self::color_from_setting_value(state.interaction_pull_line_color.as_str())
+        {
             self.interaction_pull_line_style.color = color;
         }
-        if let Some(color) = Self::color_from_setting_value(state.interaction_push_line_color.as_str()) {
+        if let Some(color) =
+            Self::color_from_setting_value(state.interaction_push_line_color.as_str())
+        {
             self.interaction_push_line_style.color = color;
         }
-        if let Some(color) = Self::color_from_setting_value(
-            state.interaction_bidirectional_line_color.as_str(),
-        ) {
+        if let Some(color) =
+            Self::color_from_setting_value(state.interaction_bidirectional_line_color.as_str())
+        {
             self.interaction_bidirectional_line_style.color = color;
         }
 
@@ -1965,45 +2016,41 @@ impl SystemsCatalogApp {
             state.interaction_standard_line_terminator.as_str(),
         )
         .unwrap_or(LineTerminator::Arrow);
-        self.interaction_pull_line_style.terminator = Self::terminator_from_setting_value(
-            state.interaction_pull_line_terminator.as_str(),
-        )
-        .unwrap_or(LineTerminator::Arrow);
-        self.interaction_push_line_style.terminator = Self::terminator_from_setting_value(
-            state.interaction_push_line_terminator.as_str(),
-        )
-        .unwrap_or(LineTerminator::FilledArrow);
+        self.interaction_pull_line_style.terminator =
+            Self::terminator_from_setting_value(state.interaction_pull_line_terminator.as_str())
+                .unwrap_or(LineTerminator::Arrow);
+        self.interaction_push_line_style.terminator =
+            Self::terminator_from_setting_value(state.interaction_push_line_terminator.as_str())
+                .unwrap_or(LineTerminator::FilledArrow);
         self.interaction_bidirectional_line_style.terminator = Self::terminator_from_setting_value(
             state.interaction_bidirectional_line_terminator.as_str(),
         )
         .unwrap_or(LineTerminator::Arrow);
 
-        self.interaction_standard_line_style.pattern = Self::pattern_from_setting_value(
-            state.interaction_standard_line_pattern.as_str(),
-        )
-        .unwrap_or(LinePattern::Solid);
-        self.interaction_pull_line_style.pattern = Self::pattern_from_setting_value(
-            state.interaction_pull_line_pattern.as_str(),
-        )
-        .unwrap_or(LinePattern::Solid);
-        self.interaction_push_line_style.pattern = Self::pattern_from_setting_value(
-            state.interaction_push_line_pattern.as_str(),
-        )
-        .unwrap_or(LinePattern::Solid);
-        self.interaction_bidirectional_line_style.pattern = Self::pattern_from_setting_value(
-            state.interaction_bidirectional_line_pattern.as_str(),
-        )
-        .unwrap_or(LinePattern::Solid);
+        self.interaction_standard_line_style.pattern =
+            Self::pattern_from_setting_value(state.interaction_standard_line_pattern.as_str())
+                .unwrap_or(LinePattern::Solid);
+        self.interaction_pull_line_style.pattern =
+            Self::pattern_from_setting_value(state.interaction_pull_line_pattern.as_str())
+                .unwrap_or(LinePattern::Solid);
+        self.interaction_push_line_style.pattern =
+            Self::pattern_from_setting_value(state.interaction_push_line_pattern.as_str())
+                .unwrap_or(LinePattern::Solid);
+        self.interaction_bidirectional_line_style.pattern =
+            Self::pattern_from_setting_value(state.interaction_bidirectional_line_pattern.as_str())
+                .unwrap_or(LinePattern::Solid);
 
         self.interaction_standard_line_style.width = self.interaction_line_style.width;
         self.interaction_pull_line_style.width = self.interaction_line_style.width;
         self.interaction_push_line_style.width = self.interaction_line_style.width;
         self.interaction_bidirectional_line_style.width = self.interaction_line_style.width;
 
-        self.line_layer_depth = Self::line_layer_depth_from_setting_value(state.line_layer_depth.as_str())
-            .unwrap_or(LineLayerDepth::BehindCards);
-        self.line_layer_order = Self::line_layer_order_from_setting_value(state.line_layer_order.as_str())
-            .unwrap_or(LineLayerOrder::ParentThenInteraction);
+        self.line_layer_depth =
+            Self::line_layer_depth_from_setting_value(state.line_layer_depth.as_str())
+                .unwrap_or(LineLayerDepth::BehindCards);
+        self.line_layer_order =
+            Self::line_layer_order_from_setting_value(state.line_layer_order.as_str())
+                .unwrap_or(LineLayerOrder::ParentThenInteraction);
 
         if state.dimmed_line_opacity_percent.is_finite() {
             self.dimmed_line_opacity_percent = state.dimmed_line_opacity_percent.clamp(0.0, 100.0);
@@ -2044,8 +2091,10 @@ impl SystemsCatalogApp {
             show_interaction_lines: self.show_interaction_lines,
             parent_line_width: self.parent_line_style.width,
             parent_line_color: Self::color_to_setting_value(self.parent_line_style.color),
-            parent_line_terminator: Self::terminator_to_setting_value(self.parent_line_style.terminator)
-                .to_owned(),
+            parent_line_terminator: Self::terminator_to_setting_value(
+                self.parent_line_style.terminator,
+            )
+            .to_owned(),
             parent_line_pattern: Self::pattern_to_setting_value(self.parent_line_style.pattern)
                 .to_owned(),
             interaction_line_width: self.interaction_line_style.width,
@@ -2054,8 +2103,10 @@ impl SystemsCatalogApp {
                 self.interaction_line_style.terminator,
             )
             .to_owned(),
-            interaction_line_pattern: Self::pattern_to_setting_value(self.interaction_line_style.pattern)
-                .to_owned(),
+            interaction_line_pattern: Self::pattern_to_setting_value(
+                self.interaction_line_style.pattern,
+            )
+            .to_owned(),
             interaction_standard_line_color: Self::color_to_setting_value(
                 self.interaction_standard_line_style.color,
             ),
@@ -2100,8 +2151,10 @@ impl SystemsCatalogApp {
                 self.interaction_bidirectional_line_style.pattern,
             )
             .to_owned(),
-            line_layer_depth: Self::line_layer_depth_to_setting_value(self.line_layer_depth).to_owned(),
-            line_layer_order: Self::line_layer_order_to_setting_value(self.line_layer_order).to_owned(),
+            line_layer_depth: Self::line_layer_depth_to_setting_value(self.line_layer_depth)
+                .to_owned(),
+            line_layer_order: Self::line_layer_order_to_setting_value(self.line_layer_order)
+                .to_owned(),
             dimmed_line_opacity_percent: self.dimmed_line_opacity_percent,
             selected_line_brightness_percent: self.selected_line_brightness_percent,
             show_tech_border_colors: self.show_tech_border_colors,
@@ -2569,7 +2622,9 @@ impl SystemsCatalogApp {
             self.systems_using_selected_catalog_tech = self
                 .system_tech_ids_by_system
                 .iter()
-                .filter_map(|(system_id, tech_ids)| tech_ids.contains(&tech_id).then_some(*system_id))
+                .filter_map(|(system_id, tech_ids)| {
+                    tech_ids.contains(&tech_id).then_some(*system_id)
+                })
                 .collect();
         }
     }
@@ -2664,7 +2719,9 @@ impl SystemsCatalogApp {
         for descendant_id in descendant_ids {
             if let Some(tech_ids) = self.system_tech_ids_by_system.get(&descendant_id) {
                 for tech_id in tech_ids {
-                    if let Some(technology) = self.tech_catalog.iter().find(|tech| tech.id == *tech_id) {
+                    if let Some(technology) =
+                        self.tech_catalog.iter().find(|tech| tech.id == *tech_id)
+                    {
                         names.insert(technology.name.clone());
                     }
                 }
@@ -3170,17 +3227,18 @@ impl SystemsCatalogApp {
     fn persist_map_position(&mut self, system_id: i64, position: Pos2) {
         // Find the entity file path for this system
         let entity_refs = self.store.entity_refs().to_vec();
-        let file_path = entity_refs
-            .iter()
-            .find_map(|e| {
-                self.store
-                    .load_entity(&e.file_path)
-                    .ok()
-                    .and_then(|entity| (entity.id == system_id).then(|| e.file_path.clone()))
-            });
+        let file_path = entity_refs.iter().find_map(|e| {
+            self.store
+                .load_entity(&e.file_path)
+                .ok()
+                .and_then(|entity| (entity.id == system_id).then(|| e.file_path.clone()))
+        });
 
         if let Some(file_path) = file_path {
-            if let Err(error) = self.store.update_entity_position(&file_path, position.x, position.y) {
+            if let Err(error) = self
+                .store
+                .update_entity_position(&file_path, position.x, position.y)
+            {
                 self.status_message = format!("Failed to persist map position: {error}");
             } else {
                 self.mark_system_as_dirty(system_id);
@@ -3192,7 +3250,7 @@ impl SystemsCatalogApp {
 
     fn reset_map_layout(&mut self) {
         self.push_map_undo_snapshot();
-        
+
         let mut updates: Vec<(String, f32, f32)> = Vec::new();
         let entity_refs = self.store.entity_refs().to_vec();
         for (system_id, position) in self.map_positions.clone() {

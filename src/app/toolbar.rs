@@ -4,8 +4,8 @@ use eframe::egui::{self, Align, Layout, RichText, Vec2};
 use rfd::FileDialog;
 
 use crate::app::{
-    AppModal, SidebarTab, SystemsCatalogApp, MAP_MAX_ZOOM, MAP_MIN_ZOOM, MAP_WORLD_MAX_SIZE,
-    MAP_WORLD_MIN_SIZE,
+    AppModal, SidebarTab, SystemsCatalogApp, UpdateCheckState, MAP_MAX_ZOOM, MAP_MIN_ZOOM,
+    MAP_WORLD_MAX_SIZE, MAP_WORLD_MIN_SIZE,
 };
 
 impl SystemsCatalogApp {
@@ -334,6 +334,71 @@ impl SystemsCatalogApp {
                 }
 
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if let UpdateCheckState::UpdateAvailable(update) =
+                        self.update_check_state.clone()
+                    {
+                        let label = format!("Update {}", update.version);
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new(label)
+                                        .small()
+                                        .color(egui::Color32::from_rgb(255, 245, 208)),
+                                )
+                                .fill(egui::Color32::from_rgb(186, 97, 32))
+                                .min_size(Vec2::new(88.0, 22.0)),
+                            )
+                            .on_hover_text(format!("Install release {}", update.tag_name))
+                            .clicked()
+                        {
+                            self.confirm_and_start_update_install();
+                        }
+
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new("Release")
+                                        .small()
+                                        .color(egui::Color32::from_rgb(214, 226, 255)),
+                                )
+                                .fill(egui::Color32::from_rgb(52, 78, 130))
+                                .min_size(Vec2::new(66.0, 22.0)),
+                            )
+                            .clicked()
+                        {
+                            self.open_update_release_page();
+                        }
+
+                        ui.separator();
+                    }
+
+                    if matches!(self.update_check_state, UpdateCheckState::Checking) {
+                        ui.label(
+                            RichText::new("Checking updates...")
+                                .small()
+                                .color(egui::Color32::from_rgb(194, 204, 224)),
+                        );
+                        ui.separator();
+                    }
+
+                    if matches!(self.update_check_state, UpdateCheckState::Applying) {
+                        ui.label(
+                            RichText::new("Applying update...")
+                                .small()
+                                .color(egui::Color32::from_rgb(255, 230, 194)),
+                        );
+                        ui.separator();
+                    }
+
+                    if let UpdateCheckState::Error(message) = &self.update_check_state {
+                        ui.label(
+                            RichText::new(format!("Update check failed: {message}"))
+                                .small()
+                                .color(egui::Color32::from_rgb(240, 162, 162)),
+                        );
+                        ui.separator();
+                    }
+
                     let selected_recent_path = self
                         .recent_catalog_paths
                         .iter()

@@ -4,13 +4,15 @@ use std::process::Command;
 
 use eframe::egui::{Pos2, Rect};
 
-use crate::app::{CopiedSystemEntry, InteractionKind, SystemsCatalogApp, MAP_GRID_SPACING, MAP_NODE_SIZE};
+use crate::app::{
+    CopiedSystemEntry, InteractionKind, SystemsCatalogApp, MAP_GRID_SPACING, MAP_NODE_SIZE,
+};
 use crate::models::{DatabaseColumnInput, TechItem, ZoneRecord};
 use crate::plugins::{parse_llm_detailed_import_file, plugin_by_name};
 use crate::project_store::{
     filesystem_project_has_manifest, load_filesystem_project_manifest, DatabaseColumnFile,
-    InteractionFile, ProjectFile, ProjectSettings, ProjectTechItem,
-    ProjectZone, ProjectZoneOffset, SystemFile, SystemNoteFile,
+    InteractionFile, ProjectFile, ProjectSettings, ProjectTechItem, ProjectZone, ProjectZoneOffset,
+    SystemFile, SystemNoteFile,
 };
 
 impl SystemsCatalogApp {
@@ -128,22 +130,23 @@ impl SystemsCatalogApp {
             .systems
             .iter()
             .filter(|candidate| {
-                candidate.parent_id == Some(owner_system_id) && !Self::is_internal_step_system(candidate)
+                candidate.parent_id == Some(owner_system_id)
+                    && !Self::is_internal_step_system(candidate)
             })
             .collect::<Vec<_>>();
 
         // Keep conversion order deterministic and user-meaningful: map layout top-to-bottom,
         // then left-to-right when positions exist, otherwise fallback to stable id ordering.
-        children.sort_by(|left, right| {
-            match (left.map_y, right.map_y, left.map_x, right.map_x) {
+        children.sort_by(
+            |left, right| match (left.map_y, right.map_y, left.map_x, right.map_x) {
                 (Some(ly), Some(ry), Some(lx), Some(rx)) => ly
                     .partial_cmp(&ry)
                     .unwrap_or(std::cmp::Ordering::Equal)
                     .then_with(|| lx.partial_cmp(&rx).unwrap_or(std::cmp::Ordering::Equal))
                     .then_with(|| left.id.cmp(&right.id)),
                 _ => left.id.cmp(&right.id),
-            }
-        });
+            },
+        );
 
         let mut seen = HashSet::new();
         let mut names = Vec::new();
@@ -231,7 +234,8 @@ impl SystemsCatalogApp {
             .systems
             .iter()
             .filter(|candidate| {
-                candidate.parent_id == Some(owner_system_id) && !Self::is_internal_step_system(candidate)
+                candidate.parent_id == Some(owner_system_id)
+                    && !Self::is_internal_step_system(candidate)
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -266,7 +270,8 @@ impl SystemsCatalogApp {
                 "step_internal",
                 None,
             )?;
-            self.store.replace_database_columns_for_system(child.id, &[])?;
+            self.store
+                .replace_database_columns_for_system(child.id, &[])?;
             self.mark_system_as_dirty(child.id);
             step_names.push(child_step_name);
         }
@@ -286,7 +291,13 @@ impl SystemsCatalogApp {
             .trim()
             .to_ascii_lowercase()
             .chars()
-            .map(|character| if character.is_ascii_alphanumeric() { character } else { '_' })
+            .map(|character| {
+                if character.is_ascii_alphanumeric() {
+                    character
+                } else {
+                    '_'
+                }
+            })
             .collect::<String>();
         while slug.contains("__") {
             slug = slug.replace("__", "_");
@@ -294,7 +305,11 @@ impl SystemsCatalogApp {
         slug.trim_matches('_').to_owned()
     }
 
-    fn next_available_internal_step_system_name(&self, owner_system_id: i64, step_name: &str) -> String {
+    fn next_available_internal_step_system_name(
+        &self,
+        owner_system_id: i64,
+        step_name: &str,
+    ) -> String {
         let slug = Self::sanitize_step_slug(step_name);
         let base = if slug.is_empty() {
             format!("__step__{owner_system_id}")
@@ -333,7 +348,8 @@ impl SystemsCatalogApp {
             return Ok(existing.id);
         }
 
-        let internal_name = self.next_available_internal_step_system_name(owner_system_id, normalized_step);
+        let internal_name =
+            self.next_available_internal_step_system_name(owner_system_id, normalized_step);
         let new_id = self.store.create_system(
             internal_name.as_str(),
             normalized_step,
@@ -398,11 +414,18 @@ impl SystemsCatalogApp {
         system_id: i64,
         endpoint_reference: Option<&str>,
     ) -> anyhow::Result<i64> {
-        let Some(reference) = endpoint_reference.map(str::trim).filter(|value| !value.is_empty()) else {
+        let Some(reference) = endpoint_reference
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
             return Ok(system_id);
         };
 
-        let Some(system) = self.systems.iter().find(|candidate| candidate.id == system_id) else {
+        let Some(system) = self
+            .systems
+            .iter()
+            .find(|candidate| candidate.id == system_id)
+        else {
             return Ok(system_id);
         };
 
@@ -508,7 +531,8 @@ impl SystemsCatalogApp {
                 .iter()
                 .any(|system_id| !self.non_internal_child_step_names(*system_id).is_empty());
             if requires_confirmation {
-                self.pending_step_processor_conversion_target_type = Some(normalized_target.clone());
+                self.pending_step_processor_conversion_target_type =
+                    Some(normalized_target.clone());
                 self.pending_step_processor_conversion_keep_steps_as_systems = false;
                 self.pending_step_processor_conversion_single_details = false;
                 self.open_modal(crate::app::AppModal::StepProcessorConversionConfirm);
@@ -545,9 +569,8 @@ impl SystemsCatalogApp {
                     None
                 };
 
-                let converting_to_step_processor =
-                    normalized_target == "step_processor"
-                        && Self::normalize_system_type(system.system_type.as_str()) != "step_processor";
+                let converting_to_step_processor = normalized_target == "step_processor"
+                    && Self::normalize_system_type(system.system_type.as_str()) != "step_processor";
 
                 let child_step_names = if converting_to_step_processor {
                     self.non_internal_child_step_names(system.id)
@@ -567,11 +590,10 @@ impl SystemsCatalogApp {
 
                 let desired_steps = if target_inputs.can_select_database_columns {
                     let mut columns = Self::database_column_records_to_inputs(
-                        self
-                        .database_columns_by_system
-                        .get(&system.id)
-                        .cloned()
-                        .unwrap_or_default(),
+                        self.database_columns_by_system
+                            .get(&system.id)
+                            .cloned()
+                            .unwrap_or_default(),
                     );
                     if normalized_target == "step_processor" {
                         columns = Self::merge_step_names_into_columns(columns, &child_step_names);
@@ -616,8 +638,7 @@ impl SystemsCatalogApp {
                 }
                 self.status_message = format!(
                     "Converted {} system(s) to {}",
-                    converted_count,
-                    normalized_target
+                    converted_count, normalized_target
                 );
             }
             Err(error) => {
@@ -682,7 +703,8 @@ impl SystemsCatalogApp {
                 continue;
             }
 
-            let Some(system_id) = Self::system_id_from_relative_path(effective_path.as_str()) else {
+            let Some(system_id) = Self::system_id_from_relative_path(effective_path.as_str())
+            else {
                 return None;
             };
 
@@ -787,7 +809,8 @@ impl SystemsCatalogApp {
 
     pub(super) fn enable_version_control(&mut self) {
         if !Self::is_filesystem_project_path(self.current_catalog_path.as_str()) {
-            self.status_message = "Version control is only available for filesystem projects".to_owned();
+            self.status_message =
+                "Version control is only available for filesystem projects".to_owned();
             return;
         }
 
@@ -868,7 +891,8 @@ impl SystemsCatalogApp {
         if !Self::git_is_repo(&root) {
             self.git_repo_detect_path = root_text.to_owned();
             self.git_repo_detected_for_path = Some(false);
-            self.status_message = "No git repository found. Enable Version Control first".to_owned();
+            self.status_message =
+                "No git repository found. Enable Version Control first".to_owned();
             return;
         }
         self.git_repo_detect_path = root_text.to_owned();
@@ -932,7 +956,8 @@ impl SystemsCatalogApp {
         if !Self::git_is_repo(&root) {
             self.git_repo_detect_path = root_text.to_owned();
             self.git_repo_detected_for_path = Some(false);
-            self.status_message = "No git repository found. Enable Version Control first".to_owned();
+            self.status_message =
+                "No git repository found. Enable Version Control first".to_owned();
             return;
         }
         self.git_repo_detect_path = root_text.to_owned();
@@ -970,8 +995,10 @@ impl SystemsCatalogApp {
 
         match result {
             Ok(_) => {
-                self.status_message =
-                    format!("Rollback complete ({} changed system file(s) restored)", changed_count);
+                self.status_message = format!(
+                    "Rollback complete ({} changed system file(s) restored)",
+                    changed_count
+                );
             }
             Err(error) => {
                 self.status_message = format!("Rollback failed: {error}");
@@ -1005,7 +1032,11 @@ impl SystemsCatalogApp {
         }
     }
 
-    fn import_from_plugin_path(&mut self, plugin_name: &str, input_path: &Path) -> anyhow::Result<usize> {
+    fn import_from_plugin_path(
+        &mut self,
+        plugin_name: &str,
+        input_path: &Path,
+    ) -> anyhow::Result<usize> {
         let Some(plugin) = plugin_by_name(plugin_name) else {
             return Err(anyhow::anyhow!("Unknown plugin: {}", plugin_name));
         };
@@ -1189,7 +1220,10 @@ impl SystemsCatalogApp {
             return (normalized, None, String::new());
         }
 
-        let leaf = segments.last().map(|segment| (*segment).to_owned()).unwrap_or_default();
+        let leaf = segments
+            .last()
+            .map(|segment| (*segment).to_owned())
+            .unwrap_or_default();
         let schema = if segments.len() >= 2 {
             Some(segments[0].to_owned())
         } else {
@@ -1314,8 +1348,10 @@ impl SystemsCatalogApp {
                 )?;
 
                 let referenced_columns = self.referenced_columns_for_system(existing.id);
-                let merged_columns =
-                    Self::merge_ddl_columns_preserving_references(draft.database_columns, &referenced_columns);
+                let merged_columns = Self::merge_ddl_columns_preserving_references(
+                    draft.database_columns,
+                    &referenced_columns,
+                );
 
                 self.store
                     .replace_database_columns_for_system(existing.id, &merged_columns)?;
@@ -1434,7 +1470,11 @@ impl SystemsCatalogApp {
             let targets = vec![None; drafts.len()];
             let (created_count, updated_count) =
                 self.apply_ddl_mapping(drafts, targets, definition.display_name)?;
-            Ok((definition.display_name.to_owned(), created_count, updated_count))
+            Ok((
+                definition.display_name.to_owned(),
+                created_count,
+                updated_count,
+            ))
         })();
 
         match result {
@@ -1619,8 +1659,8 @@ impl SystemsCatalogApp {
                     .unwrap_or("Imported Systems")
                     .to_owned();
                 self.open_modal(crate::app::AppModal::LlmDetailedImport);
-                self.status_message = "LLM detailed import ready; provide root name and apply"
-                    .to_owned();
+                self.status_message =
+                    "LLM detailed import ready; provide root name and apply".to_owned();
             }
             Err(error) => {
                 self.status_message = format!("LLM Detailed Import failed: {error}");
@@ -1639,19 +1679,13 @@ impl SystemsCatalogApp {
     }
 
     fn place_tree_node_position(&mut self, system_id: i64, desired: Pos2) -> Pos2 {
-        let mut candidate = self.clamp_node_position(
-            eframe::egui::Rect::NOTHING,
-            desired,
-            MAP_NODE_SIZE,
-        );
+        let mut candidate =
+            self.clamp_node_position(eframe::egui::Rect::NOTHING, desired, MAP_NODE_SIZE);
         let mut attempts = 0;
         while self.spawn_position_overlaps(candidate) && attempts < 250 {
             candidate.y += MAP_GRID_SPACING;
-            candidate = self.clamp_node_position(
-                eframe::egui::Rect::NOTHING,
-                candidate,
-                MAP_NODE_SIZE,
-            );
+            candidate =
+                self.clamp_node_position(eframe::egui::Rect::NOTHING, candidate, MAP_NODE_SIZE);
             attempts += 1;
         }
 
@@ -1660,7 +1694,11 @@ impl SystemsCatalogApp {
         candidate
     }
 
-    fn layout_imported_tree_under_root(&mut self, root_id: i64, imported_system_ids: &HashSet<i64>) {
+    fn layout_imported_tree_under_root(
+        &mut self,
+        root_id: i64,
+        imported_system_ids: &HashSet<i64>,
+    ) {
         if imported_system_ids.is_empty() {
             return;
         }
@@ -1682,7 +1720,10 @@ impl SystemsCatalogApp {
             };
 
             if imported_system_ids.contains(&parent_id) {
-                children_by_parent.entry(parent_id).or_default().push(system.id);
+                children_by_parent
+                    .entry(parent_id)
+                    .or_default()
+                    .push(system.id);
             }
         }
 
@@ -1738,7 +1779,10 @@ impl SystemsCatalogApp {
             };
 
             if subtree_ids.contains(&parent_id) {
-                children_by_parent.entry(parent_id).or_default().push(system.id);
+                children_by_parent
+                    .entry(parent_id)
+                    .or_default()
+                    .push(system.id);
             }
         }
 
@@ -1878,9 +1922,13 @@ impl SystemsCatalogApp {
         let interactions = std::mem::take(&mut self.pending_llm_detailed_interaction_drafts);
 
         let result = (|| -> anyhow::Result<(usize, usize)> {
-            let root_id = self
-                .store
-                .create_system(root_name.as_str(), "LLM detailed import root", None, "service", None)?;
+            let root_id = self.store.create_system(
+                root_name.as_str(),
+                "LLM detailed import root",
+                None,
+                "service",
+                None,
+            )?;
             self.mark_system_as_new(root_id);
 
             let mut created_ids_by_key = HashMap::<String, i64>::new();
@@ -1927,13 +1975,20 @@ impl SystemsCatalogApp {
                 pending = next_pending;
             }
 
-            let mut aggregated = HashMap::<(i64, i64), (crate::app::InteractionKind, String, String)>::new();
+            let mut aggregated =
+                HashMap::<(i64, i64), (crate::app::InteractionKind, String, String)>::new();
 
             for interaction in interactions {
-                let Some(source_id) = created_ids_by_key.get(interaction.source_key.as_str()).copied() else {
+                let Some(source_id) = created_ids_by_key
+                    .get(interaction.source_key.as_str())
+                    .copied()
+                else {
                     continue;
                 };
-                let Some(target_id) = created_ids_by_key.get(interaction.target_key.as_str()).copied() else {
+                let Some(target_id) = created_ids_by_key
+                    .get(interaction.target_key.as_str())
+                    .copied()
+                else {
                     continue;
                 };
                 if source_id == target_id {
@@ -1947,13 +2002,9 @@ impl SystemsCatalogApp {
                     (target_id, source_id)
                 };
 
-                let entry = aggregated.entry(key).or_insert_with(|| {
-                    (
-                        kind,
-                        interaction.label.clone(),
-                        interaction.note.clone(),
-                    )
-                });
+                let entry = aggregated
+                    .entry(key)
+                    .or_insert_with(|| (kind, interaction.label.clone(), interaction.note.clone()));
 
                 let existing_kind = entry.0;
                 entry.0 = match (existing_kind, kind) {
@@ -1992,7 +2043,9 @@ impl SystemsCatalogApp {
                         .store
                         .list_links()?
                         .into_iter()
-                        .find(|link| link.source_system_id == source_id && link.target_system_id == target_id)
+                        .find(|link| {
+                            link.source_system_id == source_id && link.target_system_id == target_id
+                        })
                         .map(|link| link.id)
                     {
                         self.store.update_link_details(
@@ -2061,7 +2114,9 @@ impl SystemsCatalogApp {
         for character in value.chars() {
             if character.is_ascii_alphanumeric() {
                 slug.push(character.to_ascii_lowercase());
-            } else if (character == ' ' || character == '-' || character == '_') && !slug.ends_with('_') {
+            } else if (character == ' ' || character == '-' || character == '_')
+                && !slug.ends_with('_')
+            {
                 slug.push('_');
             }
         }
@@ -2102,7 +2157,10 @@ impl SystemsCatalogApp {
             .unwrap_or_else(|| "root".to_owned());
 
         let system_slug = short_slug(system.name.as_str());
-        format!("systems/{}_{}__{}.json", parent_prefix, system_slug, system.id)
+        format!(
+            "systems/{}_{}__{}.json",
+            parent_prefix, system_slug, system.id
+        )
     }
 
     fn existing_project_system_paths(root: &Path) -> Vec<String> {
@@ -2145,7 +2203,10 @@ impl SystemsCatalogApp {
         previous_paths: &[String],
         current_paths: &[String],
     ) -> anyhow::Result<()> {
-        let current_set = current_paths.iter().map(String::as_str).collect::<HashSet<_>>();
+        let current_set = current_paths
+            .iter()
+            .map(String::as_str)
+            .collect::<HashSet<_>>();
 
         for relative_path in previous_paths {
             if !relative_path.starts_with("systems/") {
@@ -2155,7 +2216,8 @@ impl SystemsCatalogApp {
                 continue;
             }
 
-            let absolute_path = root.join(relative_path.replace('/', std::path::MAIN_SEPARATOR_STR));
+            let absolute_path =
+                root.join(relative_path.replace('/', std::path::MAIN_SEPARATOR_STR));
             if !absolute_path.is_file() {
                 continue;
             }
@@ -2191,7 +2253,8 @@ impl SystemsCatalogApp {
         let mut systems_paths = Vec::new();
         for system in &self.systems {
             let relative_path = self.system_relative_file_path(system.id, &system_by_id);
-            let absolute_path = root.join(relative_path.replace('/', std::path::MAIN_SEPARATOR_STR));
+            let absolute_path =
+                root.join(relative_path.replace('/', std::path::MAIN_SEPARATOR_STR));
             if let Some(parent) = absolute_path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
@@ -2372,11 +2435,11 @@ impl SystemsCatalogApp {
 
         let project_changed_non_system = force_full_sync
             || (use_git_change_filter
-            && git_changed_paths.iter().any(|path| {
-                path.eq_ignore_ascii_case("Project.json")
-                    || path.eq_ignore_ascii_case("project.json")
-                    || path.starts_with("interactions/")
-            }));
+                && git_changed_paths.iter().any(|path| {
+                    path.eq_ignore_ascii_case("Project.json")
+                        || path.eq_ignore_ascii_case("project.json")
+                        || path.starts_with("interactions/")
+                }));
 
         let path_by_system_id = project
             .systems_paths
@@ -2421,19 +2484,21 @@ impl SystemsCatalogApp {
             let Some(relative_path) = path_by_system_id.get(system_id) else {
                 continue;
             };
-            let absolute_path = root.join(relative_path.replace('/', std::path::MAIN_SEPARATOR_STR));
+            let absolute_path =
+                root.join(relative_path.replace('/', std::path::MAIN_SEPARATOR_STR));
             let file_text = std::fs::read_to_string(&absolute_path)?;
             let mut system: SystemFile = serde_json::from_str(file_text.as_str())?;
             self.normalize_loaded_system_file_for_entity(&mut system);
-            
+
             // Add entity ref to store
-            self.store.upsert_entity_ref(crate::project_store::LightweightEntityRef::new(
-                system.system_type.as_str(),
-                relative_path.clone(),
-                system.map_x.unwrap_or(0.0),
-                system.map_y.unwrap_or(0.0),
-            ));
-            
+            self.store
+                .upsert_entity_ref(crate::project_store::LightweightEntityRef::new(
+                    system.system_type.as_str(),
+                    relative_path.clone(),
+                    system.map_x.unwrap_or(0.0),
+                    system.map_y.unwrap_or(0.0),
+                ));
+
             systems.push(system);
         }
 
@@ -2460,7 +2525,11 @@ impl SystemsCatalogApp {
                         system.system_type.as_str(),
                         system.route_methods.as_deref(),
                     )?;
-                    self.store.update_system_position_optional(system.id, system.map_x, system.map_y)?;
+                    self.store.update_system_position_optional(
+                        system.id,
+                        system.map_x,
+                        system.map_y,
+                    )?;
                     self.store.update_system_line_color_override(
                         system.id,
                         system.line_color_override.as_deref(),
@@ -2485,9 +2554,12 @@ impl SystemsCatalogApp {
         }
 
         for system in &systems {
-            let current_parent = existing_by_id.get(&system.id).and_then(|existing| existing.parent_id);
+            let current_parent = existing_by_id
+                .get(&system.id)
+                .and_then(|existing| existing.parent_id);
             if inserted_ids.contains(&system.id) || current_parent != system.parent_id {
-                self.store.update_system_parent(system.id, system.parent_id)?;
+                self.store
+                    .update_system_parent(system.id, system.parent_id)?;
             }
         }
 
@@ -2506,15 +2578,17 @@ impl SystemsCatalogApp {
 
             // Add all systems to the store's entity references
             for relative_path in &project.systems_paths {
-                if let Some(system) = systems.iter().find(|s| {
-                    relative_path.contains(&format!("__{}.json", s.id))
-                }) {
-                    self.store.upsert_entity_ref(crate::project_store::LightweightEntityRef::new(
-                        system.system_type.as_str(),
-                        relative_path.clone(),
-                        system.map_x.unwrap_or(0.0),
-                        system.map_y.unwrap_or(0.0),
-                    ));
+                if let Some(system) = systems
+                    .iter()
+                    .find(|s| relative_path.contains(&format!("__{}.json", s.id)))
+                {
+                    self.store
+                        .upsert_entity_ref(crate::project_store::LightweightEntityRef::new(
+                            system.system_type.as_str(),
+                            relative_path.clone(),
+                            system.map_x.unwrap_or(0.0),
+                            system.map_y.unwrap_or(0.0),
+                        ));
                 }
             }
 
@@ -2541,13 +2615,15 @@ impl SystemsCatalogApp {
                     })
                     .collect::<Vec<_>>();
 
-                self.store.replace_database_columns_for_system(system.id, &columns)?;
+                self.store
+                    .replace_database_columns_for_system(system.id, &columns)?;
                 self.store
                     .replace_system_tech_assignments(system.id, system.tech_ids.as_slice())?;
             }
 
             for relative_path in &project.interactions_paths {
-                let absolute_path = root.join(relative_path.replace('/', std::path::MAIN_SEPARATOR_STR));
+                let absolute_path =
+                    root.join(relative_path.replace('/', std::path::MAIN_SEPARATOR_STR));
                 let file_text = std::fs::read_to_string(&absolute_path)?;
                 let interaction: InteractionFile = serde_json::from_str(file_text.as_str())?;
                 self.store.insert_link_with_id(
@@ -2583,7 +2659,8 @@ impl SystemsCatalogApp {
                         constraints: column.constraints.clone(),
                     })
                     .collect::<Vec<_>>();
-                self.store.replace_database_columns_for_system(system.id, &columns)?;
+                self.store
+                    .replace_database_columns_for_system(system.id, &columns)?;
                 self.store
                     .replace_system_tech_assignments(system.id, system.tech_ids.as_slice())?;
             }
@@ -2681,32 +2758,40 @@ impl SystemsCatalogApp {
 
         let mut created_any = false;
         for method in ordered_methods {
-            let already_exists = self
-                .systems
-                .iter()
-                .any(|system| system.parent_id == Some(route_system_id) && system.name.eq_ignore_ascii_case(method.as_str()));
+            let already_exists = self.systems.iter().any(|system| {
+                system.parent_id == Some(route_system_id)
+                    && system.name.eq_ignore_ascii_case(method.as_str())
+            });
             if already_exists {
                 continue;
             }
 
-            let child_id = self
-                .store
-                .create_system(method.as_str(), "", Some(route_system_id), "service", None)?;
+            let child_id = self.store.create_system(
+                method.as_str(),
+                "",
+                Some(route_system_id),
+                "service",
+                None,
+            )?;
             self.mark_system_as_new(child_id);
 
             let base_x = route_position.x + (MAP_GRID_SPACING * 2.0);
-            let mut candidate = eframe::egui::Pos2::new(base_x, route_position.y + MAP_GRID_SPACING);
+            let mut candidate =
+                eframe::egui::Pos2::new(base_x, route_position.y + MAP_GRID_SPACING);
 
             loop {
                 let candidate_rect = eframe::egui::Rect::from_min_size(candidate, MAP_NODE_SIZE);
-                let blocked = existing_rects.iter().any(|rect| rect.intersects(candidate_rect));
+                let blocked = existing_rects
+                    .iter()
+                    .any(|rect| rect.intersects(candidate_rect));
                 if !blocked {
                     break;
                 }
                 candidate.y += MAP_GRID_SPACING;
             }
 
-            let clamped = self.clamp_node_position(eframe::egui::Rect::NOTHING, candidate, MAP_NODE_SIZE);
+            let clamped =
+                self.clamp_node_position(eframe::egui::Rect::NOTHING, candidate, MAP_NODE_SIZE);
             self.map_positions.insert(child_id, clamped);
             self.persist_map_position(child_id, clamped);
             existing_rects.push(eframe::egui::Rect::from_min_size(clamped, MAP_NODE_SIZE));
@@ -2720,17 +2805,10 @@ impl SystemsCatalogApp {
         Ok(())
     }
 
-    pub(super) fn create_zone_from_rect(
-        &mut self,
-        x: f32,
-        y: f32,
-        width: f32,
-        height: f32,
-    ) {
+    pub(super) fn create_zone_from_rect(&mut self, x: f32, y: f32, width: f32, height: f32) {
         let clamped_width = width.max(24.0);
         let clamped_height = height.max(24.0);
-        let parent_zone_id =
-            self.zone_parent_for_rect(x, y, clamped_width, clamped_height, None);
+        let parent_zone_id = self.zone_parent_for_rect(x, y, clamped_width, clamped_height, None);
 
         // Create a temporary zone record to determine representative system
         let temp_zone = crate::models::ZoneRecord {
@@ -3052,10 +3130,13 @@ impl SystemsCatalogApp {
                     }
 
                     let description = Self::unescape_clipboard_field(columns[1]);
-                    let parent_index = columns[2]
-                        .parse::<isize>()
-                        .ok()
-                        .and_then(|index| if index >= 0 { Some(index as usize) } else { None });
+                    let parent_index = columns[2].parse::<isize>().ok().and_then(|index| {
+                        if index >= 0 {
+                            Some(index as usize)
+                        } else {
+                            None
+                        }
+                    });
                     let relative_x = columns[3].parse::<f32>().ok().unwrap_or(0.0);
                     let relative_y = columns[4].parse::<f32>().ok().unwrap_or(0.0);
 
@@ -3132,10 +3213,13 @@ impl SystemsCatalogApp {
                 format!("{base} Copy {attempt}")
             };
 
-            if let Ok(id) = self
-                .store
-                .create_system(candidate.as_str(), description, parent_id, "service", None)
-            {
+            if let Ok(id) = self.store.create_system(
+                candidate.as_str(),
+                description,
+                parent_id,
+                "service",
+                None,
+            ) {
                 self.mark_system_as_new(id);
                 return Ok(id);
             }
@@ -3229,8 +3313,7 @@ impl SystemsCatalogApp {
 
     pub(super) fn paste_copied_systems(&mut self) {
         if self.copied_system_entries.is_empty() {
-            self.status_message =
-                "Paste failed: clipboard is empty (use Ctrl+C first)".to_owned();
+            self.status_message = "Paste failed: clipboard is empty (use Ctrl+C first)".to_owned();
             return;
         }
 
@@ -3394,7 +3477,9 @@ impl SystemsCatalogApp {
         let entity_inputs = self
             .system_entity_for_type(system_type.as_str())
             .selectable_inputs();
-        let entity_key = self.system_entity_for_type(system_type.as_str()).entity_key();
+        let entity_key = self
+            .system_entity_for_type(system_type.as_str())
+            .entity_key();
 
         let route_methods_set_for_spawn = if entity_inputs.can_select_route_methods {
             let mut methods = self.selected_system_route_methods.clone();
@@ -3429,12 +3514,14 @@ impl SystemsCatalogApp {
                     Some((column_name.to_owned(), column_type.to_owned(), constraints))
                 })
                 .enumerate()
-                .map(|(position, (column_name, column_type, constraints))| DatabaseColumnInput {
-                    position: position as i64,
-                    column_name,
-                    column_type,
-                    constraints,
-                })
+                .map(
+                    |(position, (column_name, column_type, constraints))| DatabaseColumnInput {
+                        position: position as i64,
+                        column_name,
+                        column_type,
+                        constraints,
+                    },
+                )
                 .collect::<Vec<_>>()
         } else {
             Vec::new()
@@ -3453,8 +3540,7 @@ impl SystemsCatalogApp {
             self.pending_step_processor_conversion_single_details = true;
             self.open_modal(crate::app::AppModal::StepProcessorConversionConfirm);
             self.status_message =
-                "Choose how existing child systems should be handled before conversion"
-                    .to_owned();
+                "Choose how existing child systems should be handled before conversion".to_owned();
             return;
         }
         if entity_key == "step_processor" {
@@ -3478,7 +3564,8 @@ impl SystemsCatalogApp {
                     self.store
                         .replace_database_columns_for_system(system_id, &database_columns_for_save)
                 } else {
-                    self.store.replace_database_columns_for_system(system_id, &[])
+                    self.store
+                        .replace_database_columns_for_system(system_id, &[])
                 }
             })
             .and_then(|_| {
@@ -3696,7 +3783,8 @@ impl SystemsCatalogApp {
                 self.current_catalog_name = Self::catalog_name_from_path(trimmed);
                 self.pending_catalog_switch_path = None;
                 self.settings_dirty = true;
-                self.status_message = format!("Switched to project '{}'", self.current_catalog_name);
+                self.status_message =
+                    format!("Switched to project '{}'", self.current_catalog_name);
             }
             Err(error) => {
                 self.status_message = format!("Failed to switch project: {error}");
@@ -3727,7 +3815,8 @@ impl SystemsCatalogApp {
         }
 
         let path = if self.new_catalog_directory.trim().is_empty() {
-            let directory_name = Self::catalog_directory_name_from_project_name(project_name.as_str());
+            let directory_name =
+                Self::catalog_directory_name_from_project_name(project_name.as_str());
             target_directory.join(directory_name)
         } else {
             target_directory.clone()
@@ -3844,8 +3933,8 @@ impl SystemsCatalogApp {
             || next_target_system_id != existing_link.target_system_id;
 
         if endpoints_changed && next_source_system_id == next_target_system_id {
-            self.status_message = "Interaction cannot point to the same system on both ends"
-                .to_owned();
+            self.status_message =
+                "Interaction cannot point to the same system on both ends".to_owned();
             return;
         }
 
@@ -3901,8 +3990,8 @@ impl SystemsCatalogApp {
 
             Ok(())
         })()
-            .and_then(|_| self.refresh_systems())
-            .and_then(|_| self.load_selected_data(system_id));
+        .and_then(|_| self.refresh_systems())
+        .and_then(|_| self.load_selected_data(system_id));
 
         match result {
             Ok(_) => {
@@ -3972,7 +4061,8 @@ impl SystemsCatalogApp {
             let transfer_candidates = links
                 .iter()
                 .filter(|link| {
-                    link.source_system_id == source_system_id || link.target_system_id == source_system_id
+                    link.source_system_id == source_system_id
+                        || link.target_system_id == source_system_id
                 })
                 .cloned()
                 .collect::<Vec<_>>();
@@ -4010,10 +4100,16 @@ impl SystemsCatalogApp {
                         existing.kind.as_str(),
                         link.kind.as_str(),
                     );
-                    let merged_label =
-                        Self::merge_interaction_text(existing.label.as_str(), link.label.as_str(), " | ");
-                    let merged_note =
-                        Self::merge_interaction_text(existing.note.as_str(), link.note.as_str(), "\n\n");
+                    let merged_label = Self::merge_interaction_text(
+                        existing.label.as_str(),
+                        link.label.as_str(),
+                        " | ",
+                    );
+                    let merged_note = Self::merge_interaction_text(
+                        existing.note.as_str(),
+                        link.note.as_str(),
+                        "\n\n",
+                    );
 
                     self.store.update_link_details(
                         existing.id,
@@ -4135,7 +4231,12 @@ impl SystemsCatalogApp {
         };
 
         let result = (|| -> anyhow::Result<()> {
-            for system_id in self.systems.iter().map(|system| system.id).collect::<Vec<_>>() {
+            for system_id in self
+                .systems
+                .iter()
+                .map(|system| system.id)
+                .collect::<Vec<_>>()
+            {
                 self.store.remove_tech_from_system(system_id, tech_id)?;
             }
             self.tech_catalog.retain(|tech| tech.id != tech_id);
@@ -4271,6 +4372,7 @@ impl SystemsCatalogApp {
                 self.map_link_drag_from = None;
                 self.map_interaction_drag_from = None;
                 self.map_interaction_drag_from_reference = None;
+                self.map_interaction_drag_active = false;
                 self.selected_map_system_ids.clear();
 
                 if let Some(name) = deleted_name {
@@ -4295,7 +4397,13 @@ impl SystemsCatalogApp {
         let color = self.new_tech_color.map(Self::color_to_setting_value);
         let display_priority = self.new_tech_display_priority;
 
-        let next_tech_id = self.tech_catalog.iter().map(|tech| tech.id).max().unwrap_or(0) + 1;
+        let next_tech_id = self
+            .tech_catalog
+            .iter()
+            .map(|tech| tech.id)
+            .max()
+            .unwrap_or(0)
+            + 1;
         self.tech_catalog.push(TechItem {
             id: next_tech_id,
             name: name.to_owned(),
@@ -4463,7 +4571,8 @@ impl SystemsCatalogApp {
             self.refresh_systems()?;
 
             for created_id in created_ids {
-                if let Some((position, zone_binding)) = self.spawn_position_for_new_system(parent_id)
+                if let Some((position, zone_binding)) =
+                    self.spawn_position_for_new_system(parent_id)
                 {
                     self.map_positions.insert(created_id, position);
                     self.persist_map_position(created_id, position);
@@ -4523,8 +4632,7 @@ impl SystemsCatalogApp {
         match result {
             Ok(_) => {
                 self.mark_system_as_dirty(system_id);
-                self.status_message =
-                    format!("Added technology '{tech_name}' to '{system_name}'");
+                self.status_message = format!("Added technology '{tech_name}' to '{system_name}'");
             }
             Err(error) => {
                 self.status_message = format!("Failed to fast-assign technology: {error}");
@@ -4626,10 +4734,10 @@ impl SystemsCatalogApp {
             .filter(|value| !value.is_empty());
 
         let result = (|| -> anyhow::Result<()> {
-            let effective_source_system_id =
-                self.resolve_interaction_endpoint_system_id(source_id, normalized_source_reference)?;
-            let effective_target_system_id =
-                self.resolve_interaction_endpoint_system_id(target_id, normalized_target_reference)?;
+            let effective_source_system_id = self
+                .resolve_interaction_endpoint_system_id(source_id, normalized_source_reference)?;
+            let effective_target_system_id = self
+                .resolve_interaction_endpoint_system_id(target_id, normalized_target_reference)?;
 
             let mut stored_source_reference = normalized_source_reference.map(ToOwned::to_owned);
             let mut stored_target_reference = normalized_target_reference.map(ToOwned::to_owned);
@@ -4689,8 +4797,8 @@ impl SystemsCatalogApp {
         }
 
         let result = (|| -> anyhow::Result<i64> {
-            let endpoint_system_id =
-                self.resolve_interaction_endpoint_system_id(owner_system_id, Some(trimmed_reference))?;
+            let endpoint_system_id = self
+                .resolve_interaction_endpoint_system_id(owner_system_id, Some(trimmed_reference))?;
             self.load_selected_data(endpoint_system_id)?;
             Ok(endpoint_system_id)
         })();
@@ -4699,6 +4807,7 @@ impl SystemsCatalogApp {
             Ok(endpoint_system_id) => {
                 self.map_interaction_drag_from = None;
                 self.map_interaction_drag_from_reference = None;
+                self.map_interaction_drag_active = false;
                 self.selected_system_id = Some(endpoint_system_id);
                 self.selected_map_system_ids.clear();
                 self.status_message = format!(
@@ -4725,12 +4834,7 @@ impl SystemsCatalogApp {
         kind: InteractionKind,
     ) {
         self.create_link_between_kind_with_references(
-            source_id,
-            target_id,
-            label,
-            kind,
-            None,
-            None,
+            source_id, target_id, label, kind, None, None,
         );
     }
 
@@ -4770,8 +4874,7 @@ impl SystemsCatalogApp {
 
         match result {
             Ok(_) => {
-                self.status_message =
-                    format!("Assigned parent: '{parent_name}' <- '{child_name}'");
+                self.status_message = format!("Assigned parent: '{parent_name}' <- '{child_name}'");
             }
             Err(error) => {
                 self.status_message = format!("Failed to assign parent: {error}");
@@ -4790,7 +4893,8 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system time should be valid")
             .as_nanos();
-        let directory = std::env::temp_dir().join(format!("systems_catalog_actions_{name}_{unique}"));
+        let directory =
+            std::env::temp_dir().join(format!("systems_catalog_actions_{name}_{unique}"));
         std::fs::create_dir_all(&directory).expect("temp test directory should be created");
         directory
     }
@@ -4814,4 +4918,3 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 }
-
