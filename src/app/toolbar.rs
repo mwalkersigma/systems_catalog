@@ -319,6 +319,15 @@ impl SystemsCatalogApp {
                         self.open_modal(AppModal::HelpTroubleshooting);
                         ui.close_menu();
                     }
+
+                    if matches!(self.update_check_state, UpdateCheckState::UpToDate) {
+                        ui.separator();
+                        ui.label(
+                            RichText::new("Up to date")
+                                .small()
+                                .color(egui::Color32::from_rgb(142, 210, 162)),
+                        );
+                    }
                 });
 
                 ui.separator();

@@ -1249,12 +1249,15 @@ impl SystemsCatalogApp {
                 continue;
             };
 
-            let source_peer = target_rect.center();
-            let target_peer = source_rect.center();
+            let (source_edge_peer, target_edge_peer) = self.card_to_card_endpoints(
+                *source_rect,
+                *target_rect,
+                interaction_style.pattern,
+            );
             let Some((_, source_anchor)) = self.interaction_endpoint_anchor_point(
                 interaction.source_system_id,
                 interaction.source_column_name.as_deref(),
-                source_peer,
+                target_edge_peer,
                 interaction_style.pattern,
                 node_rects,
             ) else {
@@ -1263,7 +1266,7 @@ impl SystemsCatalogApp {
             let Some((_, target_anchor)) = self.interaction_endpoint_anchor_point(
                 interaction.target_system_id,
                 interaction.target_column_name.as_deref(),
-                target_peer,
+                source_edge_peer,
                 interaction_style.pattern,
                 node_rects,
             ) else {

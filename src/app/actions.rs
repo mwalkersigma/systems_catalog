@@ -1007,7 +1007,7 @@ impl SystemsCatalogApp {
     }
 
     pub(super) fn maybe_autosave_project(&mut self, now_secs: f64) {
-        const AUTOSAVE_INTERVAL_SECS: f64 = 2.0;
+        const AUTOSAVE_INTERVAL_SECS: f64 = 8.0;
 
         if !self.project_autosave_enabled {
             return;
@@ -2250,6 +2250,13 @@ impl SystemsCatalogApp {
             .map(|system| (system.id, system))
             .collect::<HashMap<_, _>>();
 
+        let changed_system_ids = self
+            .new_system_ids
+            .iter()
+            .copied()
+            .chain(self.dirty_system_ids.iter().copied())
+            .collect::<HashSet<_>>();
+
         let mut systems_paths = Vec::new();
         for system in &self.systems {
             let relative_path = self.system_relative_file_path(system.id, &system_by_id);
@@ -2257,6 +2264,14 @@ impl SystemsCatalogApp {
                 root.join(relative_path.replace('/', std::path::MAIN_SEPARATOR_STR));
             if let Some(parent) = absolute_path.parent() {
                 std::fs::create_dir_all(parent)?;
+            }
+
+            systems_paths.push(relative_path.clone());
+
+            let should_write_system_file = changed_system_ids.contains(&system.id)
+                || !absolute_path.is_file();
+            if !should_write_system_file {
+                continue;
             }
 
             let (map_x, map_y) = self
@@ -2315,7 +2330,6 @@ impl SystemsCatalogApp {
 
             let bytes = serde_json::to_vec_pretty(&system_file)?;
             Self::write_file_if_changed(&absolute_path, &bytes)?;
-            systems_paths.push(relative_path);
         }
 
         if self.manage_system_json_hierarchy {

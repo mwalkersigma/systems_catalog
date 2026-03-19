@@ -63,14 +63,38 @@ impl FileStore {
             .map(ToOwned::to_owned)
     }
 
+    fn absolute_entity_path(&self, file_path: &str) -> PathBuf {
+        self.root
+            .join(file_path.replace('/', std::path::MAIN_SEPARATOR_STR))
+    }
+
+    fn prune_missing_entity_reference(&mut self, file_path: &str) {
+        self.manifest.entities.retain(|entity| entity.file_path != file_path);
+        self.loaded_entities.remove(file_path);
+        self.dirty_entities.remove(file_path);
+        self.manifest_dirty = true;
+    }
+
+    fn load_entity_for_scan(&mut self, file_path: &str) -> Result<Option<&SystemFile>> {
+        let absolute_path = self.absolute_entity_path(file_path);
+        if !absolute_path.is_file() {
+            self.prune_missing_entity_reference(file_path);
+            return Ok(None);
+        }
+
+        self.load_entity(file_path).map(Some)
+    }
+
     fn next_system_id(&mut self) -> Result<i64> {
         let mut max_id = 0i64;
         for entity_ref in self.manifest.entities.clone() {
             if let Some(system_id) = entity_ref.system_id {
                 max_id = max_id.max(system_id);
             } else {
-                let entity = self.load_entity(entity_ref.file_path.as_str())?;
-                max_id = max_id.max(entity.id);
+                let file_path = entity_ref.file_path;
+                if let Some(entity) = self.load_entity_for_scan(file_path.as_str())? {
+                    max_id = max_id.max(entity.id);
+                }
             }
         }
 
@@ -80,8 +104,19 @@ impl FileStore {
     fn entity_file_path_for_system_id(&mut self, system_id: i64) -> Result<String> {
         for entity_ref in self.manifest.entities.clone() {
             let file_path = entity_ref.file_path;
-            if entity_ref.system_id == Some(system_id)
-                || self.load_entity(file_path.as_str())?.id == system_id
+            if entity_ref.system_id == Some(system_id) {
+                if self.absolute_entity_path(file_path.as_str()).is_file() {
+                    return Ok(file_path);
+                }
+
+                self.prune_missing_entity_reference(file_path.as_str());
+                continue;
+            }
+
+            if self
+                .load_entity_for_scan(file_path.as_str())?
+                .map(|entity| entity.id == system_id)
+                .unwrap_or(false)
             {
                 return Ok(file_path);
             }
@@ -102,9 +137,11 @@ impl FileStore {
     fn next_note_id(&mut self) -> Result<i64> {
         let mut max_id = 0i64;
         for entity_ref in self.manifest.entities.clone() {
-            let entity = self.load_entity(entity_ref.file_path.as_str())?;
-            for note in &entity.notes {
-                max_id = max_id.max(note.id);
+            let file_path = entity_ref.file_path;
+            if let Some(entity) = self.load_entity_for_scan(file_path.as_str())? {
+                for note in &entity.notes {
+                    max_id = max_id.max(note.id);
+                }
             }
         }
 
@@ -124,9 +161,10 @@ impl FileStore {
     fn note_location_for_id(&mut self, note_id: i64) -> Result<(String, usize)> {
         for entity_ref in self.manifest.entities.clone() {
             let file_path = entity_ref.file_path;
-            let entity = self.load_entity(file_path.as_str())?;
-            if let Some(index) = entity.notes.iter().position(|note| note.id == note_id) {
-                return Ok((file_path, index));
+            if let Some(entity) = self.load_entity_for_scan(file_path.as_str())? {
+                if let Some(index) = entity.notes.iter().position(|note| note.id == note_id) {
+                    return Ok((file_path, index));
+                }
             }
         }
 
@@ -169,11 +207,20 @@ impl FileStore {
     ) -> Result<crate::project_store::LightweightEntityRef> {
         for entity_ref in self.manifest.entities.clone() {
             if entity_ref.system_id == Some(system_id) {
-                return Ok(entity_ref);
+                if self.absolute_entity_path(entity_ref.file_path.as_str()).is_file() {
+                    return Ok(entity_ref);
+                }
+
+                self.prune_missing_entity_reference(entity_ref.file_path.as_str());
+                continue;
             }
 
             let file_path = entity_ref.file_path.clone();
-            if self.load_entity(file_path.as_str())?.id == system_id {
+            if self
+                .load_entity_for_scan(file_path.as_str())?
+                .map(|entity| entity.id == system_id)
+                .unwrap_or(false)
+            {
                 self.sync_entity_ref_summary(file_path.as_str())?;
                 if let Some(updated) = self
                     .manifest
@@ -704,6 +751,11 @@ impl FileStore {
     pub fn list_systems(&mut self) -> anyhow::Result<Vec<crate::models::SystemRecord>> {
         let mut systems = Vec::new();
         for entity_ref in self.manifest.entities.clone() {
+            if !self.absolute_entity_path(entity_ref.file_path.as_str()).is_file() {
+                self.prune_missing_entity_reference(entity_ref.file_path.as_str());
+                continue;
+            }
+
             if entity_ref.has_cached_summary() {
                 systems.push(crate::models::SystemRecord {
                     id: entity_ref
@@ -723,7 +775,9 @@ impl FileStore {
                 continue;
             }
 
-            let entity = self.load_entity(entity_ref.file_path.as_str())?;
+            let Some(entity) = self.load_entity_for_scan(entity_ref.file_path.as_str())? else {
+                continue;
+            };
             systems.push(crate::models::SystemRecord {
                 id: entity.id,
                 name: entity.name.clone(),
